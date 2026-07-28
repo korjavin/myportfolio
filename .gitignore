@@ -4,3 +4,14 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Generated export, not the source of truth (the Dolt DB is)
+.beads/issues.jsonl
+
+# Agent worktrees — full checkouts of this repo. A stray `git add -A` would
+# otherwise commit an entire copy of the tree per running agent.
+.claude/worktrees/
+
+# Go build output
+/myportfolio
+*.test

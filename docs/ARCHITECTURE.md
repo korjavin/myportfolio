@@ -137,6 +137,32 @@ against them):
   corrupt every downstream gain number. The engine refuses them with an explicit issue rather than
   guessing. Tracked as a real gap for a PP competitor.
 
+### Time conventions — pinned, because every return number depends on them
+
+Settled while building the performance engine. All three are load-bearing; the UI must not re-decide
+them. Full rationale lives in the header of `web/domain/perf.js`.
+
+- **Days are UTC calendar days.** A date is the first 10 characters of a record's `date`, read as a
+  UTC day. All day arithmetic goes through `Date.UTC`; nothing constructs a local-time `Date` or
+  calls `new Date()` with no argument, so no result moves when the machine's timezone does. A string
+  that is not a real calendar day is rejected, never silently rolled forward. The sibling project's
+  entire timezone bug class came from implicit local dates.
+- **A range `[from, to]` is inclusive at both ends.** So the opening valuation is the close of the
+  day *before* `from`, and a transaction dated `from` is inside the range. This is the reading a date
+  filter on the transaction list gives — "2024 performance" contains every 2024 transaction.
+- **Money in at the start of its day, money out at the end**, so every unit of capital is at risk for
+  the whole of each day it is present: `factor = (value(d) + outflow(d)) / (value(d−1) + inflow(d))`.
+  This is the only timing convention that stays defined at both ends of a position's life — "all
+  flows at end of day" divides by zero on the day a position opens, and "all flows at start of day"
+  gives a negative denominator on the day one closes at a profit. Daily closes carry no intraday
+  information, so this is a convention; it is stated rather than buried. Flows are **netted per day**
+  before the formula is applied, so a same-day matched transfer pair cannot dilute the return.
+
+**External vs internal flows**: a flow is external if it crosses the portfolio boundary (`deposit`,
+`removal`). Transfers between the user's own accounts are *not* excluded as internal — `portfolio.js`
+genuinely reports the total dropping while a transfer is in flight, so excluding the flow prints a
+phantom loss. Both directions are regression-tested.
+
 Deferred to post-v1, do not build now: taxonomies/classification trees, rebalancing targets, bonds
 with coupon schedules, options.
 
@@ -303,10 +329,45 @@ Grotesk for UI body), and the domain-neutral primitives — `wg-bottom-nav`, `wg
 
 **Port the enforcement, not just the CSS.** The architecture tests are what make the above survive
 contact with feature work: design-tokens, inline-styles, wg-primitives, chart-theme,
-no-external-fonts-in-html, no-inline-handlers, domain-purity, and sw-precache. A design system
-without its guard tests degrades to suggestions within a month.
+no-external-fonts-in-html, no-inline-handlers. A design system without its guard tests degrades to
+suggestions within a month. (`domain-purity` and `sw-precache` are listed in the original but have
+nothing to bind to until the PWA shell exists — they land with §B6, not here.)
 
-Nav slots for this app: **Dashboard, Holdings, Transactions, Performance, Settings**.
+Nav slots for this app: **Dashboard, Holdings, Transactions, Performance, Settings** — five, so the
+bottom nav is one row and `--wg-bottom-nav-reserved` is 106px, not the sibling's two-row 160px.
+
+### Gain and loss — the one token group the sibling could not supply
+
+The sibling's status vocabulary is severity-shaped (`normal`/`high`/`alert`) because it is a health
+app. A portfolio app's most-repeated visual signal is **gain vs. loss**, on essentially every row,
+tile and chart. Added as semantic triplets aliased onto the existing tag colours so no new hue enters
+the palette: `--wg-{gain,loss,flat}-{bg,fg,border}`. Chart series tokens resolve to the same pair, so
+a negative performance line and a losing holdings row agree by construction.
+
+**Gain/loss is never encoded by colour alone, and this is enforced, not advised.**
+`.wg-delta--gain/--loss/--flat::before` emits ▲/▼/— from CSS, and
+`architecture.wg-primitives.test.js` fails if a glyph is removed — so a screens author cannot forget
+it and a later "cleanup" cannot quietly delete it. `.wg-delta--bare` drops the pill chrome for dense
+table cells but keeps the glyph. Red/green alone is the standard finance-UI accessibility failure and
+it fails for roughly 1 in 12 men; a convention would have decayed, a guard test does not.
+
+### Guard scope is deliberately stricter here than in the sibling
+
+Two guards were widened during the port, and **frontend executors should expect them to bite**:
+
+- **`inline-styles` covers every file and its allowlist is empty.** The sibling narrowed this guard to
+  ~8 files because it had years of pre-reskin inline styles to grandfather in. This codebase has no
+  legacy, so there is nothing to grandfather. Set class names; let CSS resolve values. If you think
+  you need an exception, you almost certainly need a CSS class.
+- **`no-external-fonts` covers every `.html` **and** `.css`**, not just `index.html`, and also asserts
+  that the woff2 files `fonts.css` names actually exist. The narrower version would not have caught
+  an `@import url(https://fonts.googleapis.com/…)` inside a stylesheet — and a guard that only bans
+  the CDN in one file is half a guard.
+
+Legacy colour names (`--bg-color`, `--text-color`, `--hint-color`, `--secondary-bg-color`) are kept
+as *names* but now resolve onto the Wandergeek palette. That let the ported utility blocks carry over
+byte-identical instead of being rewritten. The sibling's Telegram theme-mirror tokens
+(`--tg-theme-*`) are gone — there is no Telegram host here.
 
 ## 10. Tracks
 

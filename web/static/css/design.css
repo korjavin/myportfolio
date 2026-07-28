@@ -1,0 +1,56 @@
+/* Support classes for design.html ONLY.
+ *
+ * These exist so the token-reference page can display swatches and stage a few
+ * primitives out of their natural position without a single inline style. They
+ * are NOT part of the design system — never use a .wg-swatch or a *-demo class
+ * in feature code.
+ *
+ * Kept out of styles.css deliberately: styles.css is the production stylesheet
+ * and shipping demo scaffolding in it is how a design system starts to rot.
+ * Every value here still resolves through a --wg-* token; no hex literals.
+ */
+
+.wg-swatch {
+    display: block;
+    width: 56px;
+    height: 40px;
+    border-radius: var(--wg-radius-gloss);
+    border: 1px solid var(--wg-border-strong);
+}
+
+.wg-swatch--paper { background: var(--wg-paper); }
+.wg-swatch--paper-deep { background: var(--wg-paper-deep); }
+.wg-swatch--ink { background: var(--wg-ink); }
+.wg-swatch--teal { background: var(--wg-teal); }
+.wg-swatch--teal-stage { background: var(--wg-teal-stage); }
+.wg-swatch--teal-sage { background: var(--wg-teal-sage); }
+.wg-swatch--mint { background: var(--wg-mint); }
+.wg-swatch--mint-soft { background: var(--wg-mint-soft); }
+.wg-swatch--sun { background: var(--wg-sun); }
+.wg-swatch--sun-deep { background: var(--wg-sun-deep); }
+.wg-swatch--sun-soft { background: var(--wg-sun-soft); }
+.wg-swatch--clay { background: var(--wg-clay); }
+.wg-swatch--clay-soft { background: var(--wg-clay-soft); }
+
+/* Foreground-alpha demonstration rows. */
+.wg-fg-1-demo { color: var(--wg-fg-1); }
+.wg-fg-4-demo { color: var(--wg-fg-4); }
+.wg-fg-5-demo { color: var(--wg-fg-5); }
+
+/* Range-pill strip: the trough the primary action pill sits beside. */
+.wg-range-strip {
+    padding: var(--space-xs);
+}
+
+/* Ring at a fixed 68% so the arc is visible without JS. */
+.wg-ring-demo-68 {
+    --ring-progress: 68;
+}
+
+/* The modal shell is position:fixed in production; unpin it so it renders
+   inline on the reference page. */
+.wg-modal-demo {
+    position: static;
+    transform: none;
+    max-width: 320px;
+}
