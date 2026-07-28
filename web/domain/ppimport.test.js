@@ -515,6 +515,33 @@ test('CSV: an exchange rate finer than our fx scale is reported as rounded', () 
   assert.ok(codes(report).includes('pp_fx_rounded'));
 });
 
+test('CSV: security transfers and deliveries are refused, cash transfers are not', async () => {
+  // PP labels a cash transfer and a share transfer identically; only the row
+  // tells them apart. Importing the share one would write a record the engine
+  // refuses, so the import report would claim a row it did not really import.
+  const csv = [CSV_EN_HEADER,
+    '2024-03-04T00:00,Transfer (Outbound),-250.00,EUR,,,,,,,,,,,to savings',
+    '2024-03-05T00:00,Transfer (Inbound),1000.00,EUR,,,,,,5,DE000A1EWWW0,A1EWWW,ADS,ADIDAS AG NA O.N.,',
+    '2024-03-06T00:00,Delivery (Inbound),1000.00,EUR,,,,,,5,DE000A1EWWW0,A1EWWW,ADS,ADIDAS AG NA O.N.,',
+  ].join('\r\n');
+  const { records, report } = parsePP(csv, { accountName: 'Konto' });
+
+  assert.deepEqual(report.counts, { sourceRows: 3, imported: 1, merged: 0, skipped: 2 });
+  const refused = report.entries.filter((e) => e.code === 'security_transfer_unsupported');
+  assert.equal(refused.length, 2);
+  assert.ok(refused.every((e) => /myportfolio-g7e\.10/.test(e.message)));
+
+  const tx = ofType(records, 'transaction');
+  assert.deepEqual(tx.map((t) => [t.type, t.amount, t.securityId]), [['transfer_out', 25000, undefined]]);
+
+  // And what did import is a record the engine actually books.
+  const port = fakeRecords();
+  await applyAll(records, port);
+  const snapshot = await createPortfolioDomain({ records: port }).snapshot();
+  assert.deepEqual(snapshot.issues, []);
+  assert.equal(snapshot.totals.cash, -25000);
+});
+
 test('CSV: unknown types and unreadable rows are reported, not dropped', () => {
   const csv = [CSV_EN_HEADER,
     '2020-11-02T00:00,Deposit,500.00,EUR,,,,,,,,,,,',

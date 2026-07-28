@@ -829,8 +829,16 @@ const CSV_TYPE_LABELS = {
   FEES_REFUND: ['fees refund', 'gebührenerstattung'],
   TAXES: ['taxes', 'steuern'],
   TAX_REFUND: ['tax refund', 'steuerrückerstattung'],
-  TRANSFER_IN: ['transfer (inbound)', 'umbuchung (eingang)', 'delivery (inbound)', 'einlieferung'],
-  TRANSFER_OUT: ['transfer (outbound)', 'umbuchung (ausgang)', 'delivery (outbound)', 'auslieferung'],
+  // "Transfer (Inbound)" is ambiguous in a CSV: PP uses the same label for a
+  // cash transfer between accounts (representable) and for a share transfer
+  // between securities accounts (not — §4 cannot carry cost basis over). The
+  // row itself disambiguates: a securities transfer names a security. Deliveries
+  // are never representable, so they get their own keys rather than being
+  // folded into the transfer ones.
+  TRANSFER_IN: ['transfer (inbound)', 'umbuchung (eingang)'],
+  TRANSFER_OUT: ['transfer (outbound)', 'umbuchung (ausgang)'],
+  DELIVERY_INBOUND: ['delivery (inbound)', 'einlieferung'],
+  DELIVERY_OUTBOUND: ['delivery (outbound)', 'auslieferung'],
 };
 
 const norm = (s) => String(s ?? '').replace(/^﻿/, '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -1119,6 +1127,18 @@ function importCsv(text, options, report) {
     // empty when the two are the same.
     const secId = securityRecordId(cell(row, 'isin'), cell(row, 'wkn'), cell(row, 'ticker'),
       cell(row, 'securityName'), cell(row, 'grossCurrency') || currency, location);
+
+    // Same refusal as the XML path, and for the same reason: a transfer_in or
+    // transfer_out carrying a security is exactly the record §4 says cannot
+    // exist, and the engine drops it on the floor — so importing one would
+    // report a row as imported that moves neither cash nor shares.
+    if (UNSUPPORTED_PORTFOLIO_TX[ppType]
+        && (ppType.startsWith('DELIVERY') || secId || shares)) {
+      report.add('warning', 'security_transfer_unsupported', location,
+        `${ppType} ${UNSUPPORTED_PORTFOLIO_TX[ppType]}: ${G7E10}`, raw);
+      report.counts.skipped += 1;
+      continue;
+    }
 
     if (ppType === 'BUY' || ppType === 'SELL') {
       // A trade appears in BOTH of PP's per-file exports — the cash account's
