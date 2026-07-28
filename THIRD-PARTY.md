@@ -9,6 +9,7 @@ anyone distributing a build.
 | Dexie.js (`web/static/vendor/dexie.min.js`) | 3.2.7 | Apache-2.0 | `web/static/vendor/DEXIE-LICENSE.txt` | https://github.com/dexie/Dexie.js |
 | JetBrains Mono (`web/static/fonts/jetbrains-mono-*.woff2`) | — | SIL OFL 1.1 | `web/static/fonts/OFL-JetBrainsMono.txt` | https://github.com/JetBrains/JetBrainsMono |
 | Space Grotesk (`web/static/fonts/space-grotesk-*.woff2`) | — | SIL OFL 1.1 | `web/static/fonts/OFL-SpaceGrotesk.txt` | https://github.com/floriankarsten/space-grotesk |
+| Lucide icon paths (inside `web/static/js/components/wg-icons.js`) | — | ISC | `web/static/vendor/LUCIDE-LICENSE.txt` | https://lucide.dev |
 
 Each license text sits in the same directory as the files it covers, so it is embedded in the binary
 alongside them — a build is a redistribution, and both licenses require the text to travel with the
@@ -50,8 +51,10 @@ Two things worth stating plainly:
 a license text that exists. Attribution drift is silent otherwise — it surfaces as somebody else's
 complaint, long after the commit that caused it.
 
-**Still unattributed**: the icon paths in `web/static/js/components/wg-icons.js` appear to derive from
-Lucide (ISC). Confirm and attribute, or replace them — tracked on `myportfolio-18h.11`.
+The Lucide entry is the one component that is not a standalone vendored file — the SVG path data is
+embedded in a source file we otherwise wrote. Confirmed by comparing path data against upstream
+(`m15 18-6-6 6-6`, `m9 18 6-6-6-6`, `m6 9 6 6 6-6` are Lucide's chevrons verbatim). The license text
+sits in `vendor/` beside the others and `wg-icons.js` carries a header pointing at it.
 
 ## Derived work
 

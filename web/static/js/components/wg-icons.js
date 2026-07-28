@@ -1,3 +1,7 @@
+// The `d` path data is Lucide (https://lucide.dev), ISC — license text at
+// ../../vendor/LUCIDE-LICENSE.txt, attribution in THIRD-PARTY.md. ISC requires
+// the notice to accompany copies, and this file is compiled into the binary.
+//
 // Wandergeek stroke-icon registry. Ported from ../medicationtrackerbot with
 // the medication/fitness icons dropped (pill, apple, drop, dumbbell, scale,
 // footprints, heart, moon, barcode, camera, phone) and `layers` + `list` added

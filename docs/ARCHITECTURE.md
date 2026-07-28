@@ -409,6 +409,19 @@ Two guards were widened during the port, and **frontend executors should expect 
   an `@import url(https://fonts.googleapis.com/…)` inside a stylesheet — and a guard that only bans
   the CDN in one file is half a guard.
 
+### Assets are served from the root, not `/static/`
+
+`web/embed.go` does `//go:embed static`, which **roots the served filesystem at `web/static`**. So an
+asset stored at `web/static/css/styles.css` is served from **`/css/styles.css`** — writing
+`/static/css/styles.css` gives a 404.
+
+Two files have already shipped with the wrong prefix by two different authors, so this is a
+documentation defect rather than carelessness — and, worse, **neither failure was visible at
+runtime**: `fonts.css` 404'd every glyph while `font-display: swap` quietly kept the fallback, and
+`design.html` rendered unstyled for as long as it existed. `architecture.asset-paths.test.js` now
+resolves every `href`/`src`/`url()` in every shipped `.html` and `.css` against the embedded tree, so
+a missing asset fails the build instead of degrading silently.
+
 Legacy colour names (`--bg-color`, `--text-color`, `--hint-color`, `--secondary-bg-color`) are kept
 as *names* but now resolve onto the Wandergeek palette. That let the ported utility blocks carry over
 byte-identical instead of being rewritten. The sibling's Telegram theme-mirror tokens
