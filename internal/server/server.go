@@ -15,6 +15,9 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"net/netip"
+
+	"github.com/korjavin/myportfolio/internal/store"
 )
 
 // contentSecurityPolicy hardens the E2EE origin. The threat model
@@ -36,18 +39,62 @@ const contentSecurityPolicy = "default-src 'self'; " +
 	"frame-ancestors 'none'; " +
 	"form-action 'none'"
 
-// New builds the single-origin handler. staticFS is the web/static tree (the
-// PWA shell); db backs the readiness probe.
-func New(staticFS fs.FS, db readyDB) http.Handler {
+// API holds the vault's stateful handler dependencies: the database, the
+// session-cookie signing key, the in-flight WebAuthn challenges, and the
+// ceremony rate limiter.
+type API struct {
+	db                 *store.DB
+	sessionSecret      string
+	registerChallenges *challengeStore
+	loginChallenges    *challengeStore
+	limiter            *rateLimiter
+	trustedProxies     []netip.Prefix
+}
+
+// New builds the single-origin handler.
+//
+//   - staticFS is the web/static tree (the PWA shell).
+//   - db backs the readiness probe and the vault.
+//   - sessionSecret signs session cookies; it comes from
+//     store.DB.SessionSecret, so it survives a restart.
+//   - trustedProxies names the reverse proxies whose forwarded-for headers the
+//     ceremony rate limiter may believe (see ParseTrustedProxies). Pass nil to
+//     trust none, which keys every caller on its real TCP peer.
+func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []netip.Prefix) http.Handler {
+	api := &API{
+		db:                 db,
+		sessionSecret:      sessionSecret,
+		registerChallenges: newChallengeStore(),
+		loginChallenges:    newChallengeStore(),
+		limiter:            newRateLimiter(ceremonyRateLimitMax, ceremonyRateLimitWindow),
+		trustedProxies:     trustedProxies,
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(db))
+	api.registerRoutes(mux)
 	// Go 1.22 pattern: "GET /" matches every path no more specific route
 	// claimed, and leaves r.URL.Path untouched, so the file server sees the
 	// request path as-is. A non-GET to /healthz falls through to here and gets
 	// 405 rather than a stray asset lookup.
 	mux.Handle("GET /", http.FileServerFS(staticFS))
 	return securityHeaders(mux)
+}
+
+func (a *API) registerRoutes(mux *http.ServeMux) {
+	// Ceremony routes are unauthenticated by definition — they are how a caller
+	// becomes authenticated — so they are the ones that need per-IP throttling.
+	mux.HandleFunc("POST /api/webauthn/register/begin", limitByIP(a.limiter, a.trustedProxies, a.registerBegin))
+	mux.HandleFunc("POST /api/webauthn/register/finish", limitByIP(a.limiter, a.trustedProxies, a.registerFinish))
+	mux.HandleFunc("POST /api/webauthn/login/begin", limitByIP(a.limiter, a.trustedProxies, a.loginBegin))
+	mux.HandleFunc("POST /api/webauthn/login/finish", limitByIP(a.limiter, a.trustedProxies, a.loginFinish))
+
+	// Everything else is behind a session, which also re-checks that the
+	// session's credential has not been revoked.
+	mux.Handle("PUT /api/recovery-material", a.requireSession(http.HandlerFunc(a.putRecoveryMaterial)))
+	mux.Handle("GET /api/state", a.requireSession(http.HandlerFunc(a.getState)))
+	mux.Handle("PUT /api/state", a.requireSession(http.HandlerFunc(a.putState)))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
