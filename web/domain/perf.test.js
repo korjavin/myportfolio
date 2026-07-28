@@ -223,6 +223,32 @@ test('TTWROR: a transfer in flight is neutral, not a loss', async () => {
   assert.equal(res.portfolio.flowOut, eur(400));
 });
 
+test('TTWROR: a same-day internal transfer does not dilute a day that moved', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('account', { name: 'B', kind: 'cash', currency: 'EUR' }, 'acct_2');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: eur(1000) }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-01', shares: sh(10), amount: eur(1000),
+  }));
+  // Both legs on 2024-06-30 — and the holding gains 10% that same day.
+  f.put('transaction', tx({ type: 'transfer_out', counterAccountId: 'acct_2', date: '2024-06-30', amount: eur(100) }));
+  f.put('transaction', { type: 'transfer_in', accountId: 'acct_2', counterAccountId: 'acct_1', currency: 'EUR', date: '2024-06-30', amount: eur(100) });
+  f.put('price', {
+    securityId: 'sec_1',
+    year: 2024,
+    closes: { '01-01': px(100), '06-29': px(100), '06-30': px(110), '12-31': px(110) },
+  });
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-12-31' });
+
+  // Nothing external happened, so the whole return is the 10% price move.
+  // Applying the two legs gross rather than netting them gives 9.09%:
+  // (1100 + 100) / (1000 + 100).
+  assert.equal(res.portfolio.ttwror.ok, true);
+  assert.ok(Math.abs(res.portfolio.ttwror.value - 0.1) < 1e-12, `${res.portfolio.ttwror.value}`);
+});
+
 // --- Degenerate ranges -----------------------------------------------------
 
 test('a range entirely before any transaction reports no capital, not 0%', async () => {

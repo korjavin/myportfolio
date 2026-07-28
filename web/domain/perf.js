@@ -40,6 +40,11 @@
 // yields a negative denominator on the day one is closed out at a profit. With
 // daily closes there is no more information than this to work with, so the
 // choice is a convention — it is stated rather than buried.
+//
+// Flows are NETTED per day before that formula is applied, which is also
+// ordinary daily-TWR practice: nothing in the records resolves intraday
+// ordering, so a day carries one net flow. See netFlow() for why applying them
+// gross gets a same-day internal transfer wrong.
 
 import { RECORD } from './schema.js';
 import { createPortfolioDomain } from './portfolio.js';
@@ -191,9 +196,8 @@ export function xirr(flows) {
 // is in flight — legs on different days, or a leg whose counter account this
 // portfolio does not track at all — the total genuinely drops. Treating the leg
 // as a flow is what cancels that; dropping it, as "transfers are internal"
-// suggests, reports a phantom loss of the transferred amount. When both legs do
-// fall on the same day the in and the out cancel to a factor of exactly 1, so
-// counting them is also harmless in the case where they are internal.
+// suggests, reports a phantom loss of the transferred amount. Two legs landing
+// on the same day cancel in netFlow() below, so the internal case costs nothing.
 //
 // The residual cost is that flowIn/flowOut count both sides of an internal
 // round-trip. Netting them would mean deciding a transfer is internal from
@@ -246,7 +250,27 @@ function valuesOf(snap) {
   return { portfolio: known ? total : null, securities };
 }
 
-const NO_FLOW = { in: 0, out: 0 };
+// One net flow per day, then routed by its sign into the start-of-day /
+// end-of-day convention.
+//
+// Applying a day's flows gross instead dilutes every day that carries both
+// directions, because the inflow inflates the denominator and the outflow the
+// numerator: a €100 transfer between two tracked accounts, on a day a €1,000
+// holding rises to €1,100, comes out as (1100+100)/(1000+100) = 9.09% rather
+// than 10%. Nothing external happened, so nothing should have moved. Same-day
+// internal transfers are common enough (moving cash between your own accounts)
+// that this would quietly bias the headline number.
+//
+// ponytail: a same-day round trip within one security — buy and sell of equal
+// value — nets to zero, so that security's TTWROR shows nothing for the day.
+// Accepted: the "return" there is over a zero-length holding period, it is an
+// artifact of daily granularity either way, and the realized gain still shows
+// in portfolio.js. Fixing it needs intraday timestamps, which §4 records do
+// not carry.
+function netFlow(flow) {
+  const net = flow ? flow.in - flow.out : 0;
+  return net >= 0 ? { in: net, out: 0 } : { in: 0, out: -net };
+}
 
 // Chain-link the sub-period returns. `dates` is ascending and contains, for
 // every day carrying a flow, the day before it as well — that is what keeps a
@@ -261,7 +285,7 @@ function chainLink(dates, valueAt, flowsByDate) {
     if (prevV === null || curV === null) {
       return { ok: false, reason: 'incomplete_valuation', date: prevV === null ? dates[i - 1] : dates[i] };
     }
-    const flow = flowsByDate.get(dates[i]) || NO_FLOW;
+    const flow = netFlow(flowsByDate.get(dates[i]));
     const den = prevV + flow.in;
     const num = curV + flow.out;
     if (den > 0) {
@@ -285,7 +309,11 @@ function irrOf(openDate, openValue, toDate, closeValue, flowsByDate) {
   // Opening value is money the investor already had committed at the start of
   // the range, and the closing value is what walking away would hand back.
   if (openValue !== 0) flows.push({ date: openDate, amount: -openValue });
-  for (const [date, flow] of flowsByDate) {
+  // Netted like the TTWROR chain. Two same-date flows of opposite sign cancel
+  // exactly in the NPV anyway, so this changes no rate — it just keeps the two
+  // engines fed from one definition of "the flow on day d".
+  for (const [date, gross] of flowsByDate) {
+    const flow = netFlow(gross);
     if (flow.in !== 0) flows.push({ date, amount: -flow.in });
     if (flow.out !== 0) flows.push({ date, amount: flow.out });
   }
