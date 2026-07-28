@@ -132,6 +132,11 @@ const META_KEY = 'state';
 // lives in its own tiny database rather than in the Dexie records store, the
 // same reasoning ldk.js used for the device key.
 //
+// ONE record, not one per account, and that is deliberate: it shadows the
+// records mirror, which is also one per origin. Keying it by account id would
+// let a second account start with clean versions on top of the first account's
+// records — trading a loud stop for a silent cross-vault upload. See ready().
+//
 // Opened per operation and closed again: there are two of these per sync, and a
 // handle held open across a session is a handle that blocks account deletion
 // and schema upgrades. The versionchange handler covers the window where one is
@@ -169,6 +174,9 @@ export function createIdbMeta() {
 }
 
 const EMPTY_META = {
+  // Which vault this device's mirror belongs to. See ready() — this is the
+  // guard, not a label.
+  accountId: null,
   // The version this device last read, i.e. the CAS token for the next PUT.
   lastVersion: 0,
   // The highest version this device has EVER seen. Only ever moves up: a server
@@ -197,8 +205,32 @@ export function createStateSync({
 }) {
   let state = null;
 
+  // Loads the device-local metadata, and refuses to run against a mirror that
+  // belongs to a different vault.
+  //
+  // The records mirror (localdb.js) is ONE un-scoped Dexie database per origin
+  // — it has no account id in it anywhere. So unlocking a second account in the
+  // same browser lands on the first account's records, and the first sync would
+  // merge one user's portfolio into the other user's vault and upload it. The
+  // versions would be wrong too, which is the visible half of the same bug.
+  //
+  // Refusing here is the half this file can honestly fix: it turns a silent
+  // cross-vault upload into a loud, actionable stop.
+  //
+  // ponytail: the real fix is for the mirror to be cleared (or namespaced) when
+  // the unlocked account changes, which belongs to localdb.js and the boot
+  // path, not here. Until then, one account per browser profile.
   async function ready() {
-    if (!state) state = { ...EMPTY_META, ...((await meta.get()) || {}) };
+    if (state) return state;
+    const stored = await meta.get();
+    if (stored && stored.accountId && stored.accountId !== accountId) {
+      throw syncError(
+        'wrong-account',
+        `sync: this device already holds data for vault ${stored.accountId}. ` +
+          'Refusing to sync it into a different vault — clear this browser\'s site data first.'
+      );
+    }
+    state = { ...EMPTY_META, ...(stored || {}), accountId };
     return state;
   }
 

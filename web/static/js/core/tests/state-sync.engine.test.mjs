@@ -149,6 +149,21 @@ describe('createStateSync', () => {
     assert.equal(err?.code, 'rollback');
   });
 
+  // The records mirror is one un-scoped database per origin, so a second
+  // account in the same browser would otherwise merge one user's portfolio into
+  // the other user's vault and upload it.
+  it('refuses to run against a mirror that belongs to another vault', async () => {
+    const server = fakeServer();
+    const meta = fakeMeta();
+    await newSync(server, meta).push([rec('tx_1', 100)], () => []);
+
+    const other = createStateSync({ kData: K_DATA, accountId: 'someone-else', meta, fetch: server.fetch });
+    const err = await other.pull().then(() => null, (e) => e);
+    assert.equal(err?.code, 'wrong-account');
+    assert.match(err.message, /Refusing to sync it into a different vault/);
+    assert.equal(server.requests.filter((r) => r.method === 'GET').length, 0, 'it must refuse before touching the wire');
+  });
+
   it('reports a 401 as an auth failure, not as being offline', async () => {
     const server = fakeServer();
     server.failWith = 401;
