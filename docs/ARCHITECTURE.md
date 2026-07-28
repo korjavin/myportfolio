@@ -230,7 +230,52 @@ poisoned JavaScript. Mitigations in force: strict CSP, zero third-party script, 
 immutable assets, service-worker-pinned bundles. Say so in the user-facing security note rather than
 claiming a guarantee we do not have.
 
-## 9. Tracks
+## 9. Frontend design system — Wandergeek, ported
+
+We reuse the sibling project's visual system wholesale rather than inventing one. It is already
+mobile-first, token-driven, self-hosted-font, and — the part that actually matters — **enforced by
+architecture tests**, which is why it has not rotted across a year of feature work. Source of truth
+for the original: `../medicationtrackerbot/docs/frontend.md` §Design Tokens and §Navigation.
+
+**Port**: the `--wg-*` token system (palette / semantic / gloss material / status tags / typography /
+dimensional / chart theme), the self-hosted fonts (JetBrains Mono for display + numerics, Space
+Grotesk for UI body), and the domain-neutral primitives — `wg-bottom-nav`, `wg-icons`,
+`wg-sparkline`, `wg-stale-badge`, `wg-toggle`, `wg-ring`, `stat-card`, `empty-state`, `action-row`,
+`wg-phone-chrome`.
+
+**Drop**: every medication-domain token group and component — `--wg-bp-*`, `--wg-food-*`,
+`--wg-meds-*`, `--wg-med-*`, `--wg-health-*`, `--wg-workouts-*`, `--wg-weight-*`, `--wg-settings-*`,
+`--wg-next-*`, gamification/rings/journey, and the per-domain chart components. Do not copy
+`styles.css` wholesale — it is 316 KB and roughly half of it is another app's screens.
+
+**Conventions that carry over unchanged** (they are load-bearing, not stylistic preference):
+
+- **No hardcoded colors in CSS, no inline `.style.` in JS, no `--wg-*` token referenced from JS.**
+  JS sets class names; CSS resolves values. Narrow structural exceptions (e.g. `--wg-nav-cols` on the
+  nav grid) go in an explicit allowlist, one file at a time, with a justification.
+- **Bottom nav is the canonical navigation.** One slot per real section, no "More" aggregator, no
+  section-header banners — screens sit directly on the stage and the active nav pill is the screen
+  indicator.
+- **Primary actions render inline** with the tab strip / range selector / day navigator, as a
+  `.wg-toolbar-btn--primary` pill. Never a floating FAB, never a bottom CTA dock. The sibling project
+  tried both and retired them.
+- **Shared modal shell** (`.wg-modal` + `__header`/`__title`/`__body`/`__actions`) and field
+  utilities (`.wg-field`, `.wg-label`, `.wg-input`, `.wg-select`) — new screens reuse these rather
+  than introducing per-section variants.
+- **Shared chart theme tokens** (`--wg-chart-card-*`, `--wg-chart-guide-*`, `--wg-chart-axis-tick-*`)
+  — every chart consumes these instead of reintroducing per-chart colors. This matters more here than
+  it did there: a portfolio app is mostly charts.
+- **Self-hosted fonts only.** No external font CDN — it would punch a hole in the `connect-src`
+  allowlist (§7) that the whole XSS-exfiltration argument depends on.
+
+**Port the enforcement, not just the CSS.** The architecture tests are what make the above survive
+contact with feature work: design-tokens, inline-styles, wg-primitives, chart-theme,
+no-external-fonts-in-html, no-inline-handlers, domain-purity, and sw-precache. A design system
+without its guard tests degrades to suggestions within a month.
+
+Nav slots for this app: **Dashboard, Holdings, Transactions, Performance, Settings**.
+
+## 10. Tracks
 
 Two tracks, disjoint file ownership, meeting only at §3.
 
@@ -238,9 +283,10 @@ Two tracks, disjoint file ownership, meeting only at §3.
 `vaultRecords`. Passkey signup/unlock, envelopes, recovery, device transfer, state-blob endpoints,
 quote proxy.
 
-**Track B — domain + UI.** `web/domain/`, `web/static/js/features/`, `localRecords`. Schema, the
-portfolio engine (holdings, valuation, TTWROR, IRR), PP import, quote fetchers, the mobile-first
-shell, service worker.
+**Track B — domain + UI.** `web/domain/`, `web/static/js/features/`, `web/static/css/`,
+`web/static/js/components/`, `localRecords`. Schema, the portfolio engine (holdings, valuation,
+TTWROR, IRR), PP import, quote fetchers, the ported design system (§9), the mobile-first shell,
+service worker.
 
 Track B ships a usable offline app without Track A existing. Track A plugs in underneath by swapping
 the port implementation. Anything that needs to edit a file the other track owns gets queued, not
