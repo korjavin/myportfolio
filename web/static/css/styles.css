@@ -1,0 +1,1608 @@
+/*
+ * Wandergeek Design System — ported from ../medicationtrackerbot
+ * ==============================================================
+ * See docs/ARCHITECTURE.md §9. This is a PORT, not a redesign: the palette,
+ * the gloss material, the type ramp, and the enforcement tests all come from
+ * the sibling project. Do not invent a new visual language here.
+ *
+ * What did NOT come over: every medication-domain token group and component
+ * (--wg-bp-*, --wg-food-*, --wg-meds-*, --wg-med-*, --wg-health-*,
+ * --wg-workouts-*, --wg-weight-*, --wg-settings-*, --wg-next-*, the
+ * gamification rings/journey surfaces, and every per-domain chart component).
+ * The sibling's styles.css is 316 KB and roughly half of it is another app's
+ * screens; this file is the domain-neutral core only.
+ *
+ * TOKEN GROUPS:
+ *   Palette      --wg-paper/-ink/-teal/-mint/-sun/-clay + alpha variants
+ *   Semantic     --wg-bg-*, --wg-fg-1..5, --wg-border-*
+ *   Gloss        --wg-gloss-bg*, --wg-gloss-shadow*  (the convex tile look)
+ *   Status tags  --wg-tag-{normal,high,alert}-{bg,fg,border}
+ *   Delta        --wg-{gain,loss,flat}-{bg,fg,border}  (portfolio-specific)
+ *   Typography   --wg-font-{display,ui,mono}
+ *   Dimensional  --wg-radius-*, --wg-*-pad, --wg-*-size, --wg-font-size-*
+ *   Chart theme  --wg-chart-card-*, --wg-chart-guide-*, --wg-chart-axis-tick-*
+ *
+ * GENERIC LADDER (shared with the primitives, kept from the sibling):
+ *   SPACING       --space-{xs|sm|md|lg|xl|2xl}   4/8/12/16/24/32px
+ *   RADIUS        --radius-{sm|md|lg|xl|pill}    6/10/14/18/999px
+ *   SHADOW        --shadow-{sm|md|lg}
+ *   TYPOGRAPHY    --font-size-{xs|sm|md|lg|xl}   11/13/15/18/24px
+ *                 --font-weight-{normal|medium|bold}
+ *   Z-INDEX       --z-{dropdown|overlay|modal|popover|confirm|toast}
+ *
+ * RUNNING THE GUARDS (from the repo root):
+ *
+ *     node --test web/static/js/tests/
+ *
+ * The tests are ESM `.js`, so they need `web/package.json` with
+ * {"type":"module"} in scope — it lands on master alongside this. Until it
+ * does, or on any checkout without it, the equivalent is:
+ *
+ *     node --experimental-default-type=module --test web/static/js/tests/*.test.js
+ *
+ * No npm dependencies, no vitest — Node's built-in runner only.
+ *
+ * RULES (each one is pinned by a test in web/static/js/tests/):
+ *   - No hardcoded hex colors outside :root — use tokens.
+ *     → architecture.design-tokens.test.js
+ *   - No hex literals inside .wg-* class blocks.
+ *     → architecture.wg-primitives.test.js
+ *   - No --wg-* token may be referenced from JS. JS sets *class names*; CSS
+ *     resolves values. Structural exceptions (--wg-nav-cols) are allowlisted
+ *     one file at a time. → architecture.design-tokens.test.js
+ *   - No inline .style.<prop> assignments in JS.
+ *     → architecture.inline-styles.test.js
+ *   - Charts consume the shared --wg-chart-* theme, never per-chart colors.
+ *     → architecture.chart-theme.test.js
+ *   - Fonts are self-hosted; no external font CDN, ever.
+ *     → architecture.no-external-fonts-in-html.test.js
+ *   - Every new token must be registered in WANDERGEEK_TOKENS (design-tokens
+ *     test) in the SAME commit that introduces it.
+ *
+ * LAYOUT CONVENTIONS (also load-bearing, see docs/ARCHITECTURE.md §9):
+ *   - Primary actions render INLINE with the tab strip / range selector as a
+ *     .wg-toolbar-btn--primary pill. Never a floating FAB, never a bottom CTA
+ *     dock — the sibling shipped both and retired both.
+ *   - No section-header banners. Screens sit directly on the stage and the
+ *     active bottom-nav pill is the sole screen indicator.
+ *   - Icons come from the wg-icons registry; never hardcode inline SVG in
+ *     feature code.
+ */
+
+:root {
+    /* Neutral surface aliases. The sibling mirrored Telegram's theme vars
+       here (--tg-theme-*); this app has no Telegram host, so the same four
+       names resolve straight onto the Wandergeek palette instead. Keeping the
+       names lets the ported utility/legacy blocks below carry over verbatim. */
+    --bg-color: var(--wg-bg-stage);
+    --text-color: var(--wg-fg-1);
+    --hint-color: var(--wg-fg-3);
+    --secondary-bg-color: var(--wg-bg-card-inset);
+
+    /* Semantic colors */
+    --color-success: #22c55e;
+    --color-warning: #f59e0b;
+    --color-danger: #ef4444;
+    --color-info: #3b82f6;
+
+    /* Overlay / backdrop colors */
+    --color-overlay: rgba(0, 0, 0, 0.5);
+    --color-overlay-light: rgba(0, 0, 0, 0.2);
+
+    /* Pending-write badge (optimistic local writes not yet synced) */
+    --color-status-pending-bg-start: #fef3c7;
+    --color-status-pending-text: #92400e;
+
+    /* Spacing tokens */
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 12px;
+    --space-lg: 16px;
+    --space-xl: 24px;
+    --space-2xl: 32px;
+
+    /* Border radius tokens */
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-pill: 999px;
+
+    /* Shadow tokens */
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.12);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15);
+
+    /* Typography tokens */
+    --font-size-xs: 11px;
+    --font-size-sm: 13px;
+    --font-size-md: 15px;
+    --font-size-lg: 18px;
+    --font-size-xl: 24px;
+    --font-weight-normal: 400;
+    --font-weight-medium: 500;
+    --font-weight-bold: 600;
+
+    /* Z-index tokens */
+    --z-dropdown: 100;
+    --z-overlay: 1000;
+    --z-modal: 1001;
+    --z-popover: 1002;
+    --z-confirm: 1050;
+    --z-toast: 1100;
+
+    /* ==========================================================================
+       Wandergeek Design System — deep-teal stage, glossy tiles, sun accent.
+       Fonts (Space Grotesk, JetBrains Mono) are self-hosted via @font-face in
+       css/fonts.css. No --wg-* token may be referenced from JS — CSS-only.
+       ========================================================================== */
+
+    /* Wandergeek — raw palette */
+    --wg-paper: #F4FBF7;
+    --wg-paper-deep: #E9F3EB;
+    --wg-paper-soft: #FAFEFB;
+    --wg-ink: #0F5042;
+    --wg-ink-85: rgba(15, 80, 66, 0.88);
+    --wg-ink-70: rgba(15, 80, 66, 0.72);
+    --wg-ink-55: rgba(15, 80, 66, 0.55);
+    --wg-ink-35: rgba(15, 80, 66, 0.32);
+    --wg-ink-15: rgba(15, 80, 66, 0.14);
+    --wg-ink-08: rgba(15, 80, 66, 0.07);
+    --wg-teal: #2D544F;
+    --wg-teal-stage: #0f2522;
+    --wg-teal-sage: #56AC8A;
+    --wg-mint: #8FC5BC;
+    --wg-mint-soft: #9CE4CC;
+    --wg-sun: #FBBD0D;
+    --wg-sun-deep: #E5A600;
+    --wg-sun-soft: #FFE492;
+    --wg-clay: #C6553A;
+    --wg-clay-soft: #F3A693;
+
+    /* Wandergeek — semantic aliases */
+    --wg-bg-stage: var(--wg-teal-stage);
+    --wg-bg-card: #254844;
+    --wg-bg-card-inset: #1F3F3B;
+    --wg-fg-1: var(--wg-paper);
+    --wg-fg-2: rgba(244, 251, 247, 0.72);
+    --wg-fg-3: rgba(244, 251, 247, 0.55);
+    --wg-fg-4: rgba(244, 251, 247, 0.42);
+    --wg-fg-5: rgba(244, 251, 247, 0.32);
+    --wg-border-hairline: rgba(255, 255, 255, 0.06);
+    --wg-border-strong: rgba(255, 255, 255, 0.12);
+
+    /* Wandergeek — status tag triplets */
+    --wg-tag-normal-bg: rgba(86, 172, 138, 0.18);
+    --wg-tag-normal-fg: #9CE4CC;
+    --wg-tag-normal-border: rgba(86, 172, 138, 0.3);
+    --wg-tag-high-bg: rgba(251, 189, 13, 0.14);
+    --wg-tag-high-fg: #FFD870;
+    --wg-tag-high-border: rgba(251, 189, 13, 0.28);
+    --wg-tag-alert-bg: rgba(198, 85, 58, 0.18);
+    --wg-tag-alert-fg: #F3A693;
+    --wg-tag-alert-border: rgba(198, 85, 58, 0.35);
+
+    /* Wandergeek — delta triplets (gain / loss / flat).
+       The one token group with no counterpart in the sibling: its status
+       vocabulary is severity-shaped (normal / high / alert), because it is a
+       health app. A portfolio app's most-repeated visual signal is instead
+       gain vs. loss, and it appears on nearly every row, tile, and chart.
+
+       These are ALIASES onto the existing tag triplets, exactly like the
+       sibling's --wg-bp-status-* layer — no new hue enters the palette. Gain
+       anchors on the mint/teal-sage tone, loss on clay.
+
+       ACCESSIBILITY, NON-NEGOTIABLE: never encode gain/loss by color alone.
+       Red/green is the most common accessibility failure in finance UIs and
+       it fails for roughly 1 in 12 men. The .wg-delta--* classes below emit a
+       ▲/▼/— glyph via ::before so the sign is structural, not a convention a
+       future screen can forget. Consumers must use .wg-delta, not raw
+       var(--wg-gain-fg) on a bare number. */
+    --wg-gain-bg: var(--wg-tag-normal-bg);
+    --wg-gain-fg: var(--wg-tag-normal-fg);
+    --wg-gain-border: var(--wg-tag-normal-border);
+    --wg-loss-bg: var(--wg-tag-alert-bg);
+    --wg-loss-fg: var(--wg-tag-alert-fg);
+    --wg-loss-border: var(--wg-tag-alert-border);
+    --wg-flat-bg: transparent;
+    --wg-flat-fg: var(--wg-fg-3);
+    --wg-flat-border: var(--wg-border-hairline);
+
+    /* Wandergeek — type families (display + mono intentionally share JetBrains Mono) */
+    --wg-font-display: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --wg-font-ui: 'Space Grotesk', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --wg-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    /* Wandergeek — gloss material gradients */
+    --wg-gloss-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 50%), linear-gradient(180deg, #3C6B65 0%, #264742 100%);
+    --wg-gloss-bg-sun: linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0) 55%), linear-gradient(180deg, #FFD14A 0%, #E5A600 100%);
+    --wg-gloss-bg-clay: linear-gradient(180deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0) 55%), linear-gradient(180deg, #D8624A 0%, #A8442C 100%);
+    --wg-gloss-bg-inset: linear-gradient(180deg, #1F3F3B 0%, #264742 100%);
+
+    /* Wandergeek — gloss material shadows */
+    --wg-gloss-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(0, 0, 0, 0.25), 0 2px 0 rgba(0, 0, 0, 0.18), 0 6px 16px -6px rgba(0, 0, 0, 0.35);
+    --wg-gloss-shadow-sun: inset 0 1px 0 rgba(255, 255, 255, 0.55), inset 0 -1px 0 rgba(0, 0, 0, 0.18), 0 2px 0 rgba(160, 110, 0, 0.4), 0 6px 18px -4px rgba(251, 189, 13, 0.45);
+    --wg-gloss-shadow-inset: inset 0 2px 4px rgba(0, 0, 0, 0.35), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+
+    /* Wandergeek — dimensional tokens (specific to the gloss material). */
+    --wg-radius-gloss: 10px;
+    --wg-radius-icon: 12px;
+    --wg-radius-card: 14px;
+    --wg-radius-pill: 999px;
+    --wg-card-pad: 14px;
+    --wg-icon-btn-size: 44px;
+    --wg-font-size-tag: 10.5px;
+    --wg-font-size-mini: 10px;
+    --wg-font-size-caps: 10px;
+    --wg-font-size-metric-value: 20px;
+    --wg-section-label-pad-top: 18px;
+    --wg-section-label-gap: 6px;
+    /* Shared toolbar-row action button height. Matches the range-pill
+       min-height so the primary action button (+ Add, + Buy) aligns on the
+       same visual baseline as the sibling range/subtab pills. */
+    --wg-toolbar-btn-height: 36px;
+
+    /* Wandergeek — phone chrome. Decorative iPhone frame on desktop. */
+    --wg-phone-pad: 12px;
+    --wg-phone-radius: 48px;
+    --wg-phone-screen-radius: 38px;
+    --wg-phone-shadow:
+        0 50px 100px -20px rgba(0, 0, 0, 0.7),
+        0 0 0 2px rgba(255, 255, 255, 0.06),
+        0 0 0 3px rgba(0, 0, 0, 0.8);
+    --wg-dynamic-island-radius: 20px;
+    --wg-status-bar-pad-bottom: 6px;
+    --wg-status-bar-font-size: 15px;
+
+    /* Wandergeek — bottom nav. One slot per section, no "More" aggregator.
+       This app has five slots (Dashboard, Holdings, Transactions, Performance,
+       Settings), so the grid lays out in a single row. */
+    --wg-bottom-nav-pad-top: 10px;
+    --wg-bottom-nav-pad-x: 12px;
+    --wg-bottom-nav-pad-bottom: 30px;
+    --wg-bottom-nav-inner-radius: 20px;
+    --wg-bottom-nav-inner-pad: 6px;
+    --wg-bottom-nav-gap: 4px;
+    --wg-nav-item-radius: 14px;
+    --wg-nav-item-pad-y: 8px;
+    --wg-nav-item-pad-x: 4px;
+    --wg-nav-item-gap: 3px;
+    --wg-nav-item-font-size: 9.5px;
+    --wg-nav-icon-size: 22px;
+    --wg-bottom-nav-z: 40;
+    /* Reserved viewport-bottom space so the fixed nav never occludes page
+       content. Sized for the five-slot single row: 30px bottom pad + 12px
+       inner pad + one 52px row + ~12px slack ≈ 106px. (The sibling reserved
+       160px for its two-row, eight-slot default.) */
+    --wg-bottom-nav-reserved: 106px;
+
+    /* Wandergeek — toggle primitive */
+    --wg-toggle-width: 46px;
+    --wg-toggle-height: 26px;
+    --wg-toggle-knob-size: 20px;
+    --wg-toggle-knob-pad: 3px;
+    --wg-toggle-bg: var(--wg-gloss-bg-inset);
+    --wg-toggle-bg-on: var(--wg-gloss-bg-sun);
+    --wg-toggle-knob: var(--wg-ink-70);
+    --wg-toggle-knob-on: var(--wg-ink);
+    --wg-toggle-border: rgba(0, 0, 0, 0.25);
+    --wg-toggle-border-focus: var(--wg-sun);
+    --wg-toggle-border-disabled: var(--wg-border-hairline);
+
+    /* Wandergeek — shared chart theme.
+       Single source of truth for every chart card's surface, grid-line stroke,
+       and axis-tick label color/size. This matters more here than it did in
+       the sibling: a portfolio app is mostly charts. Individual charts may
+       keep their own geometry tokens (line stroke width, point radius), but
+       surface, grid, axis ticks, and the gain/loss series colors MUST come
+       from the shared tokens below. Adoption is pinned by
+       architecture.chart-theme.test.js. */
+    --wg-chart-card-bg: var(--wg-bg-card);
+    --wg-chart-card-border: var(--wg-border-hairline);
+    --wg-chart-card-radius: var(--wg-radius-card);
+    --wg-chart-card-pad: var(--wg-card-pad);
+    --wg-chart-guide-stroke: var(--wg-fg-5);
+    --wg-chart-guide-stroke-width: 1px;
+    --wg-chart-guide-dasharray: 2 4;
+    --wg-chart-axis-tick-color: var(--wg-fg-3);
+    --wg-chart-axis-tick-size: 10px;
+    /* Series colors resolve to the same delta triplet the holdings rows use,
+       so a performance line in negative territory and a losing position read
+       as the same signal. */
+    --wg-chart-gain-stroke: var(--wg-gain-fg);
+    --wg-chart-loss-stroke: var(--wg-loss-fg);
+    --wg-chart-neutral-stroke: var(--wg-sun);
+    --wg-chart-series-stroke-width: 2px;
+    --wg-chart-area-opacity: 0.14;
+}
+
+/* =============================================
+   Base reset
+   ============================================= */
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-family: var(--wg-font-ui);
+    -webkit-font-smoothing: antialiased;
+}
+
+#app {
+    padding: var(--space-lg);
+    /* Reserves room for the fixed Wandergeek bottom nav so the last card is
+       never clipped by it. */
+    padding-bottom: var(--wg-bottom-nav-reserved);
+}
+
+h1 {
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-bold);
+    letter-spacing: -0.01em;
+    margin-bottom: var(--space-lg);
+}
+
+h2 {
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-bold);
+    letter-spacing: -0.01em;
+}
+
+h3 {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-bold);
+    letter-spacing: -0.01em;
+}
+
+.hidden {
+    display: none !important;
+}
+
+@keyframes modal-enter {
+    from {
+        opacity: 0;
+        transform: translate(-50%, -48%);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, -50%);
+    }
+}
+
+/* ==========================================================================
+   Wandergeek primitives — gloss material classes for the deep-teal stage.
+   All values come from --wg-* tokens; no hardcoded hex in this block.
+   ========================================================================== */
+
+.wg-stage {
+    background:
+        radial-gradient(1200px 600px at 50% -10%, rgba(86, 172, 138, 0.18), transparent 60%),
+        radial-gradient(800px 500px at 80% 110%, rgba(251, 189, 13, 0.08), transparent 60%),
+        var(--wg-bg-stage);
+    color: var(--wg-fg-1);
+    font-family: var(--wg-font-ui);
+    -webkit-font-smoothing: antialiased;
+}
+
+.wg-card {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0) 60%),
+        var(--wg-bg-card);
+    border: 1px solid var(--wg-border-hairline);
+    border-radius: var(--wg-radius-card);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+        0 1px 0 rgba(0, 0, 0, 0.3);
+    padding: var(--wg-card-pad);
+}
+
+.wg-card--inset {
+    background: var(--wg-gloss-bg-inset);
+    box-shadow: var(--wg-gloss-shadow-inset);
+    border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.wg-gloss {
+    font-family: var(--wg-font-ui);
+    font-weight: 600;
+    color: var(--wg-fg-1);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--wg-radius-gloss);
+    background: var(--wg-gloss-bg);
+    box-shadow: var(--wg-gloss-shadow);
+    transition: filter 120ms ease, transform 120ms ease;
+    cursor: pointer;
+}
+
+.wg-gloss:active {
+    transform: translateY(1px);
+    filter: brightness(0.95);
+}
+
+.wg-gloss:hover {
+    filter: brightness(1.07);
+}
+
+.wg-gloss--sun {
+    color: var(--wg-ink);
+    background: var(--wg-gloss-bg-sun);
+    border-color: rgba(0, 0, 0, 0.18);
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.25);
+    box-shadow: var(--wg-gloss-shadow-sun);
+}
+
+.wg-gloss--clay {
+    color: var(--wg-fg-1);
+    background: var(--wg-gloss-bg-clay);
+    border-color: rgba(0, 0, 0, 0.2);
+}
+
+.wg-gloss--inset {
+    background: var(--wg-gloss-bg-inset);
+    box-shadow: var(--wg-gloss-shadow-inset);
+    border: 1px solid rgba(0, 0, 0, 0.25);
+    color: var(--wg-fg-1);
+    border-radius: var(--wg-radius-gloss);
+}
+
+.wg-gloss--lg {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: var(--space-md) var(--space-xl);
+    font-size: var(--font-size-md);
+}
+
+/* Shared toolbar-row action button. Unifies the "primary action pill sitting
+   next to a range/subtab track" pattern. This is the CANONICAL placement for
+   a primary action — never a floating FAB, never a bottom CTA dock; the
+   sibling project shipped both and retired both.
+
+   Size+shape only — color comes from .wg-gloss / .wg-gloss--sun or the
+   --primary modifier below. `align-self: center` defeats the
+   `align-items: stretch` inflation that made the add button visually taller
+   than the adjacent pills. Never size the button via a per-section __add
+   class — add or replace the variant on this shared base instead. */
+.wg-toolbar-btn {
+    flex-shrink: 0;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-xs);
+    min-height: var(--wg-toolbar-btn-height);
+    padding: var(--space-xs) var(--space-md);
+    font-family: var(--wg-font-ui);
+    font-weight: var(--font-weight-bold);
+    font-size: var(--font-size-sm);
+    border-radius: var(--wg-radius-gloss);
+    cursor: pointer;
+}
+
+/* Primary variant — yellow filled gloss, matching .wg-gloss--sun. Color only;
+   never changes size. Apply to the canonical add/log/buy action in a toolbar
+   row. */
+.wg-toolbar-btn--primary {
+    color: var(--wg-ink);
+    background: var(--wg-gloss-bg-sun);
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.25);
+    box-shadow: var(--wg-gloss-shadow-sun);
+    transition: filter 120ms ease, transform 120ms ease;
+}
+
+.wg-toolbar-btn--primary:active {
+    transform: translateY(1px);
+    filter: brightness(0.95);
+}
+
+.wg-toolbar-btn--primary:hover {
+    filter: brightness(1.07);
+}
+
+/* Secondary variant — outline/ghost on the teal stage. Matches the --primary
+   variant's size (the base class owns all sizing) — color only. */
+.wg-toolbar-btn--secondary {
+    color: var(--wg-fg-1);
+    background: transparent;
+    border: 1px solid var(--wg-border-hairline);
+    box-shadow: none;
+    transition: filter 120ms ease, transform 120ms ease, background-color 120ms ease;
+}
+
+.wg-toolbar-btn--secondary:active {
+    transform: translateY(1px);
+    filter: brightness(0.95);
+}
+
+.wg-toolbar-btn--secondary:hover {
+    border-color: var(--wg-border-strong);
+}
+
+.wg-icon-btn {
+    width: var(--wg-icon-btn-size);
+    height: var(--wg-icon-btn-size);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    padding: 0;
+}
+
+.wg-icon-btn .wg-gloss {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--wg-radius-icon);
+}
+
+/* Wandergeek modal shell — generic card-like overlay container. New screens
+   reuse this plus the .wg-field/.wg-label/.wg-input/.wg-select utilities
+   below rather than introducing per-section variants. */
+.wg-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 90%;
+    max-width: 320px;
+    max-height: 85vh;
+    overflow-y: auto;
+    z-index: var(--z-modal);
+    padding: var(--wg-card-pad);
+    font-family: var(--wg-font-ui);
+    color: var(--wg-fg-1);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0) 60%),
+        var(--wg-bg-card);
+    border: 1px solid var(--wg-border-hairline);
+    border-radius: var(--wg-radius-card);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+        0 1px 0 rgba(0, 0, 0, 0.3);
+    animation: modal-enter 0.2s ease;
+}
+
+.wg-modal__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+}
+
+.wg-modal__title {
+    margin: 0;
+    font-family: var(--wg-font-mono);
+    font-size: var(--font-size-lg);
+    font-weight: 600;
+    color: var(--wg-fg-1);
+}
+
+.wg-modal__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.wg-modal__actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+/* In-page confirm dialog. Shares the .wg-modal shell; adds a backdrop layer
+   and a message paragraph. Buttons reuse .wg-gloss / .wg-gloss--sun so no
+   bespoke colours live here.
+
+   Both the backdrop and the modal sit on the dedicated --z-confirm layer so a
+   confirm opened from inside an existing modal reliably occludes it — the
+   regression that would otherwise surface is a visible/clickable surface
+   around the confirm prompt. */
+.mt-confirm-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--color-overlay);
+    z-index: var(--z-confirm);
+}
+
+.mt-confirm-modal {
+    z-index: var(--z-confirm);
+}
+
+.mt-confirm-modal__message {
+    margin: 0;
+    font-family: var(--wg-font-ui);
+    font-size: var(--font-size-sm);
+    color: var(--wg-fg-2);
+    line-height: 1.5;
+}
+
+.mt-confirm-modal__cancel,
+.mt-confirm-modal__confirm {
+    min-height: 44px;
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--font-size-sm);
+}
+
+.wg-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.wg-field--row {
+    display: flex;
+    flex-direction: row;
+    gap: var(--space-md);
+}
+
+.wg-field--row > .wg-field {
+    flex: 1;
+    min-width: 0;
+}
+
+.wg-label {
+    font-family: var(--wg-font-ui);
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--wg-fg-3);
+}
+
+.wg-input {
+    width: 100%;
+    padding: var(--space-md);
+    font-family: var(--wg-font-ui);
+    font-size: var(--font-size-md);
+    color: var(--wg-fg-1);
+    background: var(--wg-bg-card-inset);
+    border: 1px solid var(--wg-border-hairline);
+    border-radius: var(--wg-radius-gloss);
+    box-sizing: border-box;
+    margin: 0;
+}
+
+.wg-select {
+    width: 100%;
+    padding: var(--space-md);
+    font-family: var(--wg-font-ui);
+    font-size: var(--font-size-md);
+    color: var(--wg-fg-1);
+    background: var(--wg-bg-card-inset);
+    border: 1px solid var(--wg-border-hairline);
+    border-radius: var(--wg-radius-gloss);
+    box-sizing: border-box;
+    margin: 0;
+}
+
+.wg-input:focus {
+    outline: none;
+    border-color: var(--wg-sun);
+}
+
+.wg-select:focus {
+    outline: none;
+    border-color: var(--wg-sun);
+}
+
+.wg-input::placeholder {
+    color: var(--wg-fg-4);
+}
+
+textarea.wg-input {
+    resize: vertical;
+}
+
+.wg-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-family: var(--wg-font-ui);
+    font-size: var(--wg-font-size-tag);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 3px var(--space-sm);
+    border-radius: var(--radius-pill);
+    border: 1px solid transparent;
+}
+
+.wg-tag--normal {
+    background: var(--wg-tag-normal-bg);
+    color: var(--wg-tag-normal-fg);
+    border-color: var(--wg-tag-normal-border);
+}
+
+.wg-tag--high {
+    background: var(--wg-tag-high-bg);
+    color: var(--wg-tag-high-fg);
+    border-color: var(--wg-tag-high-border);
+}
+
+.wg-tag--alert {
+    background: var(--wg-tag-alert-bg);
+    color: var(--wg-tag-alert-fg);
+    border-color: var(--wg-tag-alert-border);
+}
+
+.wg-tag--mono {
+    font-family: var(--wg-font-mono);
+    letter-spacing: 0;
+}
+
+/* Sun-yellow active-chip variant. Resolves to the shared --wg-tag-high-*
+   palette so no new colors enter the token set. */
+.wg-tag--sun {
+    background: var(--wg-tag-high-bg);
+    color: var(--wg-tag-high-fg);
+    border-color: var(--wg-tag-high-border);
+}
+
+/* =============================================
+   WG DELTA — the gain/loss signal
+   The most-repeated visual in a portfolio app.
+   Shape mirrors .wg-tag exactly so tag, modal,
+   and chart CSS treat the two uniformly.
+
+   The ::before glyph is the point: color alone
+   never carries the sign. Use `.wg-delta--flat`
+   for zero AND for unknown/pending change.
+   ============================================= */
+.wg-delta {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-family: var(--wg-font-mono);
+    font-size: var(--wg-font-size-tag);
+    font-weight: 600;
+    letter-spacing: 0;
+    padding: 3px var(--space-sm);
+    border-radius: var(--radius-pill);
+    border: 1px solid transparent;
+}
+
+/* The sign glyph. Non-negotiable — see the --wg-gain-* token comment. */
+.wg-delta::before {
+    font-family: var(--wg-font-ui);
+    line-height: 1;
+}
+
+.wg-delta--gain {
+    background: var(--wg-gain-bg);
+    color: var(--wg-gain-fg);
+    border-color: var(--wg-gain-border);
+}
+
+.wg-delta--gain::before {
+    content: '\25B2';
+}
+
+.wg-delta--loss {
+    background: var(--wg-loss-bg);
+    color: var(--wg-loss-fg);
+    border-color: var(--wg-loss-border);
+}
+
+.wg-delta--loss::before {
+    content: '\25BC';
+}
+
+.wg-delta--flat {
+    background: var(--wg-flat-bg);
+    color: var(--wg-flat-fg);
+    border-color: var(--wg-flat-border);
+}
+
+.wg-delta--flat::before {
+    content: '\2014';
+}
+
+/* Bare variant — same sign glyph and color, no pill chrome. For dense table
+   cells where a bordered pill per row would be visual noise. Still carries
+   the glyph, so it is still not color-alone. */
+.wg-delta--bare {
+    padding: 0;
+    background: transparent;
+    border-color: transparent;
+    font-size: inherit;
+}
+
+.wg-section-label {
+    font-family: var(--wg-font-ui);
+    font-size: var(--wg-font-size-tag);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--wg-fg-4);
+    padding: var(--wg-section-label-pad-top) var(--space-xs) var(--space-sm);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    min-width: 0;
+}
+
+.wg-section-label > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.wg-section-label::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--wg-sun);
+    border-radius: 50%;
+    margin-right: var(--space-sm);
+    box-shadow: 0 0 8px var(--wg-sun);
+    flex-shrink: 0;
+}
+
+.wg-mono-display {
+    font-family: var(--wg-font-mono);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--wg-fg-1);
+}
+
+.wg-muted {
+    color: var(--wg-fg-3);
+}
+
+.wg-muted-strong {
+    color: var(--wg-fg-2);
+}
+
+/* ==========================================================================
+   Wandergeek phone chrome — decorative iPhone frame.
+   On desktop the chrome wraps the SPA in a 390×844 phone shell with status
+   bar, dynamic island, and home indicator. On mobile/PWA viewports the chrome
+   collapses so the app fills the viewport.
+   ========================================================================== */
+
+.wg-phone {
+    width: 390px;
+    height: 844px;
+    flex-shrink: 0;
+    position: relative;
+    background: #000;
+    padding: var(--wg-phone-pad);
+    border-radius: var(--wg-phone-radius);
+    box-shadow: var(--wg-phone-shadow);
+}
+
+.wg-phone-screen {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    border-radius: var(--wg-phone-screen-radius);
+    background: var(--wg-bg-stage);
+    display: flex;
+    flex-direction: column;
+}
+
+.wg-phone-screen__content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    position: relative;
+}
+
+.wg-dynamic-island {
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 110px;
+    height: 32px;
+    background: #000;
+    border-radius: var(--wg-dynamic-island-radius);
+    z-index: 1003;
+    pointer-events: none;
+}
+
+.wg-status-bar {
+    flex-shrink: 0;
+    height: 50px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding: 0 28px var(--wg-status-bar-pad-bottom);
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    font-size: var(--wg-status-bar-font-size);
+    font-weight: 600;
+    color: var(--wg-fg-1);
+    z-index: 10;
+    position: relative;
+}
+
+.wg-status-bar__icons {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.wg-home-indicator {
+    position: absolute;
+    bottom: 7px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 134px;
+    height: 5px;
+    border-radius: var(--wg-radius-pill);
+    background: rgba(255, 255, 255, 0.45);
+    z-index: 1003;
+    pointer-events: none;
+}
+
+/* Mobile / PWA: collapse the chrome and let the screen fill the viewport. */
+@media (max-width: 480px) {
+    .wg-phone {
+        width: 100%;
+        height: 100vh;
+        height: 100dvh;
+        padding: 0;
+        border-radius: 0;
+        box-shadow: none;
+        background: var(--wg-bg-stage);
+    }
+
+    .wg-phone-screen {
+        border-radius: 0;
+    }
+
+    .wg-dynamic-island,
+    .wg-status-bar,
+    .wg-home-indicator {
+        display: none;
+    }
+}
+
+/* ==========================================================================
+   Wandergeek bottom nav — canonical lateral navigation.
+   One slot per real section: Dashboard, Holdings, Transactions, Performance,
+   Settings. No "More" aggregator; every section is a first-class destination.
+   --wg-nav-cols is set on .wg-bottom-nav__inner by JS (items.length drives the
+   column count) — the single allowlisted structural exception to the
+   "no --wg-* in JS" rule. Five slots lay out as one row.
+   ========================================================================== */
+
+.wg-bottom-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: var(--wg-bottom-nav-pad-top) var(--wg-bottom-nav-pad-x) var(--wg-bottom-nav-pad-bottom);
+    background: linear-gradient(180deg, rgba(15, 37, 34, 0) 0%, rgba(15, 37, 34, 0.85) 40%, rgba(15, 37, 34, 0.95) 100%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    z-index: var(--wg-bottom-nav-z);
+}
+
+.wg-bottom-nav__inner {
+    display: grid;
+    grid-template-columns: repeat(var(--wg-nav-cols, 5), 1fr);
+    grid-auto-flow: row;
+    gap: var(--wg-bottom-nav-gap);
+    padding: var(--wg-bottom-nav-inner-pad);
+    border-radius: var(--wg-bottom-nav-inner-radius);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 0, 0) 60%),
+        rgba(15, 37, 34, 0.85);
+    border: 1px solid var(--wg-border-strong);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 10px 30px -8px rgba(0, 0, 0, 0.6);
+}
+
+.wg-nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--wg-nav-item-gap);
+    padding: var(--wg-nav-item-pad-y) var(--wg-nav-item-pad-x);
+    border-radius: var(--wg-nav-item-radius);
+    background: none;
+    border: none;
+    font-family: var(--wg-font-ui);
+    font-size: var(--wg-nav-item-font-size);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--wg-fg-4);
+    cursor: pointer;
+    transition: color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.wg-nav-item > svg {
+    width: var(--wg-nav-icon-size);
+    height: var(--wg-nav-icon-size);
+    stroke: currentColor;
+    fill: none;
+}
+
+.wg-nav-item:hover:not(.wg-nav-item--active) {
+    color: var(--wg-fg-2);
+}
+
+.wg-nav-item--active {
+    color: var(--wg-sun);
+    background: linear-gradient(180deg, rgba(251, 189, 13, 0.14) 0%, rgba(251, 189, 13, 0.05) 100%);
+    box-shadow: inset 0 0 0 1px rgba(251, 189, 13, 0.22);
+}
+
+/* =============================================
+   WG SCREEN STAGE — shared substrate utility.
+   Applies the deep-teal stage with radial
+   highlights to any top-level screen view.
+   Screens sit directly on this — there are no
+   section-header banners; the active bottom-nav
+   pill is the sole screen indicator.
+   ============================================= */
+.wg-screen-stage {
+    color: var(--wg-fg-1);
+    /* Bleed the stage past #app's padding so the palette fills edge-to-edge. */
+    background:
+        radial-gradient(1200px 600px at 50% -10%, rgba(86, 172, 138, 0.18), transparent 60%),
+        radial-gradient(800px 500px at 80% 110%, rgba(251, 189, 13, 0.08), transparent 60%),
+        var(--wg-bg-stage);
+    margin: calc(var(--space-lg) * -1);
+    margin-bottom: calc(var(--wg-bottom-nav-reserved) * -1);
+    padding: var(--space-lg) var(--space-lg) var(--wg-bottom-nav-reserved);
+    min-height: 100vh;
+    box-sizing: border-box;
+}
+
+/* Empty-state copy over the dark stage: .empty-state-msg defaults to
+   var(--hint-color), which needs the near-white muted fg to stay legible on
+   --wg-bg-stage. */
+.wg-screen-stage .empty-state-msg {
+    color: var(--wg-fg-3);
+}
+
+/* =============================================
+   Sparkline — variants set a single `color` so
+   the <path>, fill path, and tail circle all
+   track the same --wg-* token. The basis for
+   price sparklines.
+   ============================================= */
+.wg-sparkline {
+    display: block;
+    color: var(--wg-mint-soft);
+}
+.wg-sparkline--sun { color: var(--wg-sun); }
+.wg-sparkline--mint { color: var(--wg-mint-soft); }
+.wg-sparkline--mint-soft { color: var(--wg-mint-soft); }
+.wg-sparkline--coral { color: var(--wg-clay-soft); }
+/* Delta-aware variants — a gaining price sparkline and a gaining holdings
+   row resolve to the same token. */
+.wg-sparkline--gain { color: var(--wg-gain-fg); }
+.wg-sparkline--loss { color: var(--wg-loss-fg); }
+
+.wg-spark {
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    fill: none;
+}
+
+.wg-spark-fill {
+    fill: currentColor;
+    opacity: 0.14;
+    stroke: none;
+}
+
+.wg-spark-tail {
+    fill: currentColor;
+    stroke: none;
+}
+
+/* =============================================
+   Shared chart theme consumers.
+   Every chart component uses these classes
+   rather than reintroducing per-chart colors.
+   Pinned by architecture.chart-theme.test.js.
+   ============================================= */
+.wg-chart-card {
+    background: var(--wg-chart-card-bg);
+    border: 1px solid var(--wg-chart-card-border);
+    border-radius: var(--wg-chart-card-radius);
+    padding: var(--wg-chart-card-pad);
+}
+
+.wg-chart__guide {
+    stroke: var(--wg-chart-guide-stroke);
+    stroke-width: var(--wg-chart-guide-stroke-width);
+    stroke-dasharray: var(--wg-chart-guide-dasharray);
+    fill: none;
+}
+
+.wg-chart__axis-tick {
+    fill: var(--wg-chart-axis-tick-color);
+    font-size: var(--wg-chart-axis-tick-size);
+    font-family: inherit;
+}
+
+.wg-chart__series {
+    fill: none;
+    stroke: var(--wg-chart-neutral-stroke);
+    stroke-width: var(--wg-chart-series-stroke-width);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.wg-chart__series--gain {
+    stroke: var(--wg-chart-gain-stroke);
+}
+
+.wg-chart__series--loss {
+    stroke: var(--wg-chart-loss-stroke);
+}
+
+.wg-chart__area {
+    stroke: none;
+    fill: var(--wg-chart-neutral-stroke);
+    opacity: var(--wg-chart-area-opacity);
+}
+
+.wg-chart__area--gain {
+    fill: var(--wg-chart-gain-stroke);
+}
+
+.wg-chart__area--loss {
+    fill: var(--wg-chart-loss-stroke);
+}
+
+/* =============================================
+   Ring gauge — Apple-style circular progress.
+   Radius is fixed at r=15.9155 in wg-ring.js so
+   the circumference is ≈100 user units and the
+   dash math reads like a percentage. JS sets
+   only the neutral --ring-progress custom
+   property; CSS owns dash offset and color.
+   ============================================= */
+.wg-ring {
+    flex-shrink: 0;
+}
+
+.wg-ring__track {
+    fill: none;
+    stroke: var(--wg-border-strong);
+    stroke-width: 3;
+}
+
+.wg-ring__progress {
+    fill: none;
+    stroke: var(--wg-sun);
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-dashoffset: calc(100 - var(--ring-progress, 0));
+    transition: stroke-dashoffset 0.4s ease, stroke 0.3s ease;
+}
+
+.wg-ring--closed .wg-ring__progress {
+    stroke: var(--wg-mint-soft);
+}
+
+.wg-ring__check {
+    fill: none;
+    stroke: var(--wg-mint-soft);
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* =============================================
+   Stale-data badge. Communicates whether a
+   screen's data is fresh, stale, or actively
+   offline. The neutral variant uses the muted
+   section-label tokens; the warning variant
+   reuses the tag-alert triplet so no new colours
+   enter the palette.
+   ============================================= */
+.wg-stale-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-family: var(--wg-font-ui);
+    font-size: var(--wg-font-size-tag);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 2px var(--space-sm);
+    border-radius: var(--radius-pill);
+    border: 1px solid transparent;
+    line-height: 1.2;
+}
+
+.wg-stale-badge--neutral {
+    background: transparent;
+    color: var(--wg-fg-3);
+    border-color: var(--wg-border-hairline);
+}
+
+.wg-stale-badge--warning {
+    background: var(--wg-tag-alert-bg);
+    color: var(--wg-tag-alert-fg);
+    border-color: var(--wg-tag-alert-border);
+}
+
+/* =============================================
+   Toggle primitive. A pill + knob driven by a
+   hidden <input type="checkbox">. The unchecked
+   state uses --wg-toggle-bg (inset gloss); the
+   checked state flips to --wg-toggle-bg-on (the
+   sun gradient) so the toggle matches the
+   .wg-gloss--sun convention used for primary
+   actions everywhere else.
+   ============================================= */
+.wg-toggle {
+    position: relative;
+    display: inline-block;
+    width: var(--wg-toggle-width);
+    height: var(--wg-toggle-height);
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.wg-toggle__input {
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    inset: 0;
+    cursor: pointer;
+}
+
+.wg-toggle__track {
+    position: absolute;
+    inset: 0;
+    background: var(--wg-toggle-bg);
+    border: 1px solid var(--wg-toggle-border);
+    border-radius: var(--wg-radius-pill);
+    box-shadow: var(--wg-gloss-shadow-inset);
+    transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    pointer-events: none;
+}
+
+.wg-toggle__knob {
+    position: absolute;
+    top: var(--wg-toggle-knob-pad);
+    left: var(--wg-toggle-knob-pad);
+    width: var(--wg-toggle-knob-size);
+    height: var(--wg-toggle-knob-size);
+    background: var(--wg-toggle-knob);
+    border-radius: var(--radius-pill);
+    transition: transform 160ms ease, background 160ms ease;
+    pointer-events: none;
+}
+
+.wg-toggle__input:checked ~ .wg-toggle__track {
+    background: var(--wg-toggle-bg-on);
+    box-shadow: var(--wg-gloss-shadow-sun);
+}
+
+.wg-toggle__input:checked ~ .wg-toggle__knob {
+    background: var(--wg-toggle-knob-on);
+    transform: translateX(calc(var(--wg-toggle-width) - var(--wg-toggle-knob-size) - var(--wg-toggle-knob-pad) - var(--wg-toggle-knob-pad)));
+}
+
+.wg-toggle__input:focus-visible ~ .wg-toggle__track {
+    outline: 2px solid var(--wg-toggle-border-focus);
+    outline-offset: 2px;
+}
+
+.wg-toggle__input:disabled ~ .wg-toggle__track {
+    border-color: var(--wg-toggle-border-disabled);
+    opacity: 0.6;
+}
+
+.wg-toggle__input:disabled ~ .wg-toggle__knob {
+    opacity: 0.6;
+}
+
+.wg-toggle--disabled {
+    cursor: not-allowed;
+}
+
+/* Settings row shell used by <mt-setting-toggle>. */
+.wg-settings-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-md) 0;
+}
+
+.wg-settings-row__content {
+    min-width: 0;
+}
+
+.wg-settings-row__title {
+    margin: 0;
+    font-family: var(--wg-font-ui);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-bold);
+    color: var(--wg-fg-1);
+}
+
+.wg-settings-row__desc {
+    margin: var(--space-xs) 0 0;
+    font-family: var(--wg-font-ui);
+    font-size: var(--font-size-sm);
+    color: var(--wg-fg-3);
+}
+
+.wg-settings-row__control {
+    display: flex;
+    align-items: center;
+}
+
+/* ========== Stat item (label + value display cell) ========== */
+
+.stat-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    min-width: 0;
+}
+
+.stat-label {
+    font-family: var(--wg-font-ui);
+    font-size: var(--wg-font-size-caps);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--wg-fg-4);
+}
+
+.stat-value {
+    font-family: var(--wg-font-mono);
+    font-size: var(--wg-font-size-metric-value);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--wg-fg-1);
+}
+
+/* ========== Row action buttons + sync badges ========== */
+
+.icon-action-btn {
+    min-width: 44px;
+    min-height: 44px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-sm);
+    margin: 0;
+    transition: opacity 0.2s ease, background-color 0.2s ease;
+    border-radius: var(--radius-sm);
+}
+
+.icon-action-btn:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.icon-action-btn.delete:hover {
+    background-color: rgba(198, 85, 58, 0.18);
+}
+
+.modal-action-btn {
+    min-height: 44px;
+    padding: 0 var(--space-lg);
+    border-radius: var(--radius-lg);
+    border: none;
+    background-color: var(--secondary-bg-color);
+    color: var(--text-color);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    transition: background-color 0.2s ease, transform 0.1s ease;
+}
+
+.modal-action-btn:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.modal-action-btn:active {
+    transform: scale(0.96);
+}
+
+.modal-action-btn.delete:hover {
+    background-color: rgba(198, 85, 58, 0.18);
+}
+
+.sync-pending-badge {
+    display: inline-block;
+    padding: 2px var(--space-sm);
+    background: var(--color-status-pending-bg-start);
+    color: var(--color-status-pending-text);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-bold);
+    border-radius: var(--radius-sm);
+    margin-left: var(--space-sm);
+    vertical-align: middle;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.sync-rejected-badge {
+    display: inline-block;
+    padding: 2px var(--space-sm);
+    background: var(--color-danger);
+    color: #fff;
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-bold);
+    border-radius: var(--radius-sm);
+    margin-left: var(--space-sm);
+    vertical-align: middle;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    cursor: help;
+}
+
+/* ========== Empty / error state (shared) ========== */
+
+.empty-state-msg {
+    text-align: center;
+    color: var(--hint-color);
+    padding: var(--space-xl);
+}
+
+.no-data-msg {
+    color: var(--hint-color);
+    font-size: var(--font-size-sm);
+}
+
+/* ========== Utility classes ========== */
+
+.flex-row {
+    display: flex;
+    flex-direction: row;
+}
+
+.flex-col {
+    display: flex;
+    flex-direction: column;
+}
+
+.flex-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.flex-between {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.flex-1 {
+    flex: 1;
+}
+
+.flex-wrap {
+    flex-wrap: wrap;
+}
+
+.items-start {
+    align-items: flex-start;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.text-hint {
+    color: var(--hint-color);
+}
+
+.text-muted {
+    color: var(--hint-color);
+}
+
+.text-danger {
+    color: var(--color-danger);
+}
+
+.text-error {
+    color: var(--color-danger);
+}
+
+.text-success {
+    color: var(--color-success);
+}
+
+.text-xs {
+    font-size: var(--font-size-xs);
+}
+
+.text-sm {
+    font-size: var(--font-size-sm);
+}
+
+.cursor-pointer {
+    cursor: pointer;
+}
+
+.gap-sm {
+    gap: var(--space-sm);
+}
+
+.gap-md {
+    gap: var(--space-md);
+}
+
+.gap-xl {
+    gap: var(--space-xl);
+}
+
+.mb-xs {
+    margin-bottom: var(--space-xs);
+}
+
+.mb-sm {
+    margin-bottom: var(--space-sm);
+}
+
+.mb-md {
+    margin-bottom: var(--space-md);
+}
+
+.mb-lg {
+    margin-bottom: var(--space-lg);
+}
+
+.mt-xs {
+    margin-top: var(--space-xs);
+}
+
+.mt-sm {
+    margin-top: var(--space-sm);
+}
+
+.mt-md {
+    margin-top: var(--space-md);
+}
+
+.mt-lg {
+    margin-top: var(--space-lg);
+}
+
+.mt-xl {
+    margin-top: var(--space-xl);
+}
+
+.m-0 {
+    margin: 0;
+}
+
+.fw-medium {
+    font-weight: var(--font-weight-medium);
+}
+
+.w-full {
+    width: 100%;
+}
+
+.list-reset {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}

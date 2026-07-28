@@ -303,10 +303,45 @@ Grotesk for UI body), and the domain-neutral primitives — `wg-bottom-nav`, `wg
 
 **Port the enforcement, not just the CSS.** The architecture tests are what make the above survive
 contact with feature work: design-tokens, inline-styles, wg-primitives, chart-theme,
-no-external-fonts-in-html, no-inline-handlers, domain-purity, and sw-precache. A design system
-without its guard tests degrades to suggestions within a month.
+no-external-fonts-in-html, no-inline-handlers. A design system without its guard tests degrades to
+suggestions within a month. (`domain-purity` and `sw-precache` are listed in the original but have
+nothing to bind to until the PWA shell exists — they land with §B6, not here.)
 
-Nav slots for this app: **Dashboard, Holdings, Transactions, Performance, Settings**.
+Nav slots for this app: **Dashboard, Holdings, Transactions, Performance, Settings** — five, so the
+bottom nav is one row and `--wg-bottom-nav-reserved` is 106px, not the sibling's two-row 160px.
+
+### Gain and loss — the one token group the sibling could not supply
+
+The sibling's status vocabulary is severity-shaped (`normal`/`high`/`alert`) because it is a health
+app. A portfolio app's most-repeated visual signal is **gain vs. loss**, on essentially every row,
+tile and chart. Added as semantic triplets aliased onto the existing tag colours so no new hue enters
+the palette: `--wg-{gain,loss,flat}-{bg,fg,border}`. Chart series tokens resolve to the same pair, so
+a negative performance line and a losing holdings row agree by construction.
+
+**Gain/loss is never encoded by colour alone, and this is enforced, not advised.**
+`.wg-delta--gain/--loss/--flat::before` emits ▲/▼/— from CSS, and
+`architecture.wg-primitives.test.js` fails if a glyph is removed — so a screens author cannot forget
+it and a later "cleanup" cannot quietly delete it. `.wg-delta--bare` drops the pill chrome for dense
+table cells but keeps the glyph. Red/green alone is the standard finance-UI accessibility failure and
+it fails for roughly 1 in 12 men; a convention would have decayed, a guard test does not.
+
+### Guard scope is deliberately stricter here than in the sibling
+
+Two guards were widened during the port, and **frontend executors should expect them to bite**:
+
+- **`inline-styles` covers every file and its allowlist is empty.** The sibling narrowed this guard to
+  ~8 files because it had years of pre-reskin inline styles to grandfather in. This codebase has no
+  legacy, so there is nothing to grandfather. Set class names; let CSS resolve values. If you think
+  you need an exception, you almost certainly need a CSS class.
+- **`no-external-fonts` covers every `.html` **and** `.css`**, not just `index.html`, and also asserts
+  that the woff2 files `fonts.css` names actually exist. The narrower version would not have caught
+  an `@import url(https://fonts.googleapis.com/…)` inside a stylesheet — and a guard that only bans
+  the CDN in one file is half a guard.
+
+Legacy colour names (`--bg-color`, `--text-color`, `--hint-color`, `--secondary-bg-color`) are kept
+as *names* but now resolve onto the Wandergeek palette. That let the ported utility blocks carry over
+byte-identical instead of being rewritten. The sibling's Telegram theme-mirror tokens
+(`--tg-theme-*`) are gone — there is no Telegram host here.
 
 ## 10. Tracks
 
