@@ -1606,3 +1606,44 @@ textarea.wg-input {
     margin: 0;
     padding: 0;
 }
+
+/* =============================================
+   SHELL — service-worker update prompt.
+   Added by the PWA shell bead (myportfolio-g7e.6).
+
+   A new worker is NEVER applied silently: accepting
+   fresh JavaScript without the user asking is
+   exactly the attack the service-worker pin is
+   meant to narrow (ARCHITECTURE.md §8, code-serving
+   caveat). This bar is the explicit consent step.
+
+   It is not a section-header banner — screens still
+   carry none, and the active bottom-nav pill is
+   still the sole screen indicator (§9). This is a
+   transient, app-level prompt that is display:none
+   until a worker is actually waiting.
+   ============================================= */
+.wg-update-prompt {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: var(--z-toast);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    padding: var(--space-md) var(--space-lg);
+    /* Clears the notch / status bar in a standalone install. */
+    padding-top: calc(var(--space-md) + env(safe-area-inset-top));
+    background: var(--wg-bg-card);
+    border-bottom: 1px solid var(--wg-border-hairline);
+    box-shadow: var(--shadow-md);
+    color: var(--wg-fg-1);
+}
+
+.wg-update-prompt__text {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--font-size-sm);
+}
