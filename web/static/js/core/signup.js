@@ -390,6 +390,15 @@ function downloadKit(docHtml, accountId) {
 
 // An offscreen iframe rather than window.print(), so what prints is the kit
 // document itself — identical to the downloaded file — and not the app chrome.
+//
+// KNOWN DEGRADATION: a srcdoc document inherits the parent's CSP, and this
+// origin sets style-src 'self', so the kit's inline <style> is blocked here and
+// the PRINTED copy comes out unstyled. Every word of it is still present and
+// legible — address, account id, recovery code — and the DOWNLOADED copy is
+// unaffected, because it opens from file:// with no CSP and keeps its styling.
+// That trade is deliberate: the alternative is loosening style-src on the one
+// page that holds the DEK in memory, which is not a trade worth making for
+// print cosmetics.
 function printKit(docHtml) {
   const frame = document.createElement('iframe');
   frame.setAttribute('aria-hidden', 'true');
