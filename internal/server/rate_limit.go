@@ -1,8 +1,9 @@
 package server
 
 import (
-	"net"
+	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -18,38 +19,123 @@ const (
 	ceremonyRateLimitWindow = time.Minute
 )
 
-// clientIP returns the caller's IP for rate-limiting.
+// defaultTrustedProxies is what X-Forwarded-For is believed from when nothing
+// is configured: loopback only.
 //
-// This handling is load-bearing, not defensive boilerplate. Deployed behind a
-// reverse proxy (Traefik, Caddy, nginx), RemoteAddr is the PROXY's address, so
-// keying on it alone puts every user on the planet into one bucket — a single
-// client's retries would then rate-limit everyone's login at once. That is an
-// outage dressed as a protection, and the sibling project shipped it once.
+// Loopback is the one source that cannot be reached by a remote attacker at
+// all, so trusting it is safe by construction, and it covers the common
+// "reverse proxy on the same host" deployment with no configuration. Anything
+// else — a proxy on a Docker network, a separate load balancer — has to be
+// named explicitly, because "private address" is NOT the same as "is my proxy":
+// with a published container port, every request on the planet arrives from the
+// bridge gateway's private address, and trusting that would let any caller
+// forge a fresh bucket per request.
+var defaultTrustedProxies = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("::1/128"),
+}
+
+// ParseTrustedProxies parses a comma-separated CIDR list (the
+// MYPORTFOLIO_TRUSTED_PROXIES setting) naming the reverse proxies whose
+// forwarded-for headers may be believed. An empty spec yields
+// defaultTrustedProxies.
 //
-// The last X-Forwarded-For hop is the address the proxy itself observed and
-// appended, so a client-supplied X-Forwarded-For header cannot spoof it; only
-// then X-Real-IP, then RemoteAddr for a direct connection.
-func clientIP(r *http.Request) string {
+// This has to be configuration rather than a constant because the two ways of
+// getting it wrong fail in opposite directions, and only the operator knows
+// which topology they have:
+//
+//   - Trusting too much: any caller sets X-Forwarded-For to a fresh value per
+//     request and the ceremony limiter stops existing.
+//   - Trusting too little: behind a proxy, every user shares the proxy's single
+//     bucket, so one client's retries throttle everybody.
+func ParseTrustedProxies(spec string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(spec) == "" {
+		return defaultTrustedProxies, nil
+	}
+	var out []netip.Prefix
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil {
+			// An address without a mask is the obvious way to write this, so
+			// accept it as a single-host prefix rather than failing on it.
+			addr, addrErr := netip.ParseAddr(part)
+			if addrErr != nil {
+				return nil, fmt.Errorf("trusted proxies: %q is not a CIDR block or IP address: %w", part, err)
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		out = append(out, prefix.Masked())
+	}
+	return out, nil
+}
+
+// clientIP returns the caller's IP for rate-limiting, believing forwarded-for
+// headers only when the request actually arrived from a trusted proxy.
+//
+// The forwarded-for handling is load-bearing: behind a reverse proxy every
+// request's RemoteAddr is the PROXY's address, so keying on it alone puts every
+// user into one bucket and one client's retries throttle everyone — an outage
+// dressed as a protection.
+//
+// But it is only safe when the immediate peer is a proxy that overwrites or
+// appends the header itself. From an untrusted peer these headers are just
+// caller-supplied strings, and honouring them turns the limiter into a no-op:
+// rotate the value, get a fresh bucket, repeat. Hence the trust check first.
+func clientIP(r *http.Request, trusted []netip.Prefix) string {
+	peer := peerAddr(r.RemoteAddr)
+	if !trustsPeer(trusted, peer) {
+		return peer
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// The LAST hop is the address the trusted proxy itself observed and
+		// appended; entries before it may have been forged by the client.
 		parts := strings.Split(xff, ",")
 		return strings.TrimSpace(parts[len(parts)-1])
 	}
 	if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
 		return strings.TrimSpace(xrip)
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
-		return host
+	return peer
+}
+
+// peerAddr is the bare address of the immediate TCP peer.
+func peerAddr(remoteAddr string) string {
+	if ap, err := netip.ParseAddrPort(remoteAddr); err == nil {
+		return ap.Addr().Unmap().String()
 	}
-	return r.RemoteAddr
+	if addr, err := netip.ParseAddr(remoteAddr); err == nil {
+		return addr.Unmap().String()
+	}
+	// Unparseable (a Unix socket, a test fake). Use it verbatim: an opaque but
+	// consistent key still buckets correctly, which is all the limiter needs.
+	return remoteAddr
+}
+
+func trustsPeer(trusted []netip.Prefix, peer string) bool {
+	addr, err := netip.ParseAddr(peer)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, prefix := range trusted {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // limitByIP wraps h so each client IP gets at most limiter.max hits per window.
 // On reject it returns a bare 429 with no detail — identical for every caller
 // regardless of whether the account or credential exists, so it adds no
 // enumeration oracle to the deliberately-uniform ceremony error surface.
-func limitByIP(limiter *rateLimiter, h http.HandlerFunc) http.HandlerFunc {
+func limitByIP(limiter *rateLimiter, trusted []netip.Prefix, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !limiter.Allow(clientIP(r)) {
+		if !limiter.Allow(clientIP(r, trusted)) {
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}

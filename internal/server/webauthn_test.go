@@ -37,7 +37,7 @@ func newVault(t *testing.T) *vault {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &vault{t: t, h: New(testFS(), db, testSessionSecret), db: db}
+	return &vault{t: t, h: New(testFS(), db, testSessionSecret, defaultTrustedProxies), db: db}
 }
 
 func (v *vault) do(method, path string, body any, cookies ...*http.Cookie) *httptest.ResponseRecorder {

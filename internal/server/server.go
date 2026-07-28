@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"net/netip"
 
 	"github.com/korjavin/myportfolio/internal/store"
 )
@@ -47,19 +48,26 @@ type API struct {
 	registerChallenges *challengeStore
 	loginChallenges    *challengeStore
 	limiter            *rateLimiter
+	trustedProxies     []netip.Prefix
 }
 
-// New builds the single-origin handler. staticFS is the web/static tree (the
-// PWA shell); db backs the readiness probe and the vault; sessionSecret signs
-// session cookies and comes from store.DB.SessionSecret, so it survives a
-// restart.
-func New(staticFS fs.FS, db *store.DB, sessionSecret string) http.Handler {
+// New builds the single-origin handler.
+//
+//   - staticFS is the web/static tree (the PWA shell).
+//   - db backs the readiness probe and the vault.
+//   - sessionSecret signs session cookies; it comes from
+//     store.DB.SessionSecret, so it survives a restart.
+//   - trustedProxies names the reverse proxies whose forwarded-for headers the
+//     ceremony rate limiter may believe (see ParseTrustedProxies). Pass nil to
+//     trust none, which keys every caller on its real TCP peer.
+func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []netip.Prefix) http.Handler {
 	api := &API{
 		db:                 db,
 		sessionSecret:      sessionSecret,
 		registerChallenges: newChallengeStore(),
 		loginChallenges:    newChallengeStore(),
 		limiter:            newRateLimiter(ceremonyRateLimitMax, ceremonyRateLimitWindow),
+		trustedProxies:     trustedProxies,
 	}
 
 	mux := http.NewServeMux()
@@ -77,10 +85,10 @@ func New(staticFS fs.FS, db *store.DB, sessionSecret string) http.Handler {
 func (a *API) registerRoutes(mux *http.ServeMux) {
 	// Ceremony routes are unauthenticated by definition — they are how a caller
 	// becomes authenticated — so they are the ones that need per-IP throttling.
-	mux.HandleFunc("POST /api/webauthn/register/begin", limitByIP(a.limiter, a.registerBegin))
-	mux.HandleFunc("POST /api/webauthn/register/finish", limitByIP(a.limiter, a.registerFinish))
-	mux.HandleFunc("POST /api/webauthn/login/begin", limitByIP(a.limiter, a.loginBegin))
-	mux.HandleFunc("POST /api/webauthn/login/finish", limitByIP(a.limiter, a.loginFinish))
+	mux.HandleFunc("POST /api/webauthn/register/begin", limitByIP(a.limiter, a.trustedProxies, a.registerBegin))
+	mux.HandleFunc("POST /api/webauthn/register/finish", limitByIP(a.limiter, a.trustedProxies, a.registerFinish))
+	mux.HandleFunc("POST /api/webauthn/login/begin", limitByIP(a.limiter, a.trustedProxies, a.loginBegin))
+	mux.HandleFunc("POST /api/webauthn/login/finish", limitByIP(a.limiter, a.trustedProxies, a.loginFinish))
 
 	// Everything else is behind a session, which also re-checks that the
 	// session's credential has not been revoked.

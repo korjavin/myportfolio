@@ -48,9 +48,19 @@ func run() error {
 		return err
 	}
 
+	// Which reverse proxies may set the client's address for rate limiting.
+	// Defaults to loopback only. Set this when the proxy reaches the app over a
+	// Docker network or from another host — and do NOT set it when the app is
+	// directly reachable, because then a forwarded-for header is just a string
+	// the caller chose and the ceremony limiter would stop working.
+	trustedProxies, err := server.ParseTrustedProxies(os.Getenv("MYPORTFOLIO_TRUSTED_PROXIES"))
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: server.New(web.StaticFS, db, sessionSecret),
+		Handler: server.New(web.StaticFS, db, sessionSecret, trustedProxies),
 		// Slowloris guard: without it a client can hold a connection open
 		// indefinitely by dribbling out request headers.
 		ReadHeaderTimeout: 10 * time.Second,
