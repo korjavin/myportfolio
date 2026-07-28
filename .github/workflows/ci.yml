@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      # The binary must stay CGO-free and statically linked — it is shipped as
+      # a single artifact with the PWA embedded.
+      - run: CGO_ENABLED=0 go build -o /dev/null ./cmd/...
+      - run: go test ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+  web:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is what the project is developed against and the reason
+        # web/package.json exists at all (no ESM-from-.js without it). 20 is
+        # current LTS. Running both stops a fix for one from breaking the other.
+        node: ['18', '20']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # No install step on purpose: the web tree has zero npm dependencies and
+      # uses only node --test. If this ever needs `npm ci`, that is a decision
+      # to make deliberately, not to discover here.
+      - run: node --test
+        working-directory: web
