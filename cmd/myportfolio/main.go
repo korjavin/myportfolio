@@ -1,0 +1,79 @@
+// Command myportfolio serves the local-first investment-tracking PWA and its
+// dumb sync server from a single origin.
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/korjavin/myportfolio/internal/server"
+	"github.com/korjavin/myportfolio/internal/store"
+	"github.com/korjavin/myportfolio/web"
+)
+
+const shutdownGrace = 10 * time.Second
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("myportfolio: exiting", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	addr := env("MYPORTFOLIO_ADDR", ":8080")
+	dbPath := env("MYPORTFOLIO_DB", "myportfolio.db")
+
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: server.New(web.StaticFS, db),
+		// Slowloris guard: without it a client can hold a connection open
+		// indefinitely by dribbling out request headers.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		slog.Info("myportfolio: listening", "addr", addr, "db", dbPath)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errc <- err
+			return
+		}
+		errc <- nil
+	}()
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+
+	// Drain in-flight requests before the deferred db.Close, so no handler is
+	// cut off mid-write against a closing SQLite handle.
+	slog.Info("myportfolio: shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+func env(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

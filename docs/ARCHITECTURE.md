@@ -53,7 +53,7 @@ docs/
 Every domain module is a factory taking a `records` port and returning its API:
 
 ```js
-export function createPortfolioDomain({ records, now }) { ... }
+export function createPortfolioDomain({ records }) { ... }   // `now` only where a module needs a clock
 ```
 
 ```js
@@ -102,13 +102,40 @@ Portfolio Performance's model, trimmed to what v1 needs. `recordId` is a client-
 | `account` | `{ name, kind: "cash"\|"securities", currency, closed }` |
 | `security` | `{ name, isin?, ticker?, currency, assetClass: "stock"\|"etf"\|"crypto"\|"bond"\|"commodity", quote: { provider, symbol } }` |
 | `transaction` | `{ type, accountId, securityId?, date, shares?, amount, fees?, taxes?, currency, fx?, note?, counterAccountId? }` |
-| `price` | `{ securityId, date, close }` — one record per security-day; historical quote series |
+| `price` | `{ securityId, year, closes: {"MM-DD": n} }` — chunked per security-year, see "Price series storage" below. `MM-DD` keys are zero-padded; unpadded keys sort wrong and lose the latest-close race |
 | `fx` | `{ pair: "EURUSD", date, rate }` |
 | `settings` | singleton `recordId: "settings"` — `{ reportingCurrency, quoteProviders, ... }` |
 
 `transaction.type` ∈ `buy`, `sell`, `dividend`, `deposit`, `removal`, `interest`, `fee`, `tax`,
 `transfer_in`, `transfer_out`. This set is what makes PP import possible and TTWROR/IRR computable;
 do not invent a "generic" transaction with a free-text kind.
+
+**Settled semantics** (these were ambiguous in the first draft and are now pinned — B1/B2 built
+against them):
+
+- **`accountId` is the account `amount` moves on, for every transaction type**, with no per-type
+  branching. Consequence: v1 does not model the securities account a holding sits in — a position is
+  keyed by `securityId` alone. Fine for a single-portfolio v1, a real gap for multi-portfolio.
+- **`amount` is the cash that actually moves**, matching PP so import round-trips: on a buy it is
+  gross + fees + taxes (what left the account); on a sell, gross − fees − taxes (what arrived).
+- **Fees and taxes diverge, and that divergence is the reason they are separate fields.** Fees are a
+  cost of acquiring or disposing the asset: capitalised into cost basis on a buy, deducted from
+  proceeds on a sell — so they reduce the gain. Taxes are levied on the transaction, not part of what
+  the asset cost: they leave cash but never touch the basis. So per security,
+  `cost += amount − taxes` on a buy and `proceeds = amount + taxes` on a sell, while cash always
+  moves by the full `amount`. This changes every realized-gain number, so it is pinned here rather
+  than left to each module.
+  <!-- ponytail: buy-side transaction taxes (stamp duty, FTT) are economically part of acquisition
+       cost in several jurisdictions but are excluded from basis here, matching PP. Revisit per-
+       jurisdiction if it ever matters; it needs a tax-treatment flag, not a semantics change. -->
+- **A transfer is two records, one per leg** (`transfer_out` on the source, `transfer_in` on the
+  destination), linked by `counterAccountId`. The counter account is **not** booked from the other
+  leg's record — doing so double-counts. A UI that writes only one leg leaves the other account
+  unmoved, so both legs are the writer's responsibility.
+- **Security transfers (a `transfer_in`/`transfer_out` carrying `securityId`) are not representable
+  in v1** — there is no way to express carried-over cost basis, and inventing one silently would
+  corrupt every downstream gain number. The engine refuses them with an explicit issue rather than
+  guessing. Tracked as a real gap for a PP competitor.
 
 Deferred to post-v1, do not build now: taxonomies/classification trees, rebalancing targets, bonds
 with coupon schedules, options.
@@ -158,6 +185,12 @@ PUT  /api/state            body {version, nonce, ct}
   read, so it is a compare-and-swap. No locks, no merge logic server-side.
 - `ct = AES-GCM(K_data, gzip(utf8(JSON(records))), aad = encodeFields("mp/v1/state", accountId, version))`
   — gzip *before* encrypt, same as medtracker's snapshots (~10x smaller body).
+  **Wire contract, both fields pinned:** `version` in the AAD is the version this blob **will be
+  stored as** — i.e. the version last read plus one, which CAS makes deterministic — not the version
+  it was read at. And it is encoded as a **fixed 8-byte big-endian integer**, following the sibling's
+  `encodeSeq` precedent; passing a JS number to `encodeFields` would silently stringify it and make
+  the two sides disagree at the first three-digit version. Pinned in
+  `web/static/js/core/tests/vectors.json`.
 - **On 409 the client merges and retries**: decrypt the returned remote blob, union with local by
   `recordId`, resolving each collision by higher `clientTs`; a tombstone is an ordinary record and
   wins or loses on `clientTs` like any other. Re-encrypt against the new version, `PUT` again.
