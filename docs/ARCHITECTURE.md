@@ -94,13 +94,19 @@ device's clock is off by N minutes" warning past a 2-minute threshold.
 
 ## 4. Record types
 
-Portfolio Performance's model, trimmed to what v1 needs. `recordId` is a client-generated
-`<type>_<ms>_<rand>` string.
+Portfolio Performance's model, trimmed to what v1 needs.
+
+**`recordId` is an opaque, stable, unique string.** Records created by the user get
+`<type>_<ms>_<rand>`. Records **derived** from an external source get a deterministic id derived from
+a stable upstream key (`<type>_pp_<hash-or-uuid>` for PP import). This is not a style choice: an
+idempotent importer is impossible with a time-and-random id, because re-importing the same file
+would mint new ids and silently double the portfolio. Nothing may parse or order by `recordId`; only
+equality is meaningful.
 
 | type | body |
 |---|---|
 | `account` | `{ name, kind: "cash"\|"securities", currency, closed }` |
-| `security` | `{ name, isin?, ticker?, currency, assetClass: "stock"\|"etf"\|"crypto"\|"bond"\|"commodity", quote: { provider, symbol } }` |
+| `security` | `{ name, isin?, ticker?, wkn?, currency, assetClass?: "stock"\|"etf"\|"crypto"\|"bond"\|"commodity", quote: { provider, symbol } }` |
 | `transaction` | `{ type, accountId, securityId?, date, shares?, amount, fees?, taxes?, currency, fx?, note?, counterAccountId? }` |
 | `price` | `{ securityId, year, closes: {"MM-DD": n} }` — chunked per security-year, see "Price series storage" below. `MM-DD` keys are zero-padded; unpadded keys sort wrong and lose the latest-close race |
 | `fx` | `{ pair: "EURUSD", date, rate }` |
@@ -136,6 +142,22 @@ against them):
   in v1** — there is no way to express carried-over cost basis, and inventing one silently would
   corrupt every downstream gain number. The engine refuses them with an explicit issue rather than
   guessing. Tracked as a real gap for a PP competitor.
+
+### Settled while building the importer
+
+- **`assetClass` is optional.** Portfolio Performance has no per-security asset class, so an imported
+  security has none. Absent means *unclassified* and the UI says so. Do not infer a class from the
+  security's name — a wrong asset class silently mis-buckets an allocation chart, and a guess is
+  worse than a blank because it looks like knowledge.
+- **`wkn` is carried** alongside `isin`/`ticker`. It is a real identifier PP users have, and dropping
+  an identifier breaks re-import matching.
+- **A negative `amount` is legal only on the cash-only types** — `fee`, `tax`, `interest` — where it
+  means the flow runs the other way. That is how PP's `FEES_REFUND`, `TAX_REFUND` and
+  `INTEREST_CHARGE` are represented, and it is why cash balances come out right without inventing
+  three new record types. A negative `amount` on `buy`, `sell`, `deposit`, `removal` or `dividend`
+  is a **data error to surface**, not a reversal — those types have a defined direction and
+  `CASH_SIGN` already carries it. Any reinterpretation of a source type must appear in the import
+  report; it must never be silent.
 
 ### Time conventions — pinned, because every return number depends on them
 
@@ -180,8 +202,7 @@ fine because price history is append-mostly and refetchable.
 
 ## 5. Money is never a float
 
-Fixed-point integers throughout, matching Portfolio Performance's scales so import is lossless and
-round-trips:
+Fixed-point integers throughout, matching Portfolio Performance's scales so import round-trips:
 
 | quantity | scale | example |
 |---|---|---|
@@ -189,6 +210,13 @@ round-trips:
 | shares | `1e8` | `0.00123456 BTC` → `123456` |
 | prices | `1e8` | `$41.2350` → `4123500000` |
 | FX rates | `1e8` | `1.0842` → `108420000` |
+
+**Amounts, shares and prices import from PP exactly** — those are its own scales. **FX rates are the
+one exception and the claim of losslessness does not extend to them**: PP stores `<exchangeRate>` as
+an arbitrary-precision `BigDecimal`, so quantising to `1e8` genuinely rounds. The residual is ≤1e-8
+relative, far below a cent on any realistic amount, but it is a rounding and the doc should not
+pretend otherwise. If a use case ever needs exact FX round-tripping, that needs a wider scale or a
+rational representation — not a bug fix.
 
 Every arithmetic path in `web/domain/` operates on these integers. Values become floats exactly once,
 at the render boundary, and never flow back. Any function returning a currency amount as a JS number
