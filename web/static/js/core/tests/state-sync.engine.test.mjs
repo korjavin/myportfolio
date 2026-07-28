@@ -164,6 +164,26 @@ describe('createStateSync', () => {
     assert.equal(server.requests.filter((r) => r.method === 'GET').length, 0, 'it must refuse before touching the wire');
   });
 
+  // The dangerous version of the same switch: account A was only ever used
+  // OFFLINE, so no response ever came back to persist anything. A guard that
+  // waits for a successful sync is absent exactly when it is needed.
+  it('claims the mirror even when the vault never reaches the network', async () => {
+    const offline = fakeServer();
+    offline.failWith = 'network';
+    offline.failCount = -1;
+    const meta = fakeMeta();
+
+    const first = newSync(offline, meta);
+    await first.pull().catch(() => {});
+    assert.equal(meta.peek()?.accountId, ACCOUNT, 'the mirror must be claimed on open, not on first success');
+
+    const server = fakeServer();
+    const err = await createStateSync({ kData: K_DATA, accountId: 'someone-else', meta, fetch: server.fetch })
+      .push([rec('tx_1', 100)], () => []).then(() => null, (e) => e);
+    assert.equal(err?.code, 'wrong-account');
+    assert.equal(server.blob, null, 'the other vault must not have been written to');
+  });
+
   it('reports a 401 as an auth failure, not as being offline', async () => {
     const server = fakeServer();
     server.failWith = 401;

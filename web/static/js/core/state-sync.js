@@ -231,6 +231,11 @@ export function createStateSync({
       );
     }
     state = { ...EMPTY_META, ...(stored || {}), accountId };
+    // Claim the mirror NOW, not on the first successful sync. A vault opened
+    // offline never reaches the network, so a guard that waits for a response
+    // is absent exactly when it is needed: the user builds a portfolio offline
+    // under account A, unlocks account B tomorrow, and B uploads A's rows.
+    if (!stored || !stored.accountId) await meta.set({ ...state });
     return state;
   }
 
