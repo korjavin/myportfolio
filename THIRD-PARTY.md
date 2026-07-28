@@ -4,11 +4,16 @@ myportfolio itself is MIT licensed (see [LICENSE](LICENSE)). It vendors and redi
 components below — they ship inside the built binary via `//go:embed`, so their terms apply to
 anyone distributing a build.
 
-| Component | Version | License | Upstream |
-|---|---|---|---|
-| Dexie.js (`web/static/vendor/dexie.min.js`) | see upstream | Apache-2.0 | https://github.com/dexie/Dexie.js |
-| JetBrains Mono (`web/static/fonts/jetbrains-mono-*.woff2`) | — | SIL OFL 1.1 | https://github.com/JetBrains/JetBrainsMono |
-| Space Grotesk (`web/static/fonts/space-grotesk-*.woff2`) | — | SIL OFL 1.1 | https://github.com/floriankarsten/space-grotesk |
+| Component | Version | License | License text | Upstream |
+|---|---|---|---|---|
+| Dexie.js (`web/static/vendor/dexie.min.js`) | 3.2.7 | Apache-2.0 | `web/static/vendor/DEXIE-LICENSE.txt` | https://github.com/dexie/Dexie.js |
+| JetBrains Mono (`web/static/fonts/jetbrains-mono-*.woff2`) | — | SIL OFL 1.1 | `web/static/fonts/OFL-JetBrainsMono.txt` | https://github.com/JetBrains/JetBrainsMono |
+| Space Grotesk (`web/static/fonts/space-grotesk-*.woff2`) | — | SIL OFL 1.1 | `web/static/fonts/OFL-SpaceGrotesk.txt` | https://github.com/floriankarsten/space-grotesk |
+
+Each license text sits in the same directory as the files it covers, so it is embedded in the binary
+alongside them — a build is a redistribution, and both licenses require the text to travel with the
+work. The Dexie bundle is minified and its own header was stripped, so that file is the only notice
+the shipped artifact carries.
 
 ## Test fixtures (source tree only, not redistributed in the binary)
 
@@ -35,17 +40,18 @@ Two things worth stating plainly:
   personal holdings, names or account numbers, which matters because this repo is public.
 - **They are not embedded in the binary.** `web/embed.go` embeds `web/static` only, so these files
   exist in the source tree and are redistributed with the repository, not with a build. EPL-1.0 §3
-  attribution for them is this section.
+  attribution for them is this section, and the license text is vendored beside them at
+  `web/domain/fixtures/EPL-1.0.txt`.
 
-## Known compliance gap
+## Keeping this honest
 
-**The full license texts are not yet vendored alongside these files.** Apache-2.0 §4 requires a copy
-of the license to accompany redistribution, and the minified Dexie bundle has had its license header
-stripped by minification, so nothing in the shipped artifact carries the notice. SIL OFL 1.1
-likewise requires the license to travel with the font files.
+`web/static/js/tests/architecture.vendor-licenses.test.js` fails if a third-party file is added under
+`web/static/vendor/`, `web/static/fonts/` or `web/domain/fixtures/` without being registered against
+a license text that exists. Attribution drift is silent otherwise — it surfaces as somebody else's
+complaint, long after the commit that caused it.
 
-This table is attribution, not compliance. Tracked as a bead; close it before any public release or
-binary distribution.
+**Still unattributed**: the icon paths in `web/static/js/components/wg-icons.js` appear to derive from
+Lucide (ISC). Confirm and attribute, or replace them — tracked on `myportfolio-18h.11`.
 
 ## Derived work
 
