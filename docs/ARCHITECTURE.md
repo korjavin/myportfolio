@@ -83,14 +83,31 @@ the existing rows into the vault; nothing in `web/domain/` changes or even notic
 Learned the hard way in medtracker (bd med-d5t.6) and it matters more here, because the thing being
 silently overwritten is a trade. Two guards, both client-side:
 
-1. **Server-referenced time.** Every sync response carries a `Date` header. Store the offset in
-   `sync_meta.clockSkewMs` and subtract it on every write, so all devices stamp on one scale.
+1. **Server-referenced time.** Every sync response carries a `Date` header. Store the offset as
+   `clockSkewMs` and subtract it on every write, so all devices stamp on one scale.
+   *As built*, that lives in a small device-local IndexedDB owned by `state-sync.js`, not in a
+   `sync_meta` table inside the Dexie mirror — the mirror's schema belongs to `localdb.js`, and the
+   sync layer adding a table to it would couple the two in the direction §3 exists to prevent. Same
+   guarantee, different home.
 2. **Per-record monotonic guard.** A write to a record this device can already see is stamped
    `max(correctedNow, existing.clientTs + 1)` — editing what you can see always beats what you are
    overwriting, whatever either clock says.
 
 Neither orders two *blind concurrent* writes on skewed devices. Accepted; surfaced as a "this
 device's clock is off by N minutes" warning past a 2-minute threshold.
+
+**Ties must break deterministically.** When two records collide on the same `clientTs`, both devices
+must pick the *same* winner — the choice is arbitrary, its determinism is not. Otherwise each device
+keeps its own side, a merge that changes nothing locally never schedules a push, and the two sit on
+permanently divergent data with nothing to detect it. `state-sync.js` compares canonical forms, which
+costs nothing and is stable across devices.
+
+**One vault per browser profile, for now.** `localdb.js` opens one un-scoped Dexie database per
+origin, so a second account would land on the first account's records. `state-sync.js` stamps its
+metadata with the owning `accountId` and refuses a mismatch *before touching the wire*, claiming the
+mirror on open rather than on first successful sync — a vault used entirely offline never reaches the
+network, so a guard that waits for a response is absent exactly when it is needed. That turns a
+silent cross-vault upload into a loud stop; namespacing the mirror per account is the real fix.
 
 ## 4. Record types
 
