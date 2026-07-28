@@ -3,13 +3,22 @@
 // version and schema live in exactly one file and adding a store can never
 // collide with another module opening an older version.
 
-// Dexie ships as UMD. Imported for side effect: under an ES module the wrapper's
-// `this` is undefined, so it falls through to assigning globalThis.Dexie.
+// Dexie ships as UMD, so it has no ES export to bind. Imported for side effect:
+// with `exports`, `module` and `define` all undefined under an ES module — and
+// `this` undefined too — the wrapper falls through to assigning globalThis.Dexie.
+// ESM guarantees this import is fully evaluated before the body below runs.
 import '../../vendor/dexie.min.js';
 
 import { createLocalRecords } from './records.js';
 
 const Dexie = globalThis.Dexie;
+
+// Swapping the vendored file for an ESM build of Dexie would leave the global
+// unset and fail later as a confusing "Dexie is not a constructor"; say what
+// actually went wrong instead.
+if (typeof Dexie !== 'function') {
+  throw new TypeError('vendor/dexie.min.js did not define globalThis.Dexie — expected the UMD build');
+}
 
 export const db = new Dexie('myportfolio');
 
