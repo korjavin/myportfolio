@@ -53,12 +53,55 @@ test('rounds half away from zero, and only on the truly dropped remainder', () =
   assert.equal(parseFixed('0.494', amount), 49);
 });
 
-test('normalises float input through toFixed instead of inheriting its error', () => {
+test('normalises float input without inheriting its error', () => {
+  // Numbers are accepted because quote APIs return JSON numbers.
   // The canonical float bug: 0.1 + 0.2 === 0.30000000000000004.
   assert.equal(parseFixed(0.1 + 0.2, amount), 30);
-  assert.equal(parseFixed(1e-7, shares), 10);
   assert.equal(parseFixed(-12.345, amount), -1235);
+  // Exponential notation still has to land, for sub-cent crypto prices.
+  assert.equal(parseFixed(1e-7, shares), 10);
+  assert.equal(parseFixed(1.5e-8, price), 2);
 });
+
+test('a number at a decimal half-step rounds by its decimal, not its binary value', () => {
+  // 1.005 is stored as 1.00499999999999989, so (1.005).toFixed(2) is '1.00' and
+  // a cent silently vanishes. String() yields the shortest round-tripping
+  // decimal ('1.005'), which is the value the caller actually meant.
+  assert.equal(parseFixed(1.005, amount), 101);
+  assert.equal(parseFixed(-1.005, amount), -101);
+  assert.equal(parseFixed(8.575, amount), 858);
+  // And it must agree with the string form of the same literal.
+  for (const v of [1.005, 2.675, 8.575, -1.005]) {
+    assert.equal(parseFixed(v, amount), parseFixed(String(v), amount), `number/string agree for ${v}`);
+  }
+});
+
+test('expands exponential notation without losing a digit', () => {
+  // String() switches to exponential below 1e-7 — a real sub-cent crypto price,
+  // not a hypothetical. Every digit must survive the shift.
+  assert.equal(parseFixed(1e-7, shares), 10);
+  assert.equal(parseFixed(1.23456789e-3, shares), 123457); // rounds at the 8th decimal
+  assert.equal(parseFixed(-1.5e-8, price), -2);
+  assert.equal(parseFixed(1e-9, price), 0, 'below the scale rounds to zero, not to garbage');
+  // Large exponents expand too, and then fail the safe-integer guard honestly
+  // rather than silently truncating.
+  assert.throws(() => parseFixed(1e21, amount), RangeError);
+  // Number and string spellings of the same value must agree.
+  for (const v of [1e-7, 1.5e-8, 2.5e-8, 1e-9]) {
+    assert.equal(parseFixed(v, price), parseFixed(expandByHand(v), price), `agree for ${v}`);
+  }
+});
+
+// Independent decimal expansion, so the test does not just re-run the implementation.
+function expandByHand(v) {
+  const [mantissa, exp] = String(v).split('e');
+  const neg = mantissa.startsWith('-');
+  const digits = mantissa.replace('-', '').replace('.', '');
+  const intLen = mantissa.replace('-', '').split('.')[0].length;
+  const point = intLen + Number(exp);
+  const body = point <= 0 ? `0.${'0'.repeat(-point)}${digits}` : `${digits}${'0'.repeat(point - digits.length)}`;
+  return neg ? `-${body}` : body;
+}
 
 test('rejects input that is not a fixed-point number', () => {
   for (const bad of ['', '.', 'abc', '1e5', '1,234.00', '1 2', null, undefined, NaN, Infinity]) {

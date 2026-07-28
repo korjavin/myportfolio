@@ -196,6 +196,43 @@ test('selling with nothing held at all is surfaced', async () => {
   assert.equal(only(snap.accounts).balance, 110000, 'the cash still arrived');
 });
 
+test('a trade with non-positive shares does not corrupt the position', async () => {
+  for (const shares of [-100000000, 0, undefined]) {
+    const f = fixture();
+    basics(f);
+    f.put('transaction', tx({
+      type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares, amount: 100000,
+    }));
+
+    const snap = await f.snapshot();
+
+    assert.ok(codes(snap).includes('non_positive_shares'), `shares=${shares}`);
+    // Folding it would build a plausible-looking corrupt position: a
+    // negative-share buy as a short holding with a positive cost basis.
+    const p = only(snap.positions);
+    assert.equal(p.shares, 0, `shares=${shares}`);
+    assert.equal(p.cost, 0, `shares=${shares}`);
+    assert.equal(p.realized, 0, `shares=${shares}`);
+    // The cash leg still stands — that money really did leave the account.
+    assert.equal(only(snap.accounts).balance, -100000, `shares=${shares}`);
+  }
+});
+
+test('a non-positive sell neither invents shares nor realizes a gain', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000 }));
+  f.put('transaction', tx({ type: 'sell', securityId: 'sec_1', date: '2024-02-10', shares: -500000000, amount: 60000 }));
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.ok(codes(snap).includes('non_positive_shares'));
+  assert.equal(p.shares, 1000000000, 'a negative-share sell must not add holdings');
+  assert.equal(p.cost, 100000);
+  assert.equal(p.realized, 0);
+});
+
 test('every §4 transaction type moves cash the documented way', async () => {
   const cases = [
     ['buy', -1, { securityId: 'sec_1', shares: 100000000 }],
@@ -288,6 +325,10 @@ test('a malformed price record cannot hijack the valuation', async () => {
   // No year: naive string building would make this "undefined-03-15", which
   // sorts above every real date and would win the latest-close race.
   f.put('price', { securityId: 'sec_1', closes: { '03-15': 99900000000 } });
+  // Unpadded and out-of-range keys sort above every well-formed date too:
+  // "2024-3-15" > "2024-12-31" as strings.
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '3-15': 88800000000 } });
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '99-99': 77700000000 } });
   // A float close is a leaked float, not a price.
   f.put('price', { securityId: 'sec_1', year: 2025, closes: { '01-01': 1.5 } });
 

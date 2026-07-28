@@ -174,7 +174,16 @@ export function createPortfolioDomain({ records }) {
         }
         const p = position(tx.securityId);
         const shares = units(tx, 'shares');
-        if (shares <= 0) issue('non_positive_shares', tx.recordId, `${tx.type} has shares ${shares}`);
+        if (shares <= 0) {
+          // Direction comes from the type, so `shares` is always a positive
+          // magnitude; missing/zero/negative is malformed. Folding it anyway
+          // would build a plausible-looking corrupt position (a negative-share
+          // buy becomes a short holding with a positive basis), so the security
+          // leg is skipped. The cash leg above still stands: `amount` is
+          // validated on its own and is what really left the account.
+          issue('non_positive_shares', tx.recordId, `${tx.type} has shares ${shares}`);
+          continue;
+        }
 
         if (tx.type === 'buy') {
           p.shares += shares;
@@ -293,6 +302,8 @@ export function createPortfolioDomain({ records }) {
   return { snapshot };
 }
 
+const MONTH_DAY_RE = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
 // §4 "Price series storage": one `price` record per security-year, body
 // { securityId, year, closes: { "MM-DD": close } }, close at 1e8. Returns the
 // newest close per security on or before `asOf`.
@@ -307,6 +318,13 @@ function latestCloses(priceRecs, asOf, issue) {
       continue;
     }
     for (const [monthDay, close] of Object.entries(rec.closes)) {
+      // Dates are compared as strings, so an unpadded or out-of-range key sorts
+      // above every well-formed one ("2024-3-15" > "2024-12-31") and would
+      // become the security's latest quote.
+      if (!MONTH_DAY_RE.test(monthDay)) {
+        issue('price_not_chunked', rec.recordId, `close key ${JSON.stringify(monthDay)} is not a zero-padded MM-DD`);
+        continue;
+      }
       if (!Number.isSafeInteger(close)) {
         issue('non_integer_units', rec.recordId, `close ${rec.year}-${monthDay} is not a fixed-point integer: ${close}`);
         continue;

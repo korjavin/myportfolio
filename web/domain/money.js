@@ -42,15 +42,37 @@ function divRound(n, d) {
   return n < 0n ? q - 1n : q + 1n;
 }
 
+const EXPONENTIAL_RE = /^([+-]?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/;
+
+// String() switches to exponential notation below 1e-7 and past ~1e21 — and a
+// sub-1e-7 crypto price is a real input, not a hypothetical. Shifting the
+// decimal point by hand keeps every digit, so the exponential path stays exactly
+// as precise as the ordinary one instead of falling back to toFixed.
+function expandExponential(s) {
+  const m = EXPONENTIAL_RE.exec(s);
+  if (!m) return s;
+  const [, sign, intPart, frac = '', exp] = m;
+  const digits = intPart + frac;
+  const pointAt = intPart.length + Number(exp);
+  if (pointAt <= 0) return `${sign}0.${'0'.repeat(-pointAt)}${digits}`;
+  if (pointAt >= digits.length) return `${sign}${digits}${'0'.repeat(pointAt - digits.length)}`;
+  return `${sign}${digits.slice(0, pointAt)}.${digits.slice(pointAt)}`;
+}
+
 // parseFixed turns user/import input into scaled integer units. Strings are
-// parsed digit-wise (never via parseFloat, which would reintroduce the float
-// we are trying to avoid); numbers are normalised through toFixed first, so
-// parseFixed(0.1 + 0.2, 2) is 30 rather than 30.000000000000004.
+// parsed digit-wise, never via parseFloat, which would reintroduce the float we
+// are trying to avoid.
+//
+// Numbers are accepted because quote APIs hand back JSON numbers, and they are
+// normalised with String() rather than toFixed(): String() yields the shortest
+// decimal that round-trips to that double, which recovers the decimal the caller
+// meant. toFixed rounds the *binary* value instead, so (1.005).toFixed(2) is
+// '1.00' and a cent vanishes — toFixed is therefore not used anywhere here.
 export function parseFixed(value, decimals) {
   let s;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new RangeError(`not a finite number: ${value}`);
-    s = value.toFixed(decimals);
+    s = expandExponential(String(value));
   } else {
     s = String(value ?? '').trim();
   }
