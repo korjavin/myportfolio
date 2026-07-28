@@ -1,0 +1,36 @@
+{
+  "_note": "Pinned so a refactor cannot silently change a key derivation (bd myportfolio-18h.2). Every value was produced by web/static/js/core/crypto.js and is independently recomputed from node:crypto in crypto.test.js. If a change here is intentional, change it deliberately and say why in the commit message. Labels are mp/v1/*; salt_kek = SHA-256(\"myportfolio/v1/prf-kek\").",
+  "accountId": "amber-falcon-8k3q9x",
+  "credentialIdB64": "AQIDBAUGBwg=",
+  "prfB64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "dekB64": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+  "tkB64": "ESIzRFVmd4iZqrvM3e7/ECEyQ1RldoeYqbrL3O3+DyA=",
+  "saltKekHex": "af2152a6dcef119bf174b6b26881825cecb422b370cb7f5ef9742068a9f1fb77",
+  "kekHex": "d939767422573282f380dabf46d65a6340993a1c94374c181c839baceca4e7ed",
+  "kMacHex": "9fc6f55fb0886a445d3904f9f78c9cc024360a646ed4ab1ee4678c40f0460463",
+  "kDataHex": "77960b5fdadfc8cd71472dfc492c301e9b0c6c2b2a02b6ea6621a49bbe22876d",
+  "kekRecHex": "4e97fff1fc1f3b83416c943147f526abffc99bf095793adfdafb20bdc2aaaae4",
+  "verifierHex": "90c591ec59fc13b18b024ec9779cde48cbbae8885359b6649b8ea1a38fc91809",
+  "encodeFieldsHex": "00096d702f76312f6b656b00080102030405060708",
+  "base32": {
+    "codeBytesB64": "oKGio6SlpqeoqaqrrK2ur7CxsrM=",
+    "encoded": "M2GT58X4MPKAFA59NANTSBDENYRB3CNK"
+  },
+  "recoveryCode": {
+    "codeBytesB64": "oKGio6SlpqeoqaqrrK2ur7CxsrM=",
+    "formatted": "M2GT-58X4-MPKA-FA59-NANT-SBDE-NYRB-3CNK-91DS"
+  },
+  "envelope": {
+    "v": 1,
+    "nonceB64": "p+o+wAmOTozrG68t",
+    "ctB64": "dFqwxY52l3IA/LqfTaLZEcO5ITOuHsjQ45LDnWpxCL/q4M2aojkBgpZaqp58X891",
+    "macHex": "e068543e1c10089a756e687d5ec7868e36d7c3486bb385f036a36ed9cb649044"
+  },
+  "transferPayloadB64": "JBDp+odVaqUzX1ABr5sMT+N+R9xKaMyC9xu96aUXWgjyLUZuzvMAuEV8JgfCipHAcW48MqCSRG1U4MLW",
+  "state": {
+    "version": 42,
+    "plaintextUtf8": "[{\"recordId\":\"transaction_1700000000000_ab12\",\"recordType\":\"transaction\",\"clientTs\":1700000000000,\"deleted\":false,\"type\":\"buy\",\"amount\":123456,\"shares\":123456}]",
+    "nonceB64": "OEGJ20FQaeYsiTjT",
+    "ctB64": "+jkgxiVDC6jAxFXH5j2a2pbP1ewlyeBywB4hXciHxe76HsT7LetzUzmi2tbDzDX+YZkP/ZgZl8U+AeKtzKjU1/Xnf9qhqpQC/TIiUiJ52uU7qzAdp8lRsC7jxID44NV3eD2wq+zZqeUjPDr/kXCX/DODXMZxZUDo4SlRwThEbZVlq9EKWAi267JiPAwsjWxdNWoJQeo6DvUzDG/+GYp2YcyUlkpby7LUX832Z6MHe4U="
+  }
+}
