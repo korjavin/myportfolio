@@ -393,6 +393,42 @@ func TestRecoveryMaterial_StoresHashedVerifierOnly(t *testing.T) {
 	}
 }
 
+// Getting the scheme wrong makes every ceremony fail origin validation with a
+// generic error, which is a miserable thing to debug.
+func TestSchemeForHost(t *testing.T) {
+	for host, want := range map[string]string{
+		"localhost":           "http",
+		"vault.localhost":     "http",
+		"127.0.0.1":           "http",
+		"127.0.0.53":          "http",
+		"::1":                 "http",
+		"myportfolio.example": "https",
+		"localhost.evil.test": "https", // suffix match must be on a dot boundary
+		"notlocalhost":        "https",
+		"192.168.1.10":        "https",
+		"203.0.113.7":         "https",
+	} {
+		if got := schemeForHost(host); got != want {
+			t.Errorf("schemeForHost(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+func TestStripPort(t *testing.T) {
+	for host, want := range map[string]string{
+		"localhost:8080":          "localhost",
+		"localhost":               "localhost",
+		"myportfolio.example":     "myportfolio.example",
+		"myportfolio.example:443": "myportfolio.example",
+		"[2001:db8::1]:8080":      "[2001:db8::1]",
+		"[2001:db8::1]":           "[2001:db8::1]",
+	} {
+		if got := stripPort(host); got != want {
+			t.Errorf("stripPort(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
 func TestSessionRoutesRejectAnonymousCallers(t *testing.T) {
 	v := newVault(t)
 	for _, tc := range []struct{ method, path string }{

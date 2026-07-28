@@ -106,7 +106,47 @@ async function startRegistration(app) {
   });
   if (!finishRes.ok) throw new Error('Passkey registration failed. Please try again.');
 
-  await renderEmergencyKit(app, { accountId, dek });
+  // From here on the account, the passkey and the envelope EXIST server-side,
+  // so no failure may unwind to the welcome screen — see runKitStep.
+  await runKitStep(app, { accountId, dek });
+}
+
+// Everything after a successful register/finish, with its own error boundary.
+//
+// The boundary is the point. Past finish, the account and its passkey are
+// persisted and this tab holds the only copy of the DEK in existence. If a
+// failure here fell through to the welcome screen, the only button on offer
+// would be "Create your passkey" — which mints a SECOND passkey on the same
+// device, and a second same-device platform passkey can silently replace the
+// first, orphaning an account that never got a recovery code.
+//
+// So a failure retries with the SAME accountId and dek instead. The session
+// cookie is live and the DEK is in memory, so retrying the upload is exactly
+// the right action, and it is the only one offered.
+export async function runKitStep(app, ctx) {
+  try {
+    await renderEmergencyKit(app, ctx);
+  } catch (err) {
+    renderKitRetry(app, ctx, err.message || String(err));
+  }
+}
+
+function renderKitRetry(app, ctx, errorText) {
+  app.innerHTML = `
+    <section class="ceremony">
+      <h1>Your vault was created</h1>
+      <p>Your passkey is registered, but we could not save your recovery code
+         yet. Nothing is lost — stay on this page and try again.</p>
+      <p><strong>Do not create another passkey.</strong> Your vault already has
+         one, and this is the only tab that can finish setting up your recovery
+         code.</p>
+      <button id="kit-retry" type="button">Try again</button>
+    </section>`;
+  showError(app, errorText);
+  app.querySelector('#kit-retry').addEventListener('click', () => {
+    app.querySelector('#kit-retry').disabled = true;
+    runKitStep(app, ctx);
+  });
 }
 
 // An immediate assertion on the credential just created, for the sole purpose
@@ -353,7 +393,14 @@ function downloadKit(docHtml, accountId) {
 function printKit(docHtml) {
   const frame = document.createElement('iframe');
   frame.setAttribute('aria-hidden', 'true');
-  frame.style.cssText = 'position:absolute;width:0;height:0;border:0;';
+  // Zero-sized via presentational attributes rather than a style or a class:
+  // this node is a print vehicle, never a design element, so it has no business
+  // in the token system. It must NOT be display:none — a frame with no layout
+  // box prints nothing in most browsers, and the kit is the only copy of the
+  // recovery code that will ever exist.
+  frame.setAttribute('width', '0');
+  frame.setAttribute('height', '0');
+  frame.setAttribute('frameborder', '0');
   frame.srcdoc = docHtml;
   frame.addEventListener('load', () => {
     try {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -174,11 +175,24 @@ func stripPort(host string) string {
 	return host
 }
 
-// schemeForHost reports the scheme browsers use to reach host. localhost is a
-// secure context over plain HTTP (the local dev loop); everything else is
-// served over HTTPS.
+// schemeForHost reports the scheme browsers use to reach host. Loopback — the
+// name "localhost", any *.localhost, and the literal loopback addresses — is a
+// secure context over plain HTTP, which is the local dev loop; everything else
+// is served over HTTPS.
+//
+// Getting this wrong is silent and total: the RP origin would be built as
+// https:// while the browser reports http://, and every ceremony would fail
+// origin validation with a generic "registration failed".
+//
+// Note that a loopback IP LITERAL may still be refused by the browser for a
+// different reason — an RP ID has to be a domain, and browsers reject IP
+// origins for WebAuthn. Handling it here costs nothing and is right if they
+// ever do allow it, but `http://localhost:PORT` remains the supported dev URL.
 func schemeForHost(host string) string {
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return "http"
+	}
+	if addr, err := netip.ParseAddr(host); err == nil && addr.IsLoopback() {
 		return "http"
 	}
 	return "https"
