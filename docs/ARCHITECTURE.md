@@ -313,9 +313,26 @@ same as any local database. The LDK is non-extractable, which is a script-level 
 disk-forensics protection.
 
 **The code-serving caveat applies to us too**: E2EE cannot protect against the origin serving
-poisoned JavaScript. Mitigations in force: strict CSP, zero third-party script, SRI, versioned
-immutable assets, service-worker-pinned bundles. Say so in the user-facing security note rather than
-claiming a guarantee we do not have.
+poisoned JavaScript.
+
+*In force*: strict CSP, zero third-party script, versioned immutable assets, and a service worker
+that stages a new version in a separate cache, never swaps code mid-session, and prompts before
+applying an update.
+
+*Not in force, and previously claimed here in error*:
+
+- **Subresource integrity.** Our scripts load as ES modules and `integrity` does not apply to module
+  specifiers; the vendored Dexie is a side-effect `import`, so there is no `<script integrity=…>` to
+  attach. Adding SRI would mean changing the loading path, not adding an attribute.
+- **Consent that actually pins code.** Declining the update prompt does not keep the old version
+  forever: close every window and the staged worker activates anyway. The real property is *no swap
+  mid-session, plus a prompt while you are looking* — a narrowed window, not a veto. The obvious
+  mechanism (the worker refuses to serve past an `acceptedVersion`) does not bind the adversary this
+  section names, because the origin serves `sw.js` too, so a hostile build simply ships a worker
+  that ignores it.
+
+State this precisely in the user-facing security note. Claiming a mitigation we do not have is worse
+than the gap itself, because it is the claim a reader would rely on.
 
 ## 9. Frontend design system — Wandergeek, ported
 

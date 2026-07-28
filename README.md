@@ -27,10 +27,13 @@ that only ever sees ciphertext.
 ## Honest limitations
 
 - **Web-delivered cryptography has a ceiling.** End-to-end encryption protects data at rest and in
-  transit, but it cannot protect against the origin serving poisoned JavaScript. Mitigations are in
-  place (strict CSP, zero third-party script, SRI, service-worker-pinned bundles with explicit
-  update prompts), but this is a real residual risk, not a solved problem. See
-  `docs/ARCHITECTURE.md` §8.
+  transit, but it cannot protect against the origin serving poisoned JavaScript. In force today:
+  strict CSP, zero third-party script, versioned immutable assets, and a service worker that will
+  not swap code mid-session and prompts before applying an update. **Not** in force: subresource
+  integrity — our scripts are ES modules, and `integrity` does not apply to module specifiers.
+  And the update prompt narrows the window rather than closing it: declining it does not pin the
+  old code forever, because the origin also serves the service worker. This is a real residual
+  risk, not a solved problem. See `docs/ARCHITECTURE.md` §8.
 - **Locally, your data is protected by your OS**, not by us — the same posture as any local
   database.
 - **Lose every passkey and the recovery code and the data is gone.** That is what zero-knowledge
