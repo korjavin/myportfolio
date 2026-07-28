@@ -185,6 +185,21 @@ export function xirr(flows) {
 // interest) or the drag on it (fees, taxes). Netting a fee out as an "outflow"
 // would credit it back in the numerator and make it invisible — which is the
 // single most common way a performance number flatters itself.
+//
+// Transfers ARE counted, and they have to be. §4 books each leg independently
+// against its own account and never from its counterparty, so while a transfer
+// is in flight — legs on different days, or a leg whose counter account this
+// portfolio does not track at all — the total genuinely drops. Treating the leg
+// as a flow is what cancels that; dropping it, as "transfers are internal"
+// suggests, reports a phantom loss of the transferred amount. When both legs do
+// fall on the same day the in and the out cancel to a factor of exactly 1, so
+// counting them is also harmless in the case where they are internal.
+//
+// The residual cost is that flowIn/flowOut count both sides of an internal
+// round-trip. Netting them would mean deciding a transfer is internal from
+// `counterAccountId` naming a tracked account — but §4 warns that a UI may
+// write only one leg, and guessing wrong there reintroduces the phantom loss
+// into the return itself. Overstated flow totals are the cheaper error.
 const PORTFOLIO_FLOW = { deposit: 'in', transfer_in: 'in', removal: 'out', transfer_out: 'out' };
 
 // One position's boundary encloses the shares only. An inflow is cash the

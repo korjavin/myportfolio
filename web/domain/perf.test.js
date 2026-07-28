@@ -190,6 +190,39 @@ test('TTWROR: an unpriced holding refuses to report, rather than valuing it at z
   assert.ok(res.issues.some((i) => i.code === 'no_price'));
 });
 
+test('TTWROR: a transfer in flight is neutral, not a loss', async () => {
+  // §4 books each transfer leg against its own account only, so between the two
+  // legs the tracked total genuinely falls by the transferred amount. Counting
+  // the leg as a flow is what makes that neutral. The tempting "transfers are
+  // internal, skip them" simplification reports -40% for both cases below.
+  const inFlight = fixture();
+  inFlight.put('account', { name: 'A', kind: 'cash', currency: 'EUR' }, 'a');
+  inFlight.put('account', { name: 'B', kind: 'cash', currency: 'EUR' }, 'b');
+  inFlight.put('transaction', { type: 'deposit', accountId: 'a', currency: 'EUR', date: '2024-01-01', amount: eur(1000) });
+  inFlight.put('transaction', { type: 'transfer_out', accountId: 'a', counterAccountId: 'b', currency: 'EUR', date: '2024-03-10', amount: eur(400) });
+  inFlight.put('transaction', { type: 'transfer_in', accountId: 'b', counterAccountId: 'a', currency: 'EUR', date: '2024-03-12', amount: eur(400) });
+
+  // A range that ends while the money is between the two accounts.
+  const mid = await inFlight.performance({ from: '2024-01-01', to: '2024-03-11' });
+  assert.deepEqual(mid.portfolio.ttwror, { ok: true, value: 0 });
+  assert.equal(mid.portfolio.closeValue, eur(600), 'the tracked total really has dropped');
+
+  // And one that spans both legs.
+  const whole = await inFlight.performance({ from: '2024-01-01', to: '2024-06-01' });
+  assert.deepEqual(whole.portfolio.ttwror, { ok: true, value: 0 });
+
+  // A single leg whose counterparty this portfolio does not track at all: a
+  // real external withdrawal, and the only reading under which the money is
+  // gone for good rather than in flight.
+  const external = fixture();
+  external.put('account', { name: 'A', kind: 'cash', currency: 'EUR' }, 'a');
+  external.put('transaction', { type: 'deposit', accountId: 'a', currency: 'EUR', date: '2024-01-01', amount: eur(1000) });
+  external.put('transaction', { type: 'transfer_out', accountId: 'a', counterAccountId: 'bank', currency: 'EUR', date: '2024-03-10', amount: eur(400) });
+  const res = await external.performance({ from: '2024-01-01', to: '2024-06-01' });
+  assert.deepEqual(res.portfolio.ttwror, { ok: true, value: 0 });
+  assert.equal(res.portfolio.flowOut, eur(400));
+});
+
 // --- Degenerate ranges -----------------------------------------------------
 
 test('a range entirely before any transaction reports no capital, not 0%', async () => {
