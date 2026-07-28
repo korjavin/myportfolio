@@ -1,22 +1,68 @@
 <!doctype html>
 <!--
-  Placeholder shell. Track B owns the real mobile-first PWA document
-  (ARCHITECTURE.md 9); this exists so the server has something to serve and so
-  //go:embed static has an embeddable file.
+  The installable PWA shell (bd myportfolio-g7e.6). It boots the design system
+  (ARCHITECTURE.md §9), the bottom nav, and the offline service worker. Screen
+  *content* — transactions CRUD, holdings, dashboard charts — is bd g7e.7; the
+  screens here render an empty state and nothing else on purpose.
 
-  No inline <script> or <style>: the origin's CSP is script-src 'self' /
-  style-src 'self' (internal/server/server.go), and inline would be blocked.
+  Asset URLs are root-relative, not /static/-prefixed: web/embed.go roots the
+  embedded FS at web/static, so the browser asks for "/css/styles.css".
+  (design.html on master still uses /static/… and 404s — see the bead report.)
+
+  No inline <script> and no inline <style>: the served CSP is
+  `script-src 'self'; style-src 'self'` (internal/server/server.go) with no
+  'unsafe-inline', so either would be silently dropped. Guarded by
+  architecture.no-inline-handlers and architecture.inline-styles.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- viewport-fit=cover so env(safe-area-inset-*) is non-zero on notched
+         phones; the bottom nav and the update banner both budget for it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <!-- Literal, not var(--wg-bg-stage): the UA paints the status bar and the
+         splash screen before any stylesheet is resolved. Mirrors
+         --wg-teal-stage in css/styles.css; keep the two in step. -->
+    <meta name="theme-color" content="#0f2522">
     <title>myportfolio</title>
+
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <!-- iOS standalone hints. Install on iOS is a manual Share → "Add to Home
+         Screen"; there is no beforeinstallprompt and no permission dialog
+         anywhere in this app to get the ordering wrong (see js/features/boot.js). -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="myportfolio">
+
+    <link rel="stylesheet" href="/css/fonts.css">
+    <link rel="stylesheet" href="/css/styles.css">
   </head>
-  <body>
-    <main>
-      <h1>myportfolio</h1>
-      <p>Local-first investment tracking. The app shell is not built yet.</p>
-    </main>
+  <body class="wg-stage">
+    <!-- Update prompt. Never auto-applied: accepting new JS silently is exactly
+         the attack the service-worker pin narrows (ARCHITECTURE.md §8,
+         code-serving caveat). Hidden until a new worker is actually waiting. -->
+    <div id="update-prompt" class="wg-update-prompt hidden" role="status" aria-live="polite">
+      <span class="wg-update-prompt__text">A new version is ready.</span>
+      <button type="button" id="update-reload" class="wg-toolbar-btn wg-toolbar-btn--primary">Reload</button>
+      <button type="button" id="update-dismiss" class="wg-toolbar-btn wg-toolbar-btn--secondary">Later</button>
+    </div>
+
+    <div id="app">
+      <!-- Screens sit directly on the stage: no section-header banner, the
+           active bottom-nav pill is the sole screen indicator (§9). -->
+      <main id="screen" class="wg-screen-stage" tabindex="-1"></main>
+    </div>
+
+    <div id="nav-mount"></div>
+
+    <!-- Classic scripts: the ported primitives are IIFEs that publish onto
+         window, so they must load before the module bootstrap runs. -->
+    <script src="/js/components/wg-icons.js"></script>
+    <script src="/js/components/wg-bottom-nav.js"></script>
+    <script type="module" src="/js/features/boot.js"></script>
   </body>
 </html>

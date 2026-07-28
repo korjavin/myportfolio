@@ -1,0 +1,20 @@
+<!-- App icon. The plate is --wg-teal-stage and the glyph is --wg-sun; the glyph
+     itself is the WGIcons `chart` path, so the launcher icon and the in-app
+     Performance nav icon are the same drawing.
+
+     Colors are literal here because an installed icon is rendered by the OS
+     launcher, outside any document that could resolve a CSS custom property.
+     Same reason manifest.json carries literal theme_color/background_color.
+
+     Maskable-safe: the glyph box is 240/512 wide, centred, so its farthest
+     corner sits 170 units from centre — inside the 205-unit safe circle a
+     maskable icon must stay within. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="myportfolio">
+  <rect width="512" height="512" fill="#0f2522"/>
+  <g transform="translate(136 136) scale(10)"
+     fill="none" stroke="#FBBD0D" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 3v18h18"/>
+    <path d="m7 14 4-4 4 4 6-6"/>
+  </g>
+</svg>
