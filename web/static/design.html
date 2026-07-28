@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>myportfolio — design system reference</title>
+    <!-- Self-hosted fonts only. No CDN link here, ever: it would punch a hole
+         in the connect-src/style-src allowlist that ARCHITECTURE.md §7 depends
+         on. Guarded by architecture.no-external-fonts-in-html.test.js. -->
+    <link rel="stylesheet" href="/static/css/fonts.css">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <!-- Demo-only scaffolding (swatches, unpinned modal). Never loaded by the app. -->
+    <link rel="stylesheet" href="/static/css/design.css">
+</head>
+<body class="wg-stage">
+<!--
+    Standalone token + primitive reference for the ported Wandergeek design
+    system. This page is NOT the app shell — index.html is wired by a separate
+    bead. Open it to eyeball every token and primitive in one place before
+    building a screen.
+
+    Everything below is markup + classes only: no inline styles, no inline
+    event handlers, no hardcoded colors. That is not incidental; the same guard
+    tests that police feature code police this page.
+-->
+<div id="app">
+
+    <h1 class="wg-mono-display">myportfolio design system</h1>
+    <p class="wg-muted">
+        Ported from <code>../medicationtrackerbot</code>. See
+        <code>docs/ARCHITECTURE.md</code> §9. Every value below resolves through a
+        <code>--wg-*</code> token; nothing on this page sets a color directly.
+    </p>
+
+    <!-- ============================== PALETTE ============================== -->
+    <div class="wg-section-label"><span>Palette</span></div>
+    <div class="wg-card">
+        <div class="flex-row flex-wrap gap-sm">
+            <div class="stat-item"><span class="stat-label">paper</span><span class="wg-swatch wg-swatch--paper"></span></div>
+            <div class="stat-item"><span class="stat-label">paper-deep</span><span class="wg-swatch wg-swatch--paper-deep"></span></div>
+            <div class="stat-item"><span class="stat-label">ink</span><span class="wg-swatch wg-swatch--ink"></span></div>
+            <div class="stat-item"><span class="stat-label">teal</span><span class="wg-swatch wg-swatch--teal"></span></div>
+            <div class="stat-item"><span class="stat-label">teal-stage</span><span class="wg-swatch wg-swatch--teal-stage"></span></div>
+            <div class="stat-item"><span class="stat-label">teal-sage</span><span class="wg-swatch wg-swatch--teal-sage"></span></div>
+            <div class="stat-item"><span class="stat-label">mint</span><span class="wg-swatch wg-swatch--mint"></span></div>
+            <div class="stat-item"><span class="stat-label">mint-soft</span><span class="wg-swatch wg-swatch--mint-soft"></span></div>
+            <div class="stat-item"><span class="stat-label">sun</span><span class="wg-swatch wg-swatch--sun"></span></div>
+            <div class="stat-item"><span class="stat-label">sun-deep</span><span class="wg-swatch wg-swatch--sun-deep"></span></div>
+            <div class="stat-item"><span class="stat-label">sun-soft</span><span class="wg-swatch wg-swatch--sun-soft"></span></div>
+            <div class="stat-item"><span class="stat-label">clay</span><span class="wg-swatch wg-swatch--clay"></span></div>
+            <div class="stat-item"><span class="stat-label">clay-soft</span><span class="wg-swatch wg-swatch--clay-soft"></span></div>
+        </div>
+    </div>
+
+    <!-- =========================== SEMANTIC / FG =========================== -->
+    <div class="wg-section-label"><span>Semantic foregrounds</span></div>
+    <div class="wg-card">
+        <p class="m-0 wg-fg-1-demo">--wg-fg-1 — primary body text</p>
+        <p class="m-0 mt-xs wg-muted-strong">--wg-fg-2 — .wg-muted-strong</p>
+        <p class="m-0 mt-xs wg-muted">--wg-fg-3 — .wg-muted</p>
+        <p class="m-0 mt-xs wg-fg-4-demo">--wg-fg-4 — labels, inactive nav</p>
+        <p class="m-0 mt-xs wg-fg-5-demo">--wg-fg-5 — chart guides only</p>
+    </div>
+
+    <!-- ============================ TYPOGRAPHY ============================= -->
+    <div class="wg-section-label"><span>Typography</span></div>
+    <div class="wg-card">
+        <p class="wg-mono-display m-0">JetBrains Mono — display &amp; numerics 1,234.56</p>
+        <p class="m-0 mt-sm">Space Grotesk — UI body text. Headlines are intentionally mono.</p>
+        <div class="flex-row flex-wrap gap-md mt-md">
+            <span class="text-xs">xs 11px</span>
+            <span class="text-sm">sm 13px</span>
+            <span>md 15px</span>
+        </div>
+    </div>
+
+    <!-- ============================== GLOSS =============================== -->
+    <div class="wg-section-label"><span>Gloss material</span></div>
+    <div class="wg-card">
+        <div class="flex-row flex-wrap gap-sm">
+            <button type="button" class="wg-gloss wg-gloss--lg">Default</button>
+            <button type="button" class="wg-gloss wg-gloss--sun wg-gloss--lg">Sun</button>
+            <button type="button" class="wg-gloss wg-gloss--clay wg-gloss--lg">Clay</button>
+            <button type="button" class="wg-gloss wg-gloss--inset wg-gloss--lg">Inset</button>
+        </div>
+        <div class="wg-card wg-card--inset mt-md">.wg-card--inset — the trough surface</div>
+    </div>
+
+    <!-- =========================== TOOLBAR ROW ============================ -->
+    <div class="wg-section-label"><span>Toolbar row — the canonical primary action</span></div>
+    <div class="wg-card">
+        <p class="wg-muted m-0 mb-sm text-sm">
+            Primary actions render <strong>inline</strong> with the tab strip or range
+            selector as a <code>.wg-toolbar-btn--primary</code> pill. Never a floating
+            FAB, never a bottom CTA dock — the sibling project shipped both and retired
+            both.
+        </p>
+        <div class="flex-row flex-between gap-sm">
+            <div class="wg-gloss wg-gloss--inset flex-row gap-sm wg-range-strip">
+                <button type="button" class="wg-toolbar-btn wg-toolbar-btn--secondary">1M</button>
+                <button type="button" class="wg-toolbar-btn wg-gloss wg-gloss--sun">1Y</button>
+                <button type="button" class="wg-toolbar-btn wg-toolbar-btn--secondary">All</button>
+            </div>
+            <button type="button" class="wg-toolbar-btn wg-toolbar-btn--primary">+ Add</button>
+        </div>
+    </div>
+
+    <!-- ============================ STATUS TAGS =========================== -->
+    <div class="wg-section-label"><span>Status tags</span></div>
+    <div class="wg-card">
+        <div class="flex-row flex-wrap gap-sm">
+            <span class="wg-tag wg-tag--normal">NORMAL</span>
+            <span class="wg-tag wg-tag--high">HIGH</span>
+            <span class="wg-tag wg-tag--alert">ALERT</span>
+            <span class="wg-tag wg-tag--sun">SUN</span>
+            <span class="wg-tag wg-tag--mono">MONO</span>
+        </div>
+    </div>
+
+    <!-- =============================== DELTA ============================== -->
+    <div class="wg-section-label"><span>Delta — gain / loss / flat</span></div>
+    <div class="wg-card">
+        <p class="wg-muted m-0 mb-sm text-sm">
+            This app's most-repeated signal. The ▲ / ▼ / — glyph is emitted by CSS
+            <code>::before</code> and is <strong>not optional</strong>: red/green alone
+            fails for roughly 1 in 12 men, and it is the most common accessibility
+            defect in finance UIs. Use <code>.wg-delta</code>, never a raw
+            <code>var(--wg-gain-fg)</code> on a bare number.
+        </p>
+        <div class="flex-row flex-wrap gap-sm">
+            <span class="wg-delta wg-delta--gain">+2.41%</span>
+            <span class="wg-delta wg-delta--loss">-1.08%</span>
+            <span class="wg-delta wg-delta--flat">0.00%</span>
+        </div>
+        <p class="wg-muted m-0 mt-md text-sm">Bare variant, for dense table cells:</p>
+        <div class="flex-row flex-wrap gap-md">
+            <span class="wg-delta wg-delta--gain wg-delta--bare">+128.40</span>
+            <span class="wg-delta wg-delta--loss wg-delta--bare">-64.20</span>
+            <span class="wg-delta wg-delta--flat wg-delta--bare">unknown</span>
+        </div>
+    </div>
+
+    <!-- ============================ STAT CELLS =========================== -->
+    <div class="wg-section-label"><span>Stat cells</span></div>
+    <div class="wg-card">
+        <div class="flex-row flex-wrap gap-xl">
+            <div class="stat-item">
+                <span class="stat-label">Total value</span>
+                <span class="stat-value">128,402.11</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Day change</span>
+                <span class="stat-value"><span class="wg-delta wg-delta--gain wg-delta--bare">+1,204.00</span></span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Positions</span>
+                <span class="stat-value">17</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================== FIELDS ============================= -->
+    <div class="wg-section-label"><span>Form fields</span></div>
+    <div class="wg-card">
+        <div class="wg-field">
+            <label class="wg-label" for="demo-ticker">Ticker</label>
+            <input class="wg-input" id="demo-ticker" type="text" placeholder="VWCE">
+        </div>
+        <div class="wg-field--row mt-md">
+            <div class="wg-field">
+                <label class="wg-label" for="demo-qty">Quantity</label>
+                <input class="wg-input" id="demo-qty" type="text" inputmode="decimal" placeholder="10">
+            </div>
+            <div class="wg-field">
+                <label class="wg-label" for="demo-kind">Type</label>
+                <select class="wg-select" id="demo-kind">
+                    <option>Buy</option>
+                    <option>Sell</option>
+                    <option>Dividend</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================== TOGGLE ============================= -->
+    <div class="wg-section-label"><span>Toggle</span></div>
+    <div class="wg-card">
+        <div class="wg-settings-row">
+            <div class="wg-settings-row__content">
+                <h3 class="wg-settings-row__title">Hide small positions</h3>
+                <p class="wg-settings-row__desc">Collapse holdings worth under 1% of the portfolio.</p>
+            </div>
+            <div class="wg-settings-row__control">
+                <label class="wg-toggle">
+                    <input class="wg-toggle__input" id="demo-toggle-on" type="checkbox" checked aria-label="Hide small positions">
+                    <span class="wg-toggle__track" aria-hidden="true"></span>
+                    <span class="wg-toggle__knob" aria-hidden="true"></span>
+                </label>
+            </div>
+        </div>
+        <div class="wg-settings-row">
+            <div class="wg-settings-row__content">
+                <h3 class="wg-settings-row__title">Disabled example</h3>
+            </div>
+            <div class="wg-settings-row__control">
+                <label class="wg-toggle wg-toggle--disabled">
+                    <input class="wg-toggle__input" id="demo-toggle-off" type="checkbox" disabled aria-label="Disabled example">
+                    <span class="wg-toggle__track" aria-hidden="true"></span>
+                    <span class="wg-toggle__knob" aria-hidden="true"></span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- =========================== STALE BADGE ========================== -->
+    <div class="wg-section-label"><span>Freshness badge</span></div>
+    <div class="wg-card">
+        <div class="flex-row flex-wrap gap-sm">
+            <span class="wg-stale-badge wg-stale-badge--neutral">Updated just now</span>
+            <span class="wg-stale-badge wg-stale-badge--warning">Offline · 3h old</span>
+        </div>
+    </div>
+
+    <!-- ========================= SPARKLINE + RING ======================== -->
+    <div class="wg-section-label"><span>Sparkline &amp; ring</span></div>
+    <div class="wg-card">
+        <div class="flex-row flex-wrap gap-xl">
+            <div class="stat-item">
+                <span class="stat-label">gain</span>
+                <svg class="wg-sparkline wg-sparkline--gain" width="120" height="22" viewBox="0 0 120 22" aria-hidden="true">
+                    <path class="wg-spark-fill" d="M0 18 L30 13 L60 15 L90 7 L120 4 L120 22 L0 22 Z"></path>
+                    <path class="wg-spark" d="M0 18 L30 13 L60 15 L90 7 L120 4"></path>
+                    <circle class="wg-spark-tail" cx="120" cy="4" r="2.3"></circle>
+                </svg>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">loss</span>
+                <svg class="wg-sparkline wg-sparkline--loss" width="120" height="22" viewBox="0 0 120 22" aria-hidden="true">
+                    <path class="wg-spark-fill" d="M0 5 L30 9 L60 8 L90 14 L120 18 L120 22 L0 22 Z"></path>
+                    <path class="wg-spark" d="M0 5 L30 9 L60 8 L90 14 L120 18"></path>
+                    <circle class="wg-spark-tail" cx="120" cy="18" r="2.3"></circle>
+                </svg>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">ring</span>
+                <svg class="wg-ring" width="36" height="36" viewBox="0 0 36 36" role="img" aria-label="Allocation: 68%">
+                    <circle class="wg-ring__track" cx="18" cy="18" r="15.9155"></circle>
+                    <circle class="wg-ring__progress wg-ring-demo-68" cx="18" cy="18" r="15.9155"
+                            stroke-dasharray="100" transform="rotate(-90 18 18)"></circle>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <!-- =========================== CHART THEME =========================== -->
+    <div class="wg-section-label"><span>Shared chart theme</span></div>
+    <div class="wg-chart-card">
+        <p class="wg-muted m-0 mb-sm text-sm">
+            Every chart consumes <code>--wg-chart-*</code>. A losing series here is the
+            same token as a losing holdings row above — that consistency is the whole
+            reason the shared theme exists.
+        </p>
+        <svg width="100%" height="120" viewBox="0 0 320 120" role="img" aria-label="Example performance chart">
+            <line class="wg-chart__guide" x1="0" y1="30" x2="320" y2="30"></line>
+            <line class="wg-chart__guide" x1="0" y1="60" x2="320" y2="60"></line>
+            <line class="wg-chart__guide" x1="0" y1="90" x2="320" y2="90"></line>
+            <path class="wg-chart__area wg-chart__area--gain" d="M0 95 L80 70 L160 78 L240 40 L320 25 L320 120 L0 120 Z"></path>
+            <path class="wg-chart__series wg-chart__series--gain" d="M0 95 L80 70 L160 78 L240 40 L320 25"></path>
+            <path class="wg-chart__series wg-chart__series--loss" d="M0 40 L80 55 L160 50 L240 78 L320 92"></path>
+            <text class="wg-chart__axis-tick" x="0" y="115">Jan</text>
+            <text class="wg-chart__axis-tick" x="150" y="115">Jun</text>
+            <text class="wg-chart__axis-tick" x="290" y="115">Dec</text>
+        </svg>
+    </div>
+
+    <!-- ============================ EMPTY STATE ========================== -->
+    <div class="wg-section-label"><span>Empty state</span></div>
+    <div class="wg-card">
+        <p class="empty-state-msg m-0">No transactions yet</p>
+    </div>
+
+    <!-- ============================== MODAL ============================= -->
+    <div class="wg-section-label"><span>Modal shell (rendered inline for reference)</span></div>
+    <div class="wg-card">
+        <p class="wg-muted m-0 mb-sm text-sm">
+            New screens reuse <code>.wg-modal</code> + <code>__header</code> /
+            <code>__title</code> / <code>__body</code> / <code>__actions</code> rather
+            than introducing per-section variants. Shown here unpositioned.
+        </p>
+        <div class="wg-card wg-modal-demo">
+            <div class="wg-modal__header">
+                <h3 class="wg-modal__title">Add transaction</h3>
+                <button type="button" class="wg-icon-btn" aria-label="Close">
+                    <span class="wg-gloss">✕</span>
+                </button>
+            </div>
+            <div class="wg-modal__body">
+                <div class="wg-field">
+                    <label class="wg-label" for="demo-modal-amount">Amount</label>
+                    <input class="wg-input" id="demo-modal-amount" type="text" inputmode="decimal" placeholder="0.00">
+                </div>
+            </div>
+            <div class="wg-modal__actions mt-md">
+                <button type="button" class="wg-gloss wg-gloss--lg">Cancel</button>
+                <button type="button" class="wg-gloss wg-gloss--sun wg-gloss--lg">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================ BOTTOM NAV ========================== -->
+    <div class="wg-section-label"><span>Bottom nav — five slots, one row</span></div>
+    <p class="wg-muted text-sm">
+        Rendered live at the bottom of this page by <code>WGBottomNav.mount()</code>.
+        One slot per real section, no "More" aggregator, no section-header banners —
+        the active pill is the sole screen indicator.
+    </p>
+
+</div>
+
+<div id="nav-mount"></div>
+
+<script src="/static/js/components/wg-icons.js"></script>
+<script src="/static/js/components/wg-bottom-nav.js"></script>
+<script src="/static/js/design-page.js"></script>
+</body>
+</html>
