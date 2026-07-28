@@ -30,6 +30,18 @@
  *                 --font-weight-{normal|medium|bold}
  *   Z-INDEX       --z-{dropdown|overlay|modal|popover|confirm|toast}
  *
+ * RUNNING THE GUARDS (from the repo root):
+ *
+ *     node --test web/static/js/tests/
+ *
+ * The tests are ESM `.js`, so they need `web/package.json` with
+ * {"type":"module"} in scope — it lands on master alongside this. Until it
+ * does, or on any checkout without it, the equivalent is:
+ *
+ *     node --experimental-default-type=module --test web/static/js/tests/*.test.js
+ *
+ * No npm dependencies, no vitest — Node's built-in runner only.
+ *
  * RULES (each one is pinned by a test in web/static/js/tests/):
  *   - No hardcoded hex colors outside :root — use tokens.
  *     → architecture.design-tokens.test.js
