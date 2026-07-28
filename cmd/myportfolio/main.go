@@ -39,9 +39,18 @@ func run() error {
 	}
 	defer db.Close()
 
+	// Generated and persisted on first boot rather than configured: a
+	// deployment that forgets to set a secret would otherwise either fail to
+	// start or fall back to a default that makes every session cookie
+	// forgeable. Persisting it also keeps sessions alive across restarts.
+	sessionSecret, err := db.SessionSecret(ctx)
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: server.New(web.StaticFS, db),
+		Handler: server.New(web.StaticFS, db, sessionSecret),
 		// Slowloris guard: without it a client can hold a connection open
 		// indefinitely by dribbling out request headers.
 		ReadHeaderTimeout: 10 * time.Second,

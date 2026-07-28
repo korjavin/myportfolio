@@ -26,7 +26,7 @@ func newTestServer(t *testing.T) http.Handler {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(testFS(), db)
+	return New(testFS(), db, testSessionSecret)
 }
 
 func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
@@ -65,7 +65,7 @@ func TestReadyzUnreadableDatabase(t *testing.T) {
 	}
 	db.Close()
 
-	rec := get(t, New(testFS(), db), "/readyz")
+	rec := get(t, New(testFS(), db, testSessionSecret), "/readyz")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET /readyz on a closed database = %d, want 503", rec.Code)
 	}

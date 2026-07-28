@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  The passkey ceremony page: signup (A3) and unlock (A4). Track B owns the app
+  shell at index.html; this is the door, and the two files stay separate so the
+  ceremony that handles key material loads none of the app's code.
+
+  No inline <script> or <style>: the origin's CSP is script-src 'self' /
+  style-src 'self' (internal/server/server.go), and inline would be blocked —
+  which is exactly the point on the page that holds the DEK in memory.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>myportfolio — unlock</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="ceremony">
+        <h1>myportfolio</h1>
+        <p>Loading&hellip;</p>
+      </section>
+    </main>
+    <script type="module" src="/js/core/vault-boot.js"></script>
+  </body>
+</html>
