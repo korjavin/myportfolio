@@ -991,32 +991,51 @@ function importCsv(text, options, report) {
   }
 
   const accountIdByName = new Map();
-  const accountRecordId = (name) => {
+  const accountRecords = new Map();
+  // The account's currency is the Transaction Currency of its rows, which is
+  // the only place a CSV export states it. Taken from the first row that has
+  // one, since the account is created before the whole file has been read.
+  const accountRecordId = (name, currency) => {
     const key = norm(name) || norm(defaultAccountName);
     let id = accountIdByName.get(key);
-    if (id) return id;
+    if (id) {
+      const existing = accountRecords.get(id);
+      if (!existing.currency && currency) existing.currency = currency;
+      return id;
+    }
     id = idHashed(RECORD.account, `csv-account|${key}`);
     accountIdByName.set(key, id);
-    records.push({
+    const record = {
       recordType: RECORD.account,
       recordId: id,
       name: name || defaultAccountName,
       kind: 'cash',
-      currency: options.currency ?? null,
+      currency: currency ?? options.currency ?? null,
       closed: false,
-    });
+    };
+    accountRecords.set(id, record);
+    records.push(record);
     return id;
   };
 
   const securityIdByKey = new Map();
-  const securityRecordId = (isin, wkn, ticker, name, currency) => {
+  const securityRecords = new Map();
+  const securityRecordId = (isin, wkn, ticker, name, currency, location) => {
     const key = norm(isin) || norm(ticker) || norm(wkn) || norm(name);
     if (!key) return null;
     let id = securityIdByKey.get(key);
-    if (id) return id;
+    if (id) {
+      const existing = securityRecords.get(id);
+      if (!existing.currency) existing.currency = currency ?? null;
+      else if (currency && existing.currency !== currency) {
+        report.add('warning', 'csv_security_currency_conflict', location,
+          `${existing.name} appears in both ${existing.currency} and ${currency}; kept as ${existing.currency}`);
+      }
+      return id;
+    }
     id = idHashed(RECORD.security, `csv-security|${key}`);
     securityIdByKey.set(key, id);
-    records.push({
+    const record = {
       recordType: RECORD.security,
       recordId: id,
       name: name || ticker || isin || wkn,
@@ -1025,7 +1044,9 @@ function importCsv(text, options, report) {
       currency: currency ?? null,
       assetClass: null,
       quote: { provider: null, symbol: ticker || null },
-    });
+    };
+    securityRecords.set(id, record);
+    records.push(record);
     return id;
   };
 
@@ -1079,11 +1100,25 @@ function importCsv(text, options, report) {
     const fees = fixedFrom(cell(row, 'fees'), decimalSep, DECIMALS.amount, location, 'Fees', ctx) ?? 0;
     const taxes = fixedFrom(cell(row, 'taxes'), decimalSep, DECIMALS.amount, location, 'Taxes', ctx) ?? 0;
     const fx = fixedFrom(cell(row, 'exchangeRate'), decimalSep, DECIMALS.fx, location, 'Exchange Rate', ctx);
+    // PP writes the rate with 4 decimals, so this fires only on a hand-edited
+    // file — but the promise that every rounding is reported has to hold on
+    // both paths or it is not a promise.
+    const fxFrac = /[.,](\d+)$/.exec(cell(row, 'exchangeRate'));
+    if (fxFrac && fxFrac[1].length > DECIMALS.fx) {
+      report.add('warning', 'pp_fx_rounded', location,
+        `exchange rate ${cell(row, 'exchangeRate')} has more than ${DECIMALS.fx} decimals `
+        + 'and was rounded to our fx scale', raw);
+    }
     const currency = cell(row, 'currency') || options.currency || null;
     const note = cell(row, 'note');
-    const acctId = accountRecordId(cell(row, 'account'));
+    const acctId = accountRecordId(cell(row, 'account'), currency);
+    // A security is quoted in its own currency, which is NOT the transaction's
+    // when a EUR account buys a USD stock. PP puts the security's currency in
+    // the Currency Gross Amount column — its own validator requires the gross
+    // unit's forex currency to equal the security's — and leaves that column
+    // empty when the two are the same.
     const secId = securityRecordId(cell(row, 'isin'), cell(row, 'wkn'), cell(row, 'ticker'),
-      cell(row, 'securityName'), currency);
+      cell(row, 'securityName'), cell(row, 'grossCurrency') || currency, location);
 
     if (ppType === 'BUY' || ppType === 'SELL') {
       // A trade appears in BOTH of PP's per-file exports — the cash account's
@@ -1161,7 +1196,10 @@ function importCsv(text, options, report) {
       ...(taxes ? { taxes } : {}),
       currency,
       ...(fx ? { fx } : {}),
-      ...(counterAccount ? { counterAccountId: accountRecordId(counterAccount) } : {}),
+      // The counter leg's own currency is unknown here (a cross-currency
+      // transfer states it only in the other account's export), so the counter
+      // account is created without one rather than mislabelled with this one's.
+      ...(counterAccount ? { counterAccountId: accountRecordId(counterAccount, null) } : {}),
       ...(note ? { note } : {}),
     });
     report.counts.imported += 1;

@@ -475,6 +475,46 @@ test('CSV: a securities-account export signs buys the other way and still import
   assert.ok(codes(report).includes('csv_trade_appears_in_two_exports'));
 });
 
+test('CSV: a EUR account buying a USD stock keeps both currencies straight', () => {
+  // PP fills Gross Amount / Currency Gross Amount / Exchange Rate from the
+  // GROSS_VALUE unit, whose forex leg its own CheckCurrenciesAction requires to
+  // be in the *security's* currency — so the security here is USD even though
+  // the cash moved in EUR.
+  const csv = [CSV_EN_HEADER,
+    '2024-03-04T00:00,Buy,-920.00,EUR,"1,000.00",USD,0.9200,,,10,US0378331005,865985,AAPL,Apple Inc.,',
+  ].join('\r\n');
+  const { records, report } = parsePP(csv, { accountName: 'Broker EUR' });
+  assert.equal(report.ok, true);
+
+  const [account] = ofType(records, 'account');
+  assert.equal(account.currency, 'EUR');   // the transaction currency
+  const [security] = ofType(records, 'security');
+  assert.equal(security.currency, 'USD');  // the gross-amount currency
+  assert.equal(security.ticker, 'AAPL');
+
+  const [tx] = ofType(records, 'transaction');
+  assert.equal(tx.amount, 92000);
+  assert.equal(tx.currency, 'EUR');
+  assert.equal(tx.fx, 0.92 * 1e8);
+});
+
+test('CSV: the account currency comes from the rows, not from an option', () => {
+  const { records } = parsePP(CSV_EN);
+  assert.equal(ofType(records, 'account')[0].currency, 'EUR');
+  assert.equal(ofType(records, 'security')[0].currency, 'EUR');
+});
+
+test('CSV: an exchange rate finer than our fx scale is reported as rounded', () => {
+  const csv = [CSV_EN_HEADER,
+    '2024-03-04T00:00,Buy,-920.00,EUR,"1,000.00",USD,0.923456789012,,,10,US0378331005,,AAPL,Apple Inc.,',
+  ].join('\r\n');
+  const { records, report } = parsePP(csv);
+  // 12 decimals in, 8 kept, rounded half away from zero by parseFixed — and
+  // said out loud, because this is the one place the importer is not lossless.
+  assert.equal(ofType(records, 'transaction')[0].fx, 92345679);
+  assert.ok(codes(report).includes('pp_fx_rounded'));
+});
+
 test('CSV: unknown types and unreadable rows are reported, not dropped', () => {
   const csv = [CSV_EN_HEADER,
     '2020-11-02T00:00,Deposit,500.00,EUR,,,,,,,,,,,',
