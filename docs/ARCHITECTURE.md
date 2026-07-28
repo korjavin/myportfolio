@@ -137,6 +137,32 @@ against them):
   corrupt every downstream gain number. The engine refuses them with an explicit issue rather than
   guessing. Tracked as a real gap for a PP competitor.
 
+### Time conventions — pinned, because every return number depends on them
+
+Settled while building the performance engine. All three are load-bearing; the UI must not re-decide
+them. Full rationale lives in the header of `web/domain/perf.js`.
+
+- **Days are UTC calendar days.** A date is the first 10 characters of a record's `date`, read as a
+  UTC day. All day arithmetic goes through `Date.UTC`; nothing constructs a local-time `Date` or
+  calls `new Date()` with no argument, so no result moves when the machine's timezone does. A string
+  that is not a real calendar day is rejected, never silently rolled forward. The sibling project's
+  entire timezone bug class came from implicit local dates.
+- **A range `[from, to]` is inclusive at both ends.** So the opening valuation is the close of the
+  day *before* `from`, and a transaction dated `from` is inside the range. This is the reading a date
+  filter on the transaction list gives — "2024 performance" contains every 2024 transaction.
+- **Money in at the start of its day, money out at the end**, so every unit of capital is at risk for
+  the whole of each day it is present: `factor = (value(d) + outflow(d)) / (value(d−1) + inflow(d))`.
+  This is the only timing convention that stays defined at both ends of a position's life — "all
+  flows at end of day" divides by zero on the day a position opens, and "all flows at start of day"
+  gives a negative denominator on the day one closes at a profit. Daily closes carry no intraday
+  information, so this is a convention; it is stated rather than buried. Flows are **netted per day**
+  before the formula is applied, so a same-day matched transfer pair cannot dilute the return.
+
+**External vs internal flows**: a flow is external if it crosses the portfolio boundary (`deposit`,
+`removal`). Transfers between the user's own accounts are *not* excluded as internal — `portfolio.js`
+genuinely reports the total dropping while a transfer is in flight, so excluding the flow prints a
+phantom loss. Both directions are regression-tested.
+
 Deferred to post-v1, do not build now: taxonomies/classification trees, rebalancing targets, bonds
 with coupon schedules, options.
 
