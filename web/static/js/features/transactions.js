@@ -89,29 +89,31 @@ export function openTxModal(record, defaults) {
     const isDepot = (a) => a.kind === 'securities';
     const depots = state.accounts.filter(isDepot);
 
+    const options = (accounts) => accounts.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId }));
+
+    // The kind filter is about which account a NEW record may name. A stored id
+    // it hides — the account was deleted, or its kind was changed after the
+    // record was written — would be dropped by ui.select's fall back to the
+    // first option, so an edit of a historical record either refuses to save
+    // (the cash leg, which is required) or silently un-attributes it (the
+    // shares leg on a dividend, which is not). Carrying the stored value as its
+    // own option keeps an edit lossless and leaves re-attributing deliberate.
+    const withStored = (opts, storedId) => {
+        if (!storedId || opts.some((o) => o.value === storedId)) return opts;
+        const stored = state.accounts.find((a) => a.recordId === storedId);
+        return [...opts, { value: storedId, label: stored?.name ?? storedId }];
+    };
+
     const account = entityPicker({
         label: 'Account (cash moves here)',
         noun: 'account',
-        options: state.accounts.filter((a) => !isDepot(a))
-            .map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
+        options: withStored(options(state.accounts.filter((a) => !isDepot(a))), values.accountId),
         value: values.accountId,
     });
-    const depotOptions = depots.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId }));
-    // A stored portfolioId the list does not contain — its account was deleted,
-    // or its kind was changed to cash after the trade was booked — would be
-    // dropped by ui.select's fall back to the first option, and dropped
-    // SILENTLY: the field is not required on a dividend, so a no-op save would
-    // un-attribute an imported record with no error to notice. Carrying it as
-    // its own option means an edit preserves it and re-attributing stays a
-    // deliberate act.
-    if (values.portfolioId && !depots.some((a) => a.recordId === values.portfolioId)) {
-        const stored = state.accounts.find((a) => a.recordId === values.portfolioId);
-        depotOptions.push({ value: values.portfolioId, label: stored?.name ?? values.portfolioId });
-    }
     const portfolio = entityPicker({
         label: 'Securities account (shares land here)',
         noun: 'depot',
-        options: depotOptions,
+        options: withStored(options(depots), values.portfolioId),
         value: defaultPortfolioId({
             stored: values.portfolioId,
             depotIds: depots.map((a) => a.recordId),
