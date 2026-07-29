@@ -21,9 +21,14 @@ function renderChooser() {
          cannot read.</p>
       <button id="unlock" type="button">Unlock with your passkey</button>
       <button id="signup" type="button" class="secondary">Create a new vault</button>
+      <button id="recover" type="button" class="secondary">Recover with your Emergency Kit</button>
     </section>`;
   app.querySelector('#unlock').addEventListener('click', () => renderLocked(app));
   app.querySelector('#signup').addEventListener('click', () => renderWelcome(app));
+  // The kit tells the user to "choose Recover account" here. Without this the
+  // 160-bit code signup prints has nowhere to be typed, which is the whole
+  // defect A16 exists to fix — do not quietly drop it in a redesign.
+  app.querySelector('#recover').addEventListener('click', () => { location.href = '/recover.html'; });
 }
 
 // A browser without WebAuthn or without SubtleCrypto cannot participate at all,

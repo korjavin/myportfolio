@@ -256,6 +256,65 @@ func (d *DB) SetRecoveryMaterial(ctx context.Context, accountID string, env Enve
 	return nil
 }
 
+// RecoveryVerifierHash returns the stored SHA-256(verifier) for accountID, or
+// nil when the account does not exist or has never uploaded recovery material.
+//
+// The two cases are deliberately indistinguishable to the caller: the
+// redemption endpoint must answer identically for a wrong code and an account
+// id that was never real, or it becomes an account-existence oracle.
+func (d *DB) RecoveryVerifierHash(ctx context.Context, accountID string) ([]byte, error) {
+	var hash []byte
+	err := d.QueryRowContext(ctx,
+		`SELECT recovery_verifier_hash FROM accounts WHERE id = ?`, accountID).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: read recovery verifier: %w", err)
+	}
+	return hash, nil
+}
+
+// EnrollRecoveredCredential is Path C's single transaction: the passkey enrolled
+// against a redeemed recovery code, that passkey's DEK envelope, the ROTATED
+// recovery envelope, and the hash of the new code's verifier all land together
+// or not at all.
+//
+// The atomicity is what makes rotation non-optional rather than a prompt. The
+// redeemed code has been typed into a machine, so it must stop opening the vault
+// at the exact moment its replacement passkey starts working — not one HTTP
+// request later, where a closed tab or a failed upload would leave a live code
+// the user has been told is dead. Overwriting recovery_verifier_hash here IS the
+// burn: the old verifier ceases to exist in the same commit.
+func (d *DB) EnrollRecoveredCredential(ctx context.Context, cred Credential, env, recEnv Envelope, verifierHash []byte, now time.Time) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin recovery enrollment: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+
+	if err := insertCredential(ctx, tx, cred, now); err != nil {
+		return err
+	}
+	if err := upsertEnvelope(ctx, tx, env); err != nil {
+		return err
+	}
+	recEnv.AccountID = cred.AccountID
+	recEnv.CredentialRef = RecoveryRef
+	if err := upsertEnvelope(ctx, tx, recEnv); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE accounts SET recovery_verifier_hash = ? WHERE id = ?`,
+		verifierHash, cred.AccountID); err != nil {
+		return fmt.Errorf("store: rotate recovery verifier: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit recovery enrollment: %w", err)
+	}
+	return nil
+}
+
 // RecoveryRef is the credential_ref reserved for the Emergency Kit's envelope.
 // It can never collide with a real credential ref, which is base64url and
 // therefore never contains a lowercase word with no padding ambiguity — but the
