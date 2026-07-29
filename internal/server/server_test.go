@@ -108,7 +108,7 @@ func TestServesStaticAssets(t *testing.T) {
 func TestSecurityHeaders(t *testing.T) {
 	h := newTestServer(t)
 
-	for _, path := range []string{"/", "/js/core/crypto.js", "/healthz", "/nope.js"} {
+	for _, path := range cspRoutes {
 		rec := get(t, h, path)
 		csp := rec.Header().Get("Content-Security-Policy")
 		if csp == "" {
@@ -116,18 +116,19 @@ func TestSecurityHeaders(t *testing.T) {
 			continue
 		}
 		for _, want := range []string{
-			"default-src 'self'", "script-src 'self'", "connect-src 'self'",
+			"default-src 'self'", "script-src 'self'",
 			"object-src 'none'", "frame-ancestors 'none'", "base-uri 'none'",
 		} {
 			if !strings.Contains(csp, want) {
 				t.Errorf("GET %s: CSP %q missing %q", path, csp, want)
 			}
 		}
-		for _, banned := range []string{"unsafe-inline", "unsafe-eval", "https:", "*"} {
+		for _, banned := range []string{"unsafe-inline", "unsafe-eval"} {
 			if strings.Contains(csp, banned) {
 				t.Errorf("GET %s: CSP %q contains banned token %q", path, csp, banned)
 			}
 		}
+		assertNoWildcardSource(t, path, csp)
 		for header, want := range map[string]string{
 			"X-Content-Type-Options": "nosniff",
 			"X-Frame-Options":        "DENY",
@@ -136,6 +137,63 @@ func TestSecurityHeaders(t *testing.T) {
 			if got := rec.Header().Get(header); got != want {
 				t.Errorf("GET %s: %s = %q, want %q", path, header, got, want)
 			}
+		}
+	}
+}
+
+// cspRoutes is every distinct way a response leaves this handler: the shell, a
+// static asset, a domain module, the JSON probes, an unauthenticated API route,
+// and a 404 from the file server. The policy has to hold on ALL of them, not
+// just the shell — a same-origin child frame inherits the CSP of the document
+// it loads, so one relaxed document is a bypass gadget for the whole origin.
+var cspRoutes = []string{"/", "/js/core/crypto.js", "/domain/quotes.js", "/healthz", "/readyz", "/api/state", "/nope.js"}
+
+// assertNoWildcardSource rejects scheme-only and wildcard sources anywhere in
+// the policy. A bare `https:` in connect-src is exactly the token that lets an
+// XSS POST a decrypted portfolio to any origin it likes (ARCHITECTURE.md 7);
+// `wss:`, `data:` and `*` are the same hole spelled differently. Host sources
+// like `https://api.coingecko.com` are the point of A9 and are fine — hence a
+// token check and not a substring check, which cannot tell the two apart.
+func assertNoWildcardSource(t *testing.T, path, csp string) {
+	t.Helper()
+	for _, directive := range strings.Split(csp, ";") {
+		for _, tok := range strings.Fields(directive) {
+			switch {
+			case strings.HasSuffix(tok, ":"):
+				t.Errorf("GET %s: CSP %q has bare scheme token %q", path, csp, tok)
+			case strings.Contains(tok, "*"):
+				t.Errorf("GET %s: CSP %q has wildcard token %q", path, csp, tok)
+			}
+		}
+	}
+}
+
+func cspDirective(csp, name string) string {
+	for _, directive := range strings.Split(csp, ";") {
+		if fields := strings.Fields(directive); len(fields) > 0 && fields[0] == name {
+			return strings.Join(fields[1:], " ")
+		}
+	}
+	return ""
+}
+
+// A9. connect-src is derived from quotes.js's exported QUOTE_HOSTS, so it
+// cannot drift out of sync with what the client actually fetches — there is one
+// list, not two. The flip side is that editing that map silently changes what
+// this origin is allowed to talk to, so this pin is the human gate: every host
+// here is one more place an on-origin XSS could post a decrypted portfolio, and
+// widening the set has to be typed twice, on purpose. This test failing means
+// either QUOTE_HOSTS changed (agree with it, then update the pin) or the
+// derivation stopped matching the file (fix the derivation — quotes are inert
+// without it, which is the bug A9 exists to fix).
+func TestQuoteHostAllowlist(t *testing.T) {
+	const want = "'self' https://api.coingecko.com https://api.twelvedata.com"
+
+	h := newTestServer(t)
+	for _, path := range cspRoutes {
+		csp := get(t, h, path).Header().Get("Content-Security-Policy")
+		if got := cspDirective(csp, "connect-src"); got != want {
+			t.Errorf("GET %s: connect-src = %q, want %q", path, got, want)
 		}
 	}
 }
