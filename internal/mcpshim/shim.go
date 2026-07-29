@@ -61,6 +61,46 @@ var CallTimeout = 30 * time.Second
 //nolint:staticcheck // ST1005: a terminal, user-facing sentence shown to the model, not a wrapped Go error.
 var ErrDeviceOffline = errors.New("No unlocked device is online to answer. Your pairing code is valid — this is not a typo — but nothing is listening on the other end: open your portfolio in a browser tab and unlock it, then retry. This connector talks to your device, not to a server, because your data is end-to-end encrypted and the server holds only ciphertext.")
 
+// The relay's two application close codes, mirrored rather than imported:
+// internal/server is the wrong dependency direction for a standalone client
+// (see maxFrameBytes). internal/server.StatusNoPairing and
+// StatusPairingReplaced are the definitions, and they are pinned from that side
+// by TestRevokeClosesTheLegsWith4404 / TestReMintClosesTheOldLegsWith4409.
+//
+// They are NOT interchangeable (ARCHITECTURE.md §11) and neither is a transient
+// drop: 4404 means the account has no pairing at all, so every redial re-runs a
+// dial that can only 401; 4409 means a live pairing exists but this leg is not
+// serving it, so every redial re-runs the same lost race. Anything else —
+// 1006, a normal closure when the peer leg drops, a broken TCP connection — is
+// exactly the case reconnect exists for and must keep reconnecting.
+const (
+	statusNoPairing       websocket.StatusCode = 4404
+	statusPairingReplaced websocket.StatusCode = 4409
+)
+
+// ErrPairingGone (4404) and ErrPairingReplaced (4409) are terminal: no amount
+// of redialing changes either, so the shim stops and says what to DO instead.
+//
+// Like ErrDeviceOffline these are shown verbatim to the model, and all three
+// must stay mutually distinguishable — conflating them is what produces "the
+// connector looks alive and every call times out", a symptom that points
+// nowhere. ErrDeviceOffline means the pairing is fine and no tab is open (wait
+// and retry); these two mean the pairing itself is not usable from here (act).
+//
+//nolint:staticcheck // ST1005: terminal, user-facing sentences, not wrapped Go errors.
+var (
+	ErrPairingGone = errors.New("This pairing no longer exists. The relay reports no active pairing for this account, so no device can be reached with this code and reconnecting cannot help. Open your portfolio in a browser, unlock it, and re-pair from Settings to mint a new code, then restart this connector with it.")
+
+	//nolint:staticcheck // ST1005: as above.
+	ErrPairingReplaced = errors.New("Another connection took over this pairing. A newer connector, or a newer pairing minted from Settings, replaced this one, so this connection has been retired and reconnecting would only lose the same race. If you re-paired, restart this connector with the new code from Settings; if a second copy of this connector is running, stop it and keep one.")
+)
+
+// isTerminalClose reports whether err is one of the two relay closes that no
+// redial can fix.
+func isTerminalClose(err error) bool {
+	return errors.Is(err, ErrPairingGone) || errors.Is(err, ErrPairingReplaced)
+}
+
 // errConnectionDropped marks a Call failure caused by this ShimCore's own
 // connection having already died — most often because the relay closed the
 // shim leg in lockstep with its paired device leg dropping. Client matches it
@@ -230,7 +270,7 @@ func (s *ShimCore) readLoop() {
 	for {
 		_, data, err := s.conn.Read(ctx)
 		if err != nil {
-			s.failAll(fmt.Errorf("mcpshim: relay connection closed: %w", err))
+			s.failAll(closeReason(err))
 			return
 		}
 		payload, err := OpenFrame(s.key, s.pairingID, data)
@@ -254,6 +294,59 @@ func (s *ShimCore) readLoop() {
 			ch <- resp
 		}
 	}
+}
+
+// closeReason turns readLoop's read error into the error every outstanding
+// Call sees. The relay's two terminal close codes become their own sentinels;
+// everything else stays an ordinary transport error that Client redials on.
+func closeReason(err error) error {
+	switch websocket.CloseStatus(err) {
+	case statusNoPairing:
+		return ErrPairingGone
+	case statusPairingReplaced:
+		return ErrPairingReplaced
+	}
+	return fmt.Errorf("mcpshim: relay connection closed: %w", err)
+}
+
+// terminalCloseGrace bounds how long awaitTerminal waits for the REASON a
+// dying connection died.
+//
+// A Call's write can fail microseconds before readLoop reads the close frame
+// carrying 4404 or 4409 — the relay closes gracefully, but the two events race.
+// Treating that as "no reason given" throws the close code away and redials
+// into a pairing that cannot come back, which is the bug this whole change
+// exists to fix, reintroduced as a flake. One scheduler hop is all it takes;
+// this is generous, and invisible beside CallTimeout.
+const terminalCloseGrace = 250 * time.Millisecond
+
+// awaitTerminal waits for this connection to finish tearing down and reports
+// the terminal close it died of, or nil. Only ever called on a connection whose
+// Call just failed, so the wait is paid on a socket that is already gone.
+func (s *ShimCore) awaitTerminal(ctx context.Context) error {
+	timer := time.NewTimer(terminalCloseGrace)
+	defer timer.Stop()
+	select {
+	case <-s.closed:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	return s.terminalErr()
+}
+
+// terminalErr reports the terminal close this connection died of, or nil if it
+// is alive or died of something a redial could fix. Reading closeErr needs no
+// lock here: failAll assigns it before closing s.closed, so observing the
+// closed channel is the happens-before edge.
+func (s *ShimCore) terminalErr() error {
+	select {
+	case <-s.closed:
+		if isTerminalClose(s.closeErr) {
+			return s.closeErr
+		}
+	default:
+	}
+	return nil
 }
 
 func (s *ShimCore) failAll(err error) {

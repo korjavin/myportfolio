@@ -23,8 +23,11 @@ import (
 // stands in for the relay AND the paired browser at once. It covers dial,
 // seal, correlate, reconnect and error surfacing over the actual transport.
 // What it cannot cover is the relay's own behaviour — the 64 KiB cap being
-// enforced server-side, and the 4404/4409 close codes — which stays
-// unverified until C2 lands.
+// enforced server-side, and the 4404/4409 close codes. Those now run against
+// the real relay in internal/server (mcp_relay_shim_close_test.go): a fake
+// sending 4404 would only prove this package agrees with itself. What stays
+// here is the one thing the relay cannot produce on demand — a code-less,
+// abrupt drop.
 
 // fakeRelay accepts the shim leg, opens each frame with the pairing key, and
 // answers. A real relay never holds the key; this one does only because it is
@@ -365,6 +368,51 @@ func TestClientReconnectsAfterDrop(t *testing.T) {
 
 	if _, err := c.Call(t.Context(), "mcp_help", HelpInput{}); err != nil {
 		t.Fatalf("Call after drop: %v", err)
+	}
+	if n := relay.connCount(); n != 2 {
+		t.Fatalf("relay saw %d connections, want 2 (one dropped, one redialed)", n)
+	}
+}
+
+// TestClientReconnectsAfterAnAbruptDrop pins the 1006 half of the terminal
+// close-code work (bd myportfolio-ybp.8): a connection that dies with NO close
+// code — a killed process, a dropped tunnel — carries no information at all, so
+// it stays a transient drop and must still reconnect. Only 4404 and 4409 are
+// terminal, and this is the case that would be worse to break than the bug they
+// fixed. The relay cannot produce a code-less close on demand, which is why
+// this one stays on the fake.
+func TestClientReconnectsAfterAnAbruptDrop(t *testing.T) {
+	c, relay, _ := newTestClient(t)
+	relay.set(func(r *fakeRelay) {
+		r.onConn = func(n int, conn *websocket.Conn) bool {
+			if n == 1 {
+				conn.CloseNow() // no close frame: the client sees 1006, not a code
+				return true
+			}
+			return false
+		}
+	})
+
+	core, err := c.connected(t.Context())
+	if err != nil {
+		t.Fatalf("initial connect: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !core.isClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("readLoop never noticed the abrupt drop")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if status := websocket.CloseStatus(core.closeErr); status != -1 {
+		t.Fatalf("the drop carried close status %d, want none (-1) — this test is not exercising 1006", status)
+	}
+	if err := core.terminalErr(); err != nil {
+		t.Fatalf("an abrupt drop was treated as terminal: %v", err)
+	}
+
+	if _, err := c.Call(t.Context(), "mcp_help", HelpInput{}); err != nil {
+		t.Fatalf("Call after an abrupt drop: %v", err)
 	}
 	if n := relay.connCount(); n != 2 {
 		t.Fatalf("relay saw %d connections, want 2 (one dropped, one redialed)", n)
