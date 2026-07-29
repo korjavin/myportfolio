@@ -180,13 +180,20 @@ export function syncNow(onRecords = () => {}) {
 }
 
 /**
- * Pull on focus (§6). Returns an unsubscribe so a test can take its listeners
- * back off the target.
+ * Pull on focus (§6), and on the two other moments a stalled sync can start
+ * working again. Returns an unsubscribe so a test can take its listeners back
+ * off the target.
  *
- * Also flushes on hide, with no interval gate: a debounced write that has not
- * left yet is safe in the mirror, but sending it while the tab is still alive is
- * the difference between syncing now and syncing whenever the user next opens
- * this device — which may be never.
+ * Flushes on hide, with no interval gate: a debounced write that has not left
+ * yet is safe in the mirror, but sending it while the tab is still alive is the
+ * difference between syncing now and syncing whenever the user next opens this
+ * device — which may be never.
+ *
+ * Pulls on `online`, also ungated. That event is the one reconnection signal
+ * that arrives with the user sitting in the foreground doing nothing, so no
+ * focus event follows it — and the offline copy has just promised that the
+ * write will go when the network is back. Without this it would wait for the
+ * next focus or the next write, which is a promise the UI cannot keep.
  */
 export function watchFocus({
     target = globalThis,
@@ -214,10 +221,18 @@ export function watchFocus({
         onFocus();
     };
 
+    const onOnline = () => {
+        if (!vault) return;
+        last = now();
+        pull(onRecords);
+    };
+
     target.addEventListener('focus', onFocus);
+    target.addEventListener('online', onOnline);
     (doc || target).addEventListener('visibilitychange', onVisibility);
     return () => {
         target.removeEventListener('focus', onFocus);
+        target.removeEventListener('online', onOnline);
         (doc || target).removeEventListener('visibilitychange', onVisibility);
     };
 }

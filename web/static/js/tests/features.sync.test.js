@@ -313,6 +313,33 @@ describe('pull on open and on focus', () => {
         assert.equal(server.requests.length, settled);
     });
 
+    test('coming back online retries the write that failed while offline', async () => {
+        // The user never leaves the tab, so no focus event ever arrives. The
+        // offline copy has promised this write will go when the network is
+        // back; `online` is the only signal that says it is.
+        const server = fakeServer({ serverNow: () => BASE });
+        const { adopted, db } = await boot(server);
+        server.failWith = 'network';
+        server.failCount = -1;
+
+        await adopted.put('transaction', 'tx_1', { type: 'deposit', date: '2024-01-02', amount: 1000000 });
+        await until(() => syncState().status?.lastError !== null);
+        assert.equal(db.rows.get('tx_1').amount, 1000000);
+
+        const target = new EventTarget();
+        // The interval gate must NOT swallow this: the last pull was seconds
+        // ago and it failed, which is exactly why the retry matters.
+        const stop = watchFocus({ target, doc: null, minIntervalMs: 60_000, now: () => BASE });
+
+        server.failWith = null;
+        target.dispatchEvent(new Event('online'));
+        await until(() => server.blob !== null);
+        stop();
+
+        assert.deepEqual((await serverRecords(server)).map((r) => r.recordId), ['tx_1']);
+        assert.equal(syncState().status.pending, false);
+    });
+
     test('no timer is armed: an idle app with a vault makes no requests', async () => {
         const server = fakeServer({ serverNow: () => BASE });
         await boot(server);
