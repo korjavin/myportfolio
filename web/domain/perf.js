@@ -237,13 +237,30 @@ function cacheLists(records) {
 // price on or before that day; with shares outstanding that is unknowable, and
 // snapshot.totals would silently count it as zero. Returning null instead is
 // what stops this engine reporting a return computed off an understated total.
+//
+// It reads `snap.securities`, NOT `snap.positions`: §4 keys a position by
+// (accountId, securityId), so the same security at two brokers is two positions,
+// while a security's flows here are portfolio-wide. Folding the positions back
+// together locally would be a second definition of that aggregate, free to drift
+// from portfolio.js's — and a per-security return computed against one depot's
+// value and both depots' flows is confidently wrong (10 shares at each of two
+// depots, €100 -> €120, reports -40% for a +20% holding).
+//
+// UNKNOWN IS STICKY across depots: portfolio.js resolves a quote per security,
+// so `marketValue` is null for every position holding it or for none, and the
+// aggregate is null exactly when the security is unpriced. A total summed from
+// only the depots that do have a value understates the holding, which is the
+// same class of error as counting an unpriced position as zero.
 function valuesOf(snap) {
   const securities = new Map();
   let total = snap.totals.cash;
   let known = true;
-  for (const p of snap.positions) {
-    const v = p.marketValue === null ? (p.shares === 0 ? 0 : null) : p.marketValue;
-    securities.set(p.securityId, v);
+  for (const s of snap.securities) {
+    // Flat means worth zero at any price, so an unpriced but closed-out holding
+    // is known, not unknown — otherwise a sold-out security would poison every
+    // later valuation of the whole portfolio.
+    const v = s.marketValue === null ? (s.shares === 0 ? 0 : null) : s.marketValue;
+    securities.set(s.securityId, v);
     if (v === null) known = false;
     else total += v;
   }
@@ -447,7 +464,9 @@ export function createPerformanceDomain({ records }) {
     const securityIds = new Set([...securityFlows.keys()]);
     for (const v of valuesByDate.values()) for (const id of v.securities.keys()) securityIds.add(id);
 
-    const meta = new Map((lastSnap?.positions ?? []).map((p) => [p.securityId, p]));
+    // Same aggregate valuesOf() reads, so two depots holding one security cannot
+    // give the row a name from whichever position happened to fold last.
+    const meta = new Map((lastSnap?.securities ?? []).map((s) => [s.securityId, s]));
     const securities = [];
     for (const securityId of securityIds) {
       const flows = securityFlows.get(securityId) || new Map();
