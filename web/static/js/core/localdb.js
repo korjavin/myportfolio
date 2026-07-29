@@ -19,6 +19,9 @@
 import '../../vendor/dexie.min.js';
 
 import { createLocalRecords } from './records.js';
+// Only for reading the PRE-UPGRADE shared sync record, which decides whether the
+// un-namespaced mirror is pre-signup data or somebody's portfolio. See mayClaim.
+import { createIdbMeta } from './state-sync.js';
 
 const Dexie = globalThis.Dexie;
 
@@ -92,6 +95,28 @@ export async function claim(from, to) {
 }
 
 /**
+ * May `accountId` claim the un-namespaced mirror as its own pre-signup rows?
+ *
+ * Only if nobody else already has. On a device upgrading from the build before
+ * this one, `myportfolio` is NOT necessarily pre-signup data — it may be a
+ * signed-in account's shared mirror, and the shared `myportfolio-sync` record
+ * (state-sync.js) is stamped with whose. Claiming it for whoever unlocks first
+ * after the upgrade would move one user's whole portfolio into another user's
+ * namespace and, with the per-account metadata starting clean, upload it — the
+ * exact cross-vault leak this file exists to close, reintroduced by its own
+ * migration.
+ *
+ * Unstamped means genuinely pre-signup: nothing has ever claimed this device.
+ *
+ * The refusal is silent and conservative. The other account's rows stay where
+ * they are and move into ITS namespace the next time it unlocks here; nobody
+ * loses anything, and the wrong account never sees them.
+ */
+export function mayClaim(stamp, accountId) {
+  return !stamp || !stamp.accountId || stamp.accountId === accountId;
+}
+
+/**
  * The mirror for `accountId`, with any pre-signup rows migrated into it.
  *
  * SWITCHING ACCOUNTS RETAINS, IT DOES NOT WIPE — decided here, because both
@@ -109,11 +134,17 @@ export async function claim(from, to) {
  *   deletion path (deleteAllMirrors below) — not a side effect of logging in as
  *   somebody else.
  */
-export async function openMirror(accountId, from = db) {
+export async function openMirror(accountId, from = db, { legacyMeta = createIdbMeta() } = {}) {
   if (!accountId) return from;
   const mirror = openRecordsDb(mirrorName(accountId));
   await mirror.open();
-  await claim(from, mirror);
+  // state-sync.js's own accessor rather than the database name written out a
+  // second time: this reads the pre-upgrade shared record, and there must be
+  // exactly one place that knows where it is. A device that cannot read it is
+  // treated as stamped by nobody-knows-who — the safe direction is to leave the
+  // rows alone, not to hand them over.
+  const stamp = await legacyMeta.get().catch(() => ({ accountId: 'unreadable' }));
+  if (mayClaim(stamp, accountId)) await claim(from, mirror);
   return mirror;
 }
 

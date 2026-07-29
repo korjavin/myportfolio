@@ -30,7 +30,7 @@ const { fakeDb, fakeServer, fakeMeta, until } = await import('../core/tests/sync
 // The REAL pre-signup migration. localdb.js is imported for it rather than
 // reimplemented here: the one thing this suite must not do is prove that a copy
 // of the migration works while the shipped one does not.
-const { claim } = await import('../core/localdb.js');
+const { claim, mayClaim } = await import('../core/localdb.js');
 
 const { startSync, watchFocus, describeSync, syncState, syncNow } = sync;
 
@@ -175,7 +175,7 @@ describe('signing up must not lose an offline-built portfolio', () => {
  * metadata record per account, exactly the layout localdb.js names on disk. The
  * migration is the real one; only Dexie and IndexedDB are doubles.
  */
-function fakeDevice() {
+function fakeDevice({ legacyStamp = null } = {}) {
     const mirrors = new Map();
     const metas = new Map();
     return {
@@ -184,7 +184,8 @@ function fakeDevice() {
         openMirror: async (accountId, from) => {
             if (!mirrors.has(accountId)) mirrors.set(accountId, fakeDb());
             const mirror = mirrors.get(accountId);
-            await claim(from, mirror);
+            // openMirror's two real decisions, in the order localdb.js makes them.
+            if (mayClaim(legacyStamp, accountId)) await claim(from, mirror);
             return mirror;
         },
         openMeta: (accountId) => {
@@ -265,6 +266,35 @@ describe('two accounts in one browser profile (bd myportfolio-18h.12)', () => {
         });
         assert.equal(refused, null);
         assert.equal(syncState().fatal.code, 'wrong-account');
+    });
+
+    test('upgrading: the shared mirror is A\'s portfolio, and B unlocking first must not take it', async () => {
+        // The device is coming from the build before per-account mirrors: the
+        // un-namespaced `myportfolio` holds account A's real portfolio and the
+        // old shared sync record is stamped with A. This update is exactly what
+        // lets B unlock here at all — so B unlocking FIRST is the likely order,
+        // and treating A's rows as pre-signup drafts would upload one user's
+        // trades into another user's vault. The bug, reintroduced by its own fix.
+        const device = fakeDevice({ legacyStamp: { accountId: ACCOUNT, lastVersion: 4 } });
+        const legacy = createLocalRecords({ db: device.db, now: () => BASE });
+        await legacy.put('transaction', 'tx_a', { type: 'buy', date: '2024-03-15', amount: 123456 });
+
+        const serverB = fakeServer({ serverNow: () => BASE });
+        const { adopted: b } = await unlock(serverB, device, OTHER_ACCOUNT, DEK_B);
+        assert.deepEqual(await b.list('transaction'), [], 'B must start empty');
+        assert.equal(serverB.blob, null, 'and must upload nothing');
+        assert.deepEqual(
+            (await device.db.records.toArray()).map((r) => r.recordId),
+            ['tx_a'],
+            'A\'s rows stay where they are — refused, not moved and not deleted'
+        );
+
+        // And they are still there for A, which is what makes the refusal safe.
+        await reset();
+        const serverA = fakeServer({ serverNow: () => BASE });
+        const { adopted: a } = await unlock(serverA, device, ACCOUNT, DEK);
+        assert.deepEqual((await a.list('transaction')).map((r) => r.recordId), ['tx_a']);
+        assert.deepEqual(await device.db.records.toArray(), []);
     });
 
     test('a vault that will not open still shows the rows the migration just moved', async () => {

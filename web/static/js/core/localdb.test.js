@@ -13,7 +13,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { claim, mirrorName, deleteAllMirrors } from './localdb.js';
+import { claim, mayClaim, mirrorName, deleteAllMirrors } from './localdb.js';
 import { fakeDb } from './tests/sync-fakes.mjs';
 
 function row(recordId, clientTs, extra = {}) {
@@ -68,6 +68,24 @@ describe('claim: the pre-signup rows follow the user into their account', () => 
         // nothing to re-apply and nothing to clobber.
         assert.equal(await claim(pre, account), 0);
         assert.deepEqual((await account.records.toArray()).map((r) => r.recordId), ['tx_1']);
+    });
+});
+
+describe('mayClaim: the un-namespaced mirror is not always pre-signup data', () => {
+    test('nobody has claimed this device, so the rows are the pre-signup portfolio', () => {
+        assert.equal(mayClaim(null, 'acct-a'), true);
+        assert.equal(mayClaim({ lastVersion: 0 }, 'acct-a'), true, 'metadata with no account is not a claim');
+    });
+
+    test('the account that already owns them may take them into its namespace', () => {
+        assert.equal(mayClaim({ accountId: 'acct-a' }, 'acct-a'), true);
+    });
+
+    test('another account may not — that is the leak this whole bead is about', () => {
+        // Upgrading from the build before per-account mirrors: `myportfolio` is
+        // account A's portfolio and the shared sync record says so. If B unlocks
+        // first, claiming would move A's trades into B's vault and upload them.
+        assert.equal(mayClaim({ accountId: 'acct-a' }, 'acct-b'), false);
     });
 });
 
