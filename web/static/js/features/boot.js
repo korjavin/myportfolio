@@ -197,16 +197,24 @@ window.addEventListener('offline', paintNotice);
 const demo = new URLSearchParams(location.search).has('demo');
 
 if (demo) {
+    // The port is swapped BEFORE the import is attempted, and the label goes up
+    // with it. store.js starts on localRecords, so a demo whose fixture failed
+    // to load — offline before demo.js is cached, say — would otherwise refresh
+    // through the pre-signup Dexie mirror and paint the visitor's own portfolio
+    // under a demo URL. An empty port cannot: it makes "no IndexedDB operation
+    // happens in demo mode" unconditional rather than dependent on a network.
+    useRecords({ list: async () => [], put: async () => {}, del: async () => {} });
+    document.getElementById('demo-banner').classList.remove('hidden');
+
     // `today` comes from the shell; demo.js never calls the clock itself, which
     // is what lets its test pin a date and assert byte-identical output.
     import('./demo.js').then((m) => {
         useRecords(m.createDemoRecords(m.demoRecords({ today: new Date().toISOString().slice(0, 10) })));
-        document.getElementById('demo-banner').classList.remove('hidden');
-        return refresh();
     }).catch((err) => {
+        // The empty port above still stands, so the screens come off "Opening
+        // your portfolio…" into an empty demo rather than hanging.
         console.error('boot: demo mode failed to load', err);
-        refresh();
-    });
+    }).then(refresh);
 } else {
     // The wire (ARCHITECTURE.md §3): whether this app is backed up at all comes
     // down to these two calls. startSync picks the port implementation —

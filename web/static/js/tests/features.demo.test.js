@@ -180,6 +180,10 @@ describe('demo mode — the boot branch', () => {
     // The two branches, located by brace matching. Read out of the shipped file
     // rather than described here, so this cannot pass while boot.js says
     // something else.
+    // Whole-line comments dropped: every assertion below is about what boot.js
+    // DOES, and the prose explaining a rule must not be able to satisfy it.
+    const code = (block) => block.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+
     function branches(source) {
         const open = source.indexOf('if (demo) {');
         assert.notEqual(open, -1, 'boot.js has no `if (demo) {` branch');
@@ -201,7 +205,7 @@ describe('demo mode — the boot branch', () => {
         assert.notEqual(elseAt, -1, 'boot.js has no else branch for the ordinary path');
         const [elseBlock, afterElse] = block(elseAt);
         const outside = source.slice(0, open) + source.slice(afterElse);
-        return { demoBlock, elseBlock, outside };
+        return { demoBlock: code(demoBlock), elseBlock: code(elseBlock), outside: code(outside) };
     }
 
     test('the detection expression itself says no for an empty query string', () => {
@@ -249,6 +253,24 @@ describe('demo mode — the boot branch', () => {
             'demo.js must not be statically imported');
         assert.match(demoBlock, /getElementById\('demo-banner'\)[\s\S]*classList\.remove\('hidden'\)/);
         assert.match(demoBlock, /useRecords\(/, 'the demo port must be swapped in through useRecords');
+    });
+
+    test('the port is swapped away from localRecords BEFORE the import runs', () => {
+        // store.js starts on localRecords. If the swap only happened inside the
+        // import\'s success handler, a failed fetch of demo.js would leave
+        // refresh() reading the pre-signup Dexie mirror — IndexedDB opened in
+        // demo mode, and the visitor\'s own portfolio painted under a demo
+        // banner. Found by codex review; pinned here so it cannot come back.
+        const { demoBlock } = branches(boot);
+        const swap = demoBlock.indexOf('useRecords(');
+        const load = demoBlock.indexOf("import('./demo.js')");
+        assert.ok(swap !== -1 && load !== -1);
+        assert.ok(swap < load,
+            'useRecords() must be called before import(\'./demo.js\'), or a failed import leaves '
+            + 'the store on localRecords and demo mode reads the real local database');
+        // …and nothing may refresh() ahead of that swap either.
+        const refreshAt = demoBlock.indexOf('refresh');
+        assert.ok(refreshAt > swap, 'refresh() runs before the port is swapped');
     });
 
     test('the banner ships in index.html, hidden and not dismissable', () => {
