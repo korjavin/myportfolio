@@ -1,0 +1,97 @@
+# Build the image, publish it to GHCR, pin it into the `deploy` branch, and
+# poke Portainer. CI (.github/workflows/ci.yml) stays the gate on correctness;
+# this workflow only ships what already passed it.
+#
+# Portainer must be pointed at the `deploy` branch, never at master: master
+# carries `:latest` as a placeholder, `deploy` carries the exact commit SHA
+# that was built. See docs/DEPLOY.md.
+
+name: Release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # force-pushes the deploy branch
+  packages: write # pushes to ghcr.io
+
+# The deploy branch is force-pushed, so two runs racing would leave it pinned
+# to whichever finished last rather than whichever is newest.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Third-party actions are pinned to commit SHAs: a mutable tag is a
+      # supply-chain hole, and this job holds a token that can write packages
+      # and branches.
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercased because GHCR rejects uppercase in a repository path and
+      # GitHub owner names are not case-normalised.
+      - name: Resolve image reference
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          # SHA only, deliberately no `:latest`. A moving tag means the answer
+          # to "what is running in production" is "whatever it pointed at when
+          # the container last started", which is not an answer.
+          tags: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # GitHub context values are interpolated through `env:` rather than
+      # written into the script body: `${{ }}` inside `run:` is textual
+      # substitution before the shell ever sees it, which is a command-injection
+      # surface for anything an outsider can influence.
+      - name: Pin the image into the deploy branch
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B deploy
+          sed -i -E "s|^(\s*image:\s*)ghcr\.io/\S+|\1${IMAGE}:${SHA}|" compose.yaml
+          grep -q "${IMAGE}:${SHA}" compose.yaml || {
+            echo "compose.yaml image line did not match the rewrite pattern" >&2
+            exit 1
+          }
+          git add compose.yaml
+          git commit -m "deploy: ${IMAGE}:${SHA}"
+          git push --force origin deploy
+
+      # A plain curl rather than a webhook action: it is one line, and it is one
+      # fewer third-party action holding this job's token.
+      - name: Trigger Portainer redeploy
+        env:
+          HOOK: ${{ secrets.PORTAINER_REDEPLOY_HOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOOK}" ]; then
+            echo "PORTAINER_REDEPLOY_HOOK is not set — image published and deploy branch updated, but nothing was redeployed." >&2
+            exit 0
+          fi
+          curl -fsS -X POST "${HOOK}"

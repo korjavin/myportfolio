@@ -1,0 +1,96 @@
+# myportfolio behind Traefik, deployed by Portainer from the `deploy` branch.
+# Full operator guide, including how to derive MYPORTFOLIO_TRUSTED_PROXIES:
+# docs/DEPLOY.md. Read that before your first deploy — one setting here fails
+# silently in both directions.
+#
+# On master the image tag is `latest` as a placeholder. The release workflow
+# rewrites it to the commit SHA on the `deploy` branch, which is the branch
+# Portainer must be pointed at.
+
+services:
+  myportfolio:
+    image: ghcr.io/korjavin/myportfolio:latest
+    container_name: myportfolio
+    restart: unless-stopped
+
+    # NO `ports:` — deliberately, and it is load-bearing, not tidiness.
+    #
+    # Publishing a port would make the container reachable from outside the
+    # Docker network, and every such request arrives at the app from the bridge
+    # gateway's address — an address inside the same private range that
+    # MYPORTFOLIO_TRUSTED_PROXIES has to trust. Any caller could then set
+    # X-Forwarded-For to a fresh value per request and get a fresh rate-limit
+    # bucket. That exact bypass has already been found and fixed in this
+    # codebase (90 ceremonies through a limit of 30) and is regression-tested in
+    # internal/server/rate_limit_test.go. Reaching the app only through Traefik
+    # is what keeps the trusted-proxy range honest.
+
+    environment:
+      # THE SETTING THAT MUST BE RIGHT. It has no safe default, which is why
+      # this is `:?` — the stack refuses to deploy rather than come up wrong,
+      # because both wrong values fail silently:
+      #
+      #   unset  -> the app trusts loopback only, so behind a proxy every user
+      #             shares Traefik's single bucket and one client's retries
+      #             throttle everybody.
+      #   too wide (10.0.0.0/8, 172.16.0.0/12, "any private address")
+      #          -> anything that can reach the app forges a fresh bucket per
+      #             request and the ceremony limiter stops existing.
+      #
+      # Correct value: the subnet of the Traefik network this container is on,
+      # nothing broader. docs/DEPLOY.md has the one-line command to read it.
+      MYPORTFOLIO_TRUSTED_PROXIES: ${MYPORTFOLIO_TRUSTED_PROXIES:?set to the Traefik network subnet (e.g. 172.20.0.0/16) or Traefik's container IP — never a blanket private range. See docs/DEPLOY.md}
+      MYPORTFOLIO_ADDR: ":8080"
+      MYPORTFOLIO_DB: /data/myportfolio.db
+
+    volumes:
+      # Holds the SQLite file AND, as a row inside it, the session-signing
+      # secret. Losing this volume logs everyone out and destroys every
+      # encrypted vault the server holds — the server cannot help recover them,
+      # by design. Back it up (docs/DEPLOY.md).
+      - myportfolio-data:/data
+
+    networks:
+      - traefik
+
+    security_opt:
+      - no-new-privileges:true
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik}"
+
+      # TLS terminates here. WebAuthn needs a secure context, so if this router
+      # ever serves the app over plain HTTP the symptom is "passkeys don't
+      # work", not a browser TLS warning.
+      - "traefik.http.routers.myportfolio.rule=Host(`${MYPORTFOLIO_HOST:?set to the public hostname, e.g. portfolio.example.com}`)"
+      - "traefik.http.routers.myportfolio.entrypoints=websecure"
+      - "traefik.http.routers.myportfolio.tls=true"
+      - "traefik.http.routers.myportfolio.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+
+      # Plain HTTP redirects instead of serving anything, so a user who types
+      # the bare hostname lands on a secure context rather than a broken one.
+      - "traefik.http.routers.myportfolio-http.rule=Host(`${MYPORTFOLIO_HOST}`)"
+      - "traefik.http.routers.myportfolio-http.entrypoints=web"
+      - "traefik.http.routers.myportfolio-http.middlewares=myportfolio-https"
+      - "traefik.http.middlewares.myportfolio-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.myportfolio-https.redirectscheme.permanent=true"
+
+      - "traefik.http.services.myportfolio.loadbalancer.server.port=8080"
+      # /readyz probes the database; /healthz is unconditional. Neither is
+      # authenticated, so this needs no credentials.
+      - "traefik.http.services.myportfolio.loadbalancer.healthcheck.path=/readyz"
+      - "traefik.http.services.myportfolio.loadbalancer.healthcheck.interval=30s"
+
+      # No HSTS middleware here on purpose: the app already sets
+      # Strict-Transport-Security on every response
+      # (internal/server/server.go, securityHeaders). Adding a second source
+      # would just be two places to change one value.
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}
+
+volumes:
+  myportfolio-data:
