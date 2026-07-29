@@ -83,14 +83,31 @@ the existing rows into the vault; nothing in `web/domain/` changes or even notic
 Learned the hard way in medtracker (bd med-d5t.6) and it matters more here, because the thing being
 silently overwritten is a trade. Two guards, both client-side:
 
-1. **Server-referenced time.** Every sync response carries a `Date` header. Store the offset in
-   `sync_meta.clockSkewMs` and subtract it on every write, so all devices stamp on one scale.
+1. **Server-referenced time.** Every sync response carries a `Date` header. Store the offset as
+   `clockSkewMs` and subtract it on every write, so all devices stamp on one scale.
+   *As built*, that lives in a small device-local IndexedDB owned by `state-sync.js`, not in a
+   `sync_meta` table inside the Dexie mirror — the mirror's schema belongs to `localdb.js`, and the
+   sync layer adding a table to it would couple the two in the direction §3 exists to prevent. Same
+   guarantee, different home.
 2. **Per-record monotonic guard.** A write to a record this device can already see is stamped
    `max(correctedNow, existing.clientTs + 1)` — editing what you can see always beats what you are
    overwriting, whatever either clock says.
 
 Neither orders two *blind concurrent* writes on skewed devices. Accepted; surfaced as a "this
 device's clock is off by N minutes" warning past a 2-minute threshold.
+
+**Ties must break deterministically.** When two records collide on the same `clientTs`, both devices
+must pick the *same* winner — the choice is arbitrary, its determinism is not. Otherwise each device
+keeps its own side, a merge that changes nothing locally never schedules a push, and the two sit on
+permanently divergent data with nothing to detect it. `state-sync.js` compares canonical forms, which
+costs nothing and is stable across devices.
+
+**One vault per browser profile, for now.** `localdb.js` opens one un-scoped Dexie database per
+origin, so a second account would land on the first account's records. `state-sync.js` stamps its
+metadata with the owning `accountId` and refuses a mismatch *before touching the wire*, claiming the
+mirror on open rather than on first successful sync — a vault used entirely offline never reaches the
+network, so a guard that waits for a response is absent exactly when it is needed. That turns a
+silent cross-vault upload into a loud stop; namespacing the mirror per account is the real fix.
 
 ## 4. Record types
 
@@ -110,7 +127,7 @@ equality is meaningful.
 | `transaction` | `{ type, accountId, securityId?, date, shares?, amount, fees?, taxes?, currency, fx?, note?, counterAccountId? }` |
 | `price` | `{ securityId, year, closes: {"MM-DD": n} }` — chunked per security-year, see "Price series storage" below. `MM-DD` keys are zero-padded; unpadded keys sort wrong and lose the latest-close race |
 | `fx` | `{ pair: "EURUSD", date, rate }` |
-| `settings` | singleton `recordId: "settings"` — `{ reportingCurrency, quoteProviders, ... }` |
+| `settings` | singleton `recordId: "settings"` — `{ reportingCurrency, quoteProviders, costBasisMethod, ... }` |
 
 `transaction.type` ∈ `buy`, `sell`, `dividend`, `deposit`, `removal`, `interest`, `fee`, `tax`,
 `transfer_in`, `transfer_out`. This set is what makes PP import possible and TTWROR/IRR computable;
@@ -120,8 +137,21 @@ do not invent a "generic" transaction with a free-text kind.
 against them):
 
 - **`accountId` is the account `amount` moves on, for every transaction type**, with no per-type
-  branching. Consequence: v1 does not model the securities account a holding sits in — a position is
-  keyed by `securityId` alone. Fine for a single-portfolio v1, a real gap for multi-portfolio.
+  branching. It is the *cash* leg, and it stays that way.
+- **A position is keyed by `(accountId, securityId)`** — the securities account is modelled, so the
+  same ETF held at two brokers is two positions with a portfolio-wide aggregate on top. This is what
+  Portfolio Performance does, and matching it is what lets a PP import round-trip.
+  Because `accountId` is the cash leg, a `buy`/`sell` names **both** accounts: `accountId` (cash out /
+  in) and `portfolioId` (where the shares land / leave). Import and the UI must write both.
+  <!-- Was security-keyed through B1/B2; g7e.11 restructures the fold. Anything reading a position
+       must treat its identity as opaque rather than reconstructing it from securityId. -->
+- **Cost basis method is selectable per portfolio**, `settings.costBasisMethod ∈ "fifo" |
+  "moving_average"`, defaulting to `fifo`. Lots are tracked **always** — each buy opens a lot, each
+  sell consumes them oldest-first — and the method chooses only how realized gain is *reported*.
+  Tracking lots unconditionally is what makes the two views agree; deriving lots on demand from a
+  moving-average fold is not possible, so the storage decision is not reversible later.
+  FIFO is the default because it is what most EU tax authorities require for declaring capital gains,
+  and a number that is merely indicative is the wrong default in a filing context.
 - **`amount` is the cash that actually moves**, matching PP so import round-trips: on a buy it is
   gross + fees + taxes (what left the account); on a sell, gross − fees − taxes (what arrived).
 - **Fees and taxes diverge, and that divergence is the reason they are separate fields.** Fees are a
@@ -409,12 +439,46 @@ Two guards were widened during the port, and **frontend executors should expect 
   an `@import url(https://fonts.googleapis.com/…)` inside a stylesheet — and a guard that only bans
   the CDN in one file is half a guard.
 
+### Assets are served from the root, not `/static/`
+
+`web/embed.go` does `//go:embed static`, which **roots the served filesystem at `web/static`**. So an
+asset stored at `web/static/css/styles.css` is served from **`/css/styles.css`** — writing
+`/static/css/styles.css` gives a 404.
+
+Two files have already shipped with the wrong prefix by two different authors, so this is a
+documentation defect rather than carelessness — and, worse, **neither failure was visible at
+runtime**: `fonts.css` 404'd every glyph while `font-display: swap` quietly kept the fallback, and
+`design.html` rendered unstyled for as long as it existed. `architecture.asset-paths.test.js` now
+resolves every `href`/`src`/`url()` in every shipped `.html` and `.css` against the embedded tree, so
+a missing asset fails the build instead of degrading silently.
+
 Legacy colour names (`--bg-color`, `--text-color`, `--hint-color`, `--secondary-bg-color`) are kept
 as *names* but now resolve onto the Wandergeek palette. That let the ported utility blocks carry over
 byte-identical instead of being rewritten. The sibling's Telegram theme-mirror tokens
 (`--tg-theme-*`) are gone — there is no Telegram host here.
 
-## 10. Tracks
+## 10. Deployment — Docker behind Traefik
+
+Target topology: the single static binary in a container, published through **Traefik**, managed by
+**Portainer** with a git-ops compose repo and a GHCR image build. TLS terminates at Traefik.
+
+**The one setting that must be right, because getting it wrong is silent**: the ceremony rate
+limiter keys on the client IP, and behind a proxy every request arrives from the proxy. So
+`MYPORTFOLIO_TRUSTED_PROXIES` **must** name Traefik's address on the Docker network — the default is
+loopback-only, which is correct for a directly-exposed binary and wrong here (every user then shares
+one bucket, so one client's retries throttle everybody).
+
+It must **not** be widened to "any private address". With a published container port, every request
+on the planet arrives from the bridge gateway's private address, so trusting that range lets any
+caller forge a fresh bucket per request and the limiter stops existing. That failure has already
+been found and fixed once in this codebase; it is regression-tested, and the test is why the
+configured-peer design exists at all.
+
+Also required at the edge: HSTS, and `X-Forwarded-Proto` set by Traefik so the app knows it is
+behind TLS. WebAuthn requires a secure context — no ceremony works over plain HTTP on a non-loopback
+host, so a misconfigured proxy presents as "passkeys don't work", not as a TLS warning.
+
+## 11. Tracks
 
 Two tracks, disjoint file ownership, meeting only at §3.
 
