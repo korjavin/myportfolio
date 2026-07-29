@@ -49,7 +49,10 @@ func newFakeRelay(t *testing.T, key []byte, pairingID string) *fakeRelay {
 	t.Helper()
 	r := &fakeRelay{}
 	r.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/api/mcp/relay/shim" {
+		// Served at the real path, and the pairing codes below carry the real
+		// relay_url shape (origin + relayEndpoint), so a shim that builds the
+		// wrong URL 404s here instead of passing against a convenient fake.
+		if req.URL.Path != relayEndpoint+"/shim" {
 			http.NotFound(w, req)
 			return
 		}
@@ -137,6 +140,10 @@ func echo(t *testing.T, req *jsonrpc.Request) *jsonrpc.Response {
 	return &jsonrpc.Response{ID: req.ID, Result: body}
 }
 
+// relayEndpoint is the path a pairing code's relay_url ends in — see the
+// pinned vector, "wss://portfolio.example/api/mcp/relay".
+const relayEndpoint = "/api/mcp/relay"
+
 func newTestClient(t *testing.T) (*Client, *fakeRelay, *PairingCode) {
 	t.Helper()
 	pc := &PairingCode{
@@ -153,7 +160,11 @@ func newTestClient(t *testing.T) (*Client, *fakeRelay, *PairingCode) {
 	return c, relay, pc
 }
 
-func wsURL(httpURL string) string { return strings.Replace(httpURL, "http://", "ws://", 1) }
+// wsURL turns an httptest origin into a relay_url of the shape Settings mints:
+// the relay ENDPOINT, not the bare origin.
+func wsURL(httpURL string) string {
+	return strings.Replace(httpURL, "http://", "ws://", 1) + relayEndpoint
+}
 
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 
@@ -193,6 +204,72 @@ func TestClientCallRoundTrip(t *testing.T) {
 		if strings.Contains(relay.query(), form) {
 			t.Fatalf("dial URL leaks the pairing key: %q", relay.query())
 		}
+	}
+}
+
+// TestShimLegURLMatchesThePinnedRelayURL binds the dialed URL to the pairing
+// code the BROWSER mints, taken from the vector both suites read — not to a
+// convenient origin invented by this test.
+//
+// This is the bug the pin exists for: relay_url is the relay endpoint here,
+// while medicationtrackerbot's is a bare origin. Porting its dial line
+// verbatim appends the whole path a second time, so every real pairing 404s
+// while every self-minted test code passes.
+func TestShimLegURLMatchesThePinnedRelayURL(t *testing.T) {
+	v, _ := loadVectors(t)
+	pc, err := ParsePairingCode(v.PairingCode)
+	if err != nil {
+		t.Fatalf("parse pinned pairing code: %v", err)
+	}
+	if pc.RelayURL != v.RelayURL {
+		t.Fatalf("pinned code's relay_url = %q, want %q", pc.RelayURL, v.RelayURL)
+	}
+	want := v.RelayURL + "/shim?pairing=" + pc.PairingID
+	if got := shimLegURL(pc); got != want {
+		t.Fatalf("shim leg URL = %q, want %q", got, want)
+	}
+	if strings.Count(shimLegURL(pc), "/api/mcp/relay") != 1 {
+		t.Fatalf("shim leg URL repeats the relay path: %q", shimLegURL(pc))
+	}
+}
+
+// TestShimLegURLEscapesThePairingID: the browser chose the id, not the shim.
+// An id carrying "&" or "/" must not be able to rewrite the URL.
+func TestShimLegURLEscapesThePairingID(t *testing.T) {
+	got := shimLegURL(&PairingCode{RelayURL: "wss://r.example/api/mcp/relay", PairingID: "a/b&role=device"})
+	want := "wss://r.example/api/mcp/relay/shim?pairing=a%2Fb%26role%3Ddevice"
+	if got != want {
+		t.Fatalf("shim leg URL = %q, want %q", got, want)
+	}
+}
+
+// TestResponderErrorsAreNotProtocolErrors: an "unknown operation_id" from the
+// browser is an ordinary tool failure the model must READ and correct, not a
+// transport fault. The SDK re-emits a *jsonrpc.Error as a protocol error on
+// the outer stdio connection, where the model never sees the text — so Call
+// must flatten it first. §11's mcp_execute refusal travels this same path,
+// and it only stops an agent retrying forever if the agent can read it.
+func TestResponderErrorsAreNotProtocolErrors(t *testing.T) {
+	c, relay, _ := newTestClient(t)
+	relay.set(func(r *fakeRelay) {
+		r.respond = func(req *jsonrpc.Request) []*jsonrpc.Response {
+			return []*jsonrpc.Response{{
+				ID:    req.ID,
+				Error: &jsonrpc.Error{Code: -32602, Message: "unknown operation_id \"portfolio.nope\""},
+			}}
+		}
+	})
+
+	_, err := c.Call(t.Context(), "mcp_call", CallInput{OperationID: "portfolio.nope"})
+	if err == nil {
+		t.Fatal("expected the responder's error")
+	}
+	var wireErr *jsonrpc.Error
+	if errors.As(err, &wireErr) {
+		t.Fatalf("responder error surfaced as *jsonrpc.Error, which the SDK turns into a protocol error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unknown operation_id") {
+		t.Fatalf("responder's message did not survive: %v", err)
 	}
 }
 

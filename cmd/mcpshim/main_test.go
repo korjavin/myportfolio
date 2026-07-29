@@ -33,17 +33,37 @@ import (
 // fakeRelay — a real websocket server standing in for the relay and the
 // paired browser tab at once.
 
-const testPairingID = "cmd-test-pairing"
+const (
+	testPairingID = "cmd-test-pairing"
+	// relayEndpoint is the path a pairing code's relay_url ends in — the
+	// pinned vector has "wss://portfolio.example/api/mcp/relay". The fake
+	// serves the leg one segment below it, exactly as the real relay will, so
+	// a shim that mis-derives the URL 404s here.
+	relayEndpoint = "/api/mcp/relay"
+)
 
 var testKey = bytes.Repeat([]byte{0x11}, mcpshim.PairingKeyBytes)
 
+// relayResponder answers one decoded request; nil means answer nothing.
+type relayResponder func(*jsonrpc.Request) *jsonrpc.Response
+
 // startFakeRelay serves the shim leg and answers every request with
-// {"ok": <method>} so the round trip is observable from the far side of the
-// binary.
-func startFakeRelay(t *testing.T) *httptest.Server {
+// {"answered": <method>} so the round trip is observable from the far side of
+// the binary.
+func startFakeRelay(t *testing.T, respond ...relayResponder) *httptest.Server {
 	t.Helper()
+	answer := relayResponder(func(req *jsonrpc.Request) *jsonrpc.Response {
+		body, err := json.Marshal(map[string]string{"answered": req.Method})
+		if err != nil {
+			return nil
+		}
+		return &jsonrpc.Response{ID: req.ID, Result: body}
+	})
+	if len(respond) > 0 {
+		answer = respond[0]
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/api/mcp/relay/shim" || req.URL.Query().Get("pairing") != testPairingID {
+		if req.URL.Path != relayEndpoint+"/shim" || req.URL.Query().Get("pairing") != testPairingID {
 			http.NotFound(w, req)
 			return
 		}
@@ -70,11 +90,11 @@ func startFakeRelay(t *testing.T) *httptest.Server {
 			if !ok {
 				continue
 			}
-			body, err := json.Marshal(map[string]string{"answered": rpcReq.Method})
-			if err != nil {
-				return
+			resp := answer(rpcReq)
+			if resp == nil {
+				continue
 			}
-			out, err := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: rpcReq.ID, Result: body})
+			out, err := jsonrpc.EncodeMessage(resp)
 			if err != nil {
 				return
 			}
@@ -104,7 +124,9 @@ func buildShim(t *testing.T) string {
 func pairingCode(t *testing.T, relayURL string) string {
 	t.Helper()
 	code, err := mcpshim.FormatPairingCode(&mcpshim.PairingCode{
-		RelayURL:  strings.Replace(relayURL, "http://", "ws://", 1),
+		// relay_url is the relay ENDPOINT, the shape Settings mints — not the
+		// bare origin.
+		RelayURL:  strings.Replace(relayURL, "http://", "ws://", 1) + relayEndpoint,
 		PairingID: testPairingID,
 		Key:       testKey,
 	})
@@ -304,6 +326,48 @@ func TestHelpRoundTripReachesTheFarEnd(t *testing.T) {
 	}
 	if resp["error"] != nil {
 		t.Fatalf("mcp_help returned an error: %v", resp["error"])
+	}
+}
+
+// TestResponderErrorReachesTheModelAsAToolError: when the browser answers with
+// a JSON-RPC error — an unknown operation_id, and notably §11's explicit
+// refusal of an mcp_execute-style call — the model has to READ it and correct
+// itself. The SDK re-emits a *jsonrpc.Error as a top-level protocol error,
+// which an MCP client shows as "the connector is broken" and which the model
+// never sees, so the result must instead carry isError with the text intact.
+func TestResponderErrorReachesTheModelAsAToolError(t *testing.T) {
+	relay := startFakeRelay(t, func(req *jsonrpc.Request) *jsonrpc.Response {
+		return &jsonrpc.Response{
+			ID:    req.ID,
+			Error: &jsonrpc.Error{Code: -32601, Message: `there is no mcp_execute: a server-side script runner would have nothing to read`},
+		}
+	})
+	s := startShim(t, buildShim(t), "MYPORTFOLIO_MCP_CODE="+pairingCode(t, relay.URL))
+	s.initialize(t)
+	s.send(t, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mcp_call","arguments":{"operation_id":"whatever"}}}`)
+	resp := s.readResponse(t, 2)
+
+	if resp["error"] != nil {
+		t.Fatalf("responder error surfaced as a PROTOCOL error, which the model never sees: %v", resp["error"])
+	}
+	raw, err := json.Marshal(resp["result"])
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	var result struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("tool result is not marked isError: %s", raw)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "no mcp_execute") {
+		t.Fatalf("the responder's explanation did not reach the model: %s", raw)
 	}
 }
 

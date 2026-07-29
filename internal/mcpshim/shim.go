@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,11 +90,32 @@ type ShimCore struct {
 	closeErr error
 }
 
+// shimLegURL is where the shim leg lives, derived from the pairing code's
+// relay_url.
+//
+// relay_url is the relay ENDPOINT, not the origin — the pinned vector
+// (testdata/mcp_frame_vectors.json) has "wss://portfolio.example/api/mcp/relay",
+// and Settings mints codes in that shape. So only "/shim" is appended here.
+// This is a divergence from medicationtrackerbot, whose relay_url is a bare
+// origin and whose shim therefore appends the whole "/api/mcp/relay/shim"
+// path; porting that line verbatim dials
+// ".../api/mcp/relay/api/mcp/relay/shim", which 404s against every real
+// pairing while passing any test that mints its own code from a bare
+// listener address. TestShimLegURLMatchesThePinnedRelayURL pins it against
+// the vector instead, so the two halves cannot drift.
+//
+// The pairing id is query-escaped because the shim did not choose it — the
+// browser did — and an id containing "&", "/" or "#" would otherwise rewrite
+// the URL. The browser responder escapes it on its leg too.
+func shimLegURL(pc *PairingCode) string {
+	return strings.TrimSuffix(pc.RelayURL, "/") + "/shim?pairing=" + url.QueryEscape(pc.PairingID)
+}
+
 // DialPairing connects to the relay's shim leg for pc. opts may be nil; it is
 // the seam a test uses to point every dial at an httptest.Server's real
 // listener while the pairing still carries its production relay URL.
 func DialPairing(ctx context.Context, pc *PairingCode, opts *websocket.DialOptions) (*ShimCore, error) {
-	conn, _, err := websocket.Dial(ctx, pc.RelayURL+"/api/mcp/relay/shim?pairing="+pc.PairingID, opts)
+	conn, _, err := websocket.Dial(ctx, shimLegURL(pc), opts)
 	if err != nil {
 		return nil, fmt.Errorf("mcpshim: dial relay: %w", err)
 	}
@@ -148,7 +171,27 @@ func (s *ShimCore) Call(ctx context.Context, method string, params any) (json.Ra
 	select {
 	case resp := <-respCh:
 		if resp.Error != nil {
-			return nil, resp.Error
+			// Deliberately NOT returned as the *jsonrpc.Error it arrived as.
+			// The SDK special-cases that type and re-emits it as a protocol
+			// error on the outer stdio connection, where an MCP client reads
+			// it as "the connector is broken" and the model never sees the
+			// text. These are ordinary operation failures from the responder
+			// — an unknown operation_id, bad params — and the model has to
+			// read them to correct itself. Flattening to a plain error makes
+			// the SDK wrap it in a tool result with isError, which is what
+			// the MCP spec reserves for exactly this.
+			//
+			// This is also what makes §11's mcp_execute rule work: the
+			// responder answers that call with an explicit error saying a
+			// server-side script runner would have nothing to read. That
+			// sentence exists to stop an agent retrying forever, and it only
+			// does its job if it reaches the agent.
+			msg := resp.Error.Error()
+			var wireErr *jsonrpc.Error
+			if errors.As(resp.Error, &wireErr) {
+				msg = fmt.Sprintf("%s (responder error %d)", wireErr.Message, wireErr.Code)
+			}
+			return nil, errors.New(msg)
 		}
 		return resp.Result, nil
 	case <-timer.C:
