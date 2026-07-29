@@ -1673,6 +1673,39 @@ textarea.wg-input {
     font-size: var(--font-size-sm);
 }
 
+/* Demo-mode banner (bd myportfolio-cnd.1). Same shape as the update prompt
+   above, but sticky rather than fixed: it is permanent, so it must take up
+   layout instead of covering the top of whatever screen is rendered. The amber
+   --wg-tag-high-* triplet is the existing "look at this" tag colour — no new
+   hue enters the palette. */
+.wg-demo-banner {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-toast);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-lg);
+    padding-top: calc(var(--space-sm) + env(safe-area-inset-top));
+    background: var(--wg-tag-high-bg);
+    border-bottom: 1px solid var(--wg-tag-high-border);
+    color: var(--wg-tag-high-fg);
+}
+
+.wg-demo-banner__text {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+}
+
+/* The exit link wears the button primitive; scoped here rather than on the
+   shared class, which every other caller uses on a real <button>. */
+.wg-demo-banner .wg-toolbar-btn {
+    text-decoration: none;
+}
+
 /* =============================================
    SCREENS — the five nav destinations
    (bd myportfolio-g7e.7).
