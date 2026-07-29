@@ -313,6 +313,45 @@ test('an exhausted credit budget reported inside a 200 body is still a stop', as
   assert.ok(report.errors.every((e) => e.code === 'rate_limited'));
 });
 
+test('one bad ticker does not cost its batch-mates their prices', async () => {
+  // Twelve Data reports a delisted or mistyped symbol per symbol, alongside
+  // seven perfectly good series. Discarding the batch over it would be the
+  // expensive kind of wrong: the user loses prices they are entitled to and
+  // spends a request to do it.
+  const f = setup({ securities: { sec_aapl: AAPL, sec_msft: MSFT } });
+  const http = transport(() => json({
+    AAPL: TWELVEDATA_SINGLE,
+    MSFT: { code: 404, message: '**symbol** not found: MSFT', status: 'error' },
+  }));
+  const report = await createQuotesDomain({ records: f.records, http }).refresh({ days: 2 });
+
+  assert.deepEqual(report.updated.map((u) => u.securityId), ['sec_aapl']);
+  assert.equal(f.all('price').length, 1);
+  assert.deepEqual(f.all('price')[0].closes, { '07-27': 33691000000, '07-28': 34007998700 });
+  assert.equal(report.errors.length, 1);
+  assert.equal(report.errors[0].securityId, 'sec_msft');
+  assert.match(report.errors[0].message, /symbol\*\* not found/);
+});
+
+test('one provider\'s rate limit does not hold up another provider', async () => {
+  // Twelve Data's interval is a minute. Sharing one timestamp with CoinGecko
+  // would make a crypto request that just returned stall the first stock batch
+  // for the whole of it — a mixed portfolio would take a minute to refresh.
+  const f = setup({
+    securities: { sec_btc: BTC, sec_aapl: AAPL },
+    quoteProviders: { coingecko: {}, twelvedata: { apiKey: 'k' } }, // real intervals
+  });
+  const http = transport((url) => (url.includes(QUOTE_HOSTS.twelvedata)
+    ? json(TWELVEDATA_SINGLE)
+    : json(COINGECKO_MARKET_CHART)));
+
+  const started = Date.now();
+  const report = await createQuotesDomain({ records: f.records, http }).refresh({ days: 2 });
+
+  assert.equal(report.updated.length, 2);
+  assert.ok(Date.now() - started < 2000, `refresh waited ${Date.now() - started}ms on an unrelated provider`);
+});
+
 test('the API key never appears in an error, and only the two known hosts are contacted', async () => {
   const f = setup({
     securities: { sec_aapl: AAPL, sec_btc: BTC },
