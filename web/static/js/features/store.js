@@ -23,6 +23,12 @@ import { buildPriceChunk } from './forms.js';
 // the shell has painted. So the swap happens underneath this reference rather
 // than by reassigning it: `records` never changes identity, `impl` does.
 //
+// The starting implementation is localRecords over the PRE-SIGNUP mirror, which
+// is the right port for a device with no account and the wrong one for a device
+// with an account whose mirror is namespaced (localdb.js). That is why boot.js
+// leaves the first refresh() to startSync: the swap lands before the first read,
+// not after it.
+//
 // Reassigning the export instead would leave both domain engines holding
 // localRecords forever, which is a bug that looks exactly like working software
 // — every screen renders, every write lands in the mirror, and nothing is ever

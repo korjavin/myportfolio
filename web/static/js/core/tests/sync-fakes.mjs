@@ -13,6 +13,7 @@ export function fakeDb() {
     async get(recordId) { return rows.get(recordId); },
     async put(record) { rows.set(record.recordId, { ...record }); },
     async bulkPut(records) { for (const r of records) rows.set(r.recordId, { ...r }); },
+    async clear() { rows.clear(); },
     async toArray() { return [...rows.values()].map((r) => ({ ...r })); },
     where(field) {
       return {

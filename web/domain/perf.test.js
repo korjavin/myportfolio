@@ -195,6 +195,70 @@ test('TTWROR: an unpriced holding refuses to report, rather than valuing it at z
   assert.ok(res.issues.some((i) => i.code === 'no_price'));
 });
 
+test('TTWROR: per security, two depots holding it are one row, summed', async () => {
+  // §4 keys a position by (accountId, securityId), so the same security at two
+  // brokers is two positions. The per-security row is the portfolio-wide view of
+  // it, so its value must be both depots — while the flows already are.
+  const f = fixture();
+  basics(f);
+  f.put('account', { name: 'Depot B', kind: 'securities', currency: 'EUR' }, 'pf_2');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: eur(2000) }));
+  for (const depot of ['pf_1', 'pf_2']) {
+    f.put('transaction', tx({
+      type: 'buy', portfolioId: depot, securityId: 'sec_1', date: '2024-01-01',
+      shares: sh(10), amount: eur(1000),
+    }));
+  }
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '01-01': px(100), '12-31': px(120) } });
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-12-31' });
+  const s = bySecurity(res, 'sec_1');
+
+  // €100 -> €120 on all 20 shares. Keeping one depot's value against both
+  // depots' flows reports -40%, which is the failure this test exists for.
+  assert.equal(res.securities.length, 1, 'one row per security, not per position');
+  assert.equal(s.closeValue, eur(2400));
+  assert.equal(s.flowIn, eur(2000));
+  assert.equal(s.ttwror.ok, true);
+  assert.ok(Math.abs(s.ttwror.value - 0.2) < 1e-12, `${s.ttwror.value} != 0.2`);
+  assert.ok(Math.abs(s.irr.value - 0.2) < 1e-9, `${s.irr.value} != 0.2`);
+  // The portfolio was already right; it must stay right.
+  assert.ok(Math.abs(res.portfolio.ttwror.value - 0.2) < 1e-12);
+});
+
+test('TTWROR: one unvalued depot makes the whole security unvalued, not partial', async () => {
+  // A total summed from only the depots that happen to have a value understates
+  // the holding, and an understated value is a confidently wrong return.
+  const f = fixture();
+  basics(f);
+  f.put('account', { name: 'Depot B', kind: 'securities', currency: 'EUR' }, 'pf_2');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: eur(2000) }));
+  // Depot A still holds; depot B is flat, so its position is worth 0 whatever
+  // the price is. The security as a whole is not.
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-01', shares: sh(10), amount: eur(1000),
+  }));
+  f.put('transaction', tx({
+    type: 'buy', portfolioId: 'pf_2', securityId: 'sec_1', date: '2024-01-01',
+    shares: sh(10), amount: eur(1000),
+  }));
+  f.put('transaction', tx({
+    type: 'sell', portfolioId: 'pf_2', securityId: 'sec_1', date: '2024-06-01',
+    shares: sh(10), amount: eur(1200),
+  }));
+  // No price record at all: the shares left in depot A are unvaluable.
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-12-31' });
+  const s = bySecurity(res, 'sec_1');
+
+  assert.equal(s.closeValue, null, 'unknown is sticky across depots');
+  assert.equal(s.ttwror.ok, false);
+  assert.equal(s.ttwror.reason, 'incomplete_valuation');
+  assert.equal(s.irr.ok, false);
+  assert.equal(s.irr.reason, 'incomplete_valuation');
+  assert.ok(res.issues.some((i) => i.code === 'no_price'));
+});
+
 test('TTWROR: a transfer in flight is neutral, not a loss', async () => {
   // §4 books each transfer leg against its own account only, so between the two
   // legs the tracked total genuinely falls by the transferred amount. Counting

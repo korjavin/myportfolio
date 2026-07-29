@@ -27,6 +27,10 @@ const { createLocalRecords } = await import('../core/records.js');
 const { openState, syncError } = await import('../core/state-sync.js');
 const { deriveKData } = await import('../core/crypto.js');
 const { fakeDb, fakeServer, fakeMeta, until } = await import('../core/tests/sync-fakes.mjs');
+// The REAL pre-signup migration. localdb.js is imported for it rather than
+// reimplemented here: the one thing this suite must not do is prove that a copy
+// of the migration works while the shipped one does not.
+const { claim, mayClaim } = await import('../core/localdb.js');
 
 const { startSync, watchFocus, describeSync, syncState, syncNow } = sync;
 
@@ -41,7 +45,12 @@ async function reset() {
     await startSync({ warm: async () => null, adopt: () => {} });
 }
 
-/** The shell's half of the wiring, in the shape boot.js uses it. */
+/**
+ * The shell's half of the wiring, in the shape boot.js uses it.
+ *
+ * `meta: null` opts out of the injected metadata so startSync's own openMeta
+ * decides — which is how the real shell runs, one metadata record per account.
+ */
 async function boot(server, { db = fakeDb(), meta = fakeMeta(), warm, ...rest } = {}) {
     let adopted = null;
     let refreshes = 0;
@@ -50,7 +59,7 @@ async function boot(server, { db = fakeDb(), meta = fakeMeta(), warm, ...rest } 
         adopt: (impl) => { adopted = impl; },
         onRecords: async () => { refreshes += 1; },
         warm: warm ?? (async () => ({ accountId: ACCOUNT, dek: DEK })),
-        meta,
+        ...(meta ? { meta } : {}),
         fetch: server.fetch,
         debounceMs: 0,
         now: () => BASE,
@@ -158,6 +167,183 @@ describe('signing up must not lose an offline-built portfolio', () => {
         const { adopted } = await boot(server, { db: second, meta: fakeMeta() });
 
         assert.deepEqual((await adopted.list('account')).map((r) => r.name), ['Broker']);
+    });
+});
+
+/**
+ * One browser profile, in memory: the pre-signup mirror plus a mirror and a
+ * metadata record per account, exactly the layout localdb.js names on disk. The
+ * migration is the real one; only Dexie and IndexedDB are doubles.
+ */
+function fakeDevice({ legacyStamp = null } = {}) {
+    const mirrors = new Map();
+    const metas = new Map();
+    return {
+        db: fakeDb(),
+        mirror: (id) => mirrors.get(id),
+        openMirror: async (accountId, from) => {
+            if (!mirrors.has(accountId)) mirrors.set(accountId, fakeDb());
+            const mirror = mirrors.get(accountId);
+            // openMirror's two real decisions, in the order localdb.js makes them.
+            if (mayClaim(legacyStamp, accountId)) await claim(from, mirror);
+            return mirror;
+        },
+        openMeta: (accountId) => {
+            if (!metas.has(accountId)) metas.set(accountId, fakeMeta());
+            return metas.get(accountId);
+        },
+    };
+}
+
+describe('two accounts in one browser profile (bd myportfolio-18h.12)', () => {
+    const DEK_B = new Uint8Array(32).fill(7);
+
+    /** Unlock `accountId` on `device`, the way a cold unlock replaces the LDK cache. */
+    function unlock(server, device, accountId, dek) {
+        return boot(server, {
+            db: device.db,
+            meta: null,
+            openMirror: device.openMirror,
+            openMeta: device.openMeta,
+            warm: async () => ({ accountId, dek }),
+        });
+    }
+
+    test('records written under A are invisible under B, and are still A\'s when A comes back', async () => {
+        const device = fakeDevice();
+        const serverA = fakeServer({ serverNow: () => BASE });
+        const { adopted: a } = await unlock(serverA, device, ACCOUNT, DEK);
+        await a.put('account', 'acct_a', { name: 'A broker', kind: 'cash', currency: 'EUR' });
+        await until(() => serverA.blob !== null);
+
+        // Same browser, second passkey. This is the case that used to land
+        // straight on the first account's records.
+        await reset();
+        const serverB = fakeServer({ serverNow: () => BASE });
+        const { vault: vaultB, adopted: b } = await unlock(serverB, device, OTHER_ACCOUNT, DEK_B);
+
+        assert.ok(vaultB, 'the second account must OPEN, not be refused — that was the mitigation, not the fix');
+        assert.deepEqual(await b.list('account'), [], 'B must not see A\'s portfolio');
+        assert.equal(serverB.blob, null, 'and must never upload it into B\'s vault');
+
+        await b.put('account', 'acct_b', { name: 'B broker', kind: 'cash', currency: 'EUR' });
+        await until(() => serverB.blob !== null);
+
+        // Switching back retains rather than re-downloads (the documented
+        // decision in localdb.js) — and A still has exactly A's rows.
+        await reset();
+        const { adopted: again } = await unlock(serverA, device, ACCOUNT, DEK);
+        assert.deepEqual((await again.list('account')).map((r) => r.recordId), ['acct_a']);
+        assert.deepEqual(
+            (await device.mirror(OTHER_ACCOUNT).records.toArray()).map((r) => r.recordId),
+            ['acct_b'],
+            'and B\'s mirror was never touched by A'
+        );
+    });
+
+    test('the wrong-account refusal is unreachable in normal use, and still fires if reached', async () => {
+        const device = fakeDevice();
+        const server = fakeServer({ serverNow: () => BASE });
+        await unlock(server, device, ACCOUNT, DEK);
+
+        // A shares this device with B. Neither is refused, because neither is
+        // reading the other's versions.
+        await reset();
+        const { vault } = await unlock(server, device, OTHER_ACCOUNT, DEK_B);
+        assert.equal(vault !== null, true);
+        assert.equal(syncState().fatal, null, 'per-account metadata means the guard never trips here');
+
+        // The backstop is still armed: hand it a mirror stamped with another
+        // vault and it refuses before touching the wire. (The copy and the
+        // fallback behaviour are asserted in the wrong-account test below.)
+        await reset();
+        const stamped = fakeMeta({ accountId: 'someone-else', lastVersion: 4, highestVersion: 4, clockSkewMs: 0 });
+        const { vault: refused } = await boot(server, {
+            db: device.db,
+            meta: stamped,
+            openMirror: device.openMirror,
+            warm: async () => ({ accountId: ACCOUNT, dek: DEK }),
+        });
+        assert.equal(refused, null);
+        assert.equal(syncState().fatal.code, 'wrong-account');
+    });
+
+    test('upgrading: the shared mirror is A\'s portfolio, and B unlocking first must not take it', async () => {
+        // The device is coming from the build before per-account mirrors: the
+        // un-namespaced `myportfolio` holds account A's real portfolio and the
+        // old shared sync record is stamped with A. This update is exactly what
+        // lets B unlock here at all — so B unlocking FIRST is the likely order,
+        // and treating A's rows as pre-signup drafts would upload one user's
+        // trades into another user's vault. The bug, reintroduced by its own fix.
+        const device = fakeDevice({ legacyStamp: { accountId: ACCOUNT, lastVersion: 4 } });
+        const legacy = createLocalRecords({ db: device.db, now: () => BASE });
+        await legacy.put('transaction', 'tx_a', { type: 'buy', date: '2024-03-15', amount: 123456 });
+
+        const serverB = fakeServer({ serverNow: () => BASE });
+        const { adopted: b } = await unlock(serverB, device, OTHER_ACCOUNT, DEK_B);
+        assert.deepEqual(await b.list('transaction'), [], 'B must start empty');
+        assert.equal(serverB.blob, null, 'and must upload nothing');
+        assert.deepEqual(
+            (await device.db.records.toArray()).map((r) => r.recordId),
+            ['tx_a'],
+            'A\'s rows stay where they are — refused, not moved and not deleted'
+        );
+
+        // And they are still there for A, which is what makes the refusal safe.
+        await reset();
+        const serverA = fakeServer({ serverNow: () => BASE });
+        const { adopted: a } = await unlock(serverA, device, ACCOUNT, DEK);
+        assert.deepEqual((await a.list('transaction')).map((r) => r.recordId), ['tx_a']);
+        assert.deepEqual(await device.db.records.toArray(), []);
+    });
+
+    test('a vault that will not open still shows the rows the migration just moved', async () => {
+        // The migration runs before the vault opens, so between the two the
+        // user's portfolio lives in the account's mirror and nowhere else. If
+        // opening the vault then fails, serving the (now empty) pre-signup
+        // mirror would put an empty portfolio next to a sync error — which reads
+        // exactly like having lost it.
+        const device = fakeDevice();
+        const local = createLocalRecords({ db: device.db, now: () => BASE });
+        await local.put('transaction', 'tx_1', { type: 'deposit', date: '2024-01-02', amount: 1000000 });
+
+        const server = fakeServer({ serverNow: () => BASE });
+        const { vault, adopted } = await boot(server, {
+            db: device.db,
+            meta: null,
+            openMirror: device.openMirror,
+            openMeta: device.openMeta,
+            create: async () => { throw new Error('the vault would not open'); },
+        });
+
+        assert.equal(vault, null);
+        assert.equal(server.requests.length, 0, 'nothing may reach the wire');
+        assert.ok(adopted, 'the store must still be pointed at the database holding the rows');
+        assert.deepEqual((await adopted.list('transaction')).map((r) => r.recordId), ['tx_1']);
+        // Unsynced, and the failure is on screen.
+        assert.equal(typeof adopted.sync, 'undefined');
+        assert.equal(describeSync(syncState(), { online: true }).ambient, true);
+    });
+
+    test('pre-signup rows go to the account that signs up, and to no other', async () => {
+        // Typed on a plane with no account at all.
+        const device = fakeDevice();
+        const local = createLocalRecords({ db: device.db, now: () => BASE });
+        await local.put('transaction', 'tx_1', { type: 'deposit', date: '2024-01-02', amount: 1000000 });
+
+        const serverA = fakeServer({ serverNow: () => BASE });
+        const { adopted: a } = await unlock(serverA, device, ACCOUNT, DEK);
+
+        assert.deepEqual((await a.list('transaction')).map((r) => r.recordId), ['tx_1']);
+        assert.deepEqual((await serverRecords(serverA)).map((r) => r.recordId), ['tx_1']);
+        // Moved, not copied. A row left in the pre-signup mirror would be handed
+        // to the next account to unlock here — the same leak, one signup later.
+        assert.deepEqual(await device.db.records.toArray(), []);
+
+        await reset();
+        const serverB = fakeServer({ serverNow: () => BASE });
+        const { adopted: b } = await unlock(serverB, device, OTHER_ACCOUNT, DEK_B);
+        assert.deepEqual(await b.list('transaction'), []);
     });
 });
 
@@ -271,7 +457,12 @@ describe('a sync that is not working must be visible', () => {
         // Actionable copy, not a raw error string.
         assert.doesNotMatch(desc.headline, /^sync:/);
         assert.doesNotMatch(desc.detail, /Refusing/);
-        assert.match(desc.detail, /browser profile/);
+        // Not "use a separate browser profile" any more — the mirror is
+        // namespaced per account (bd 18h.12), so that advice would be wrong for
+        // the only thing this path can still mean: this device's sync metadata
+        // is stamped for a different vault. What must survive is that the copy
+        // names a real remedy and does not imply the local data is gone.
+        assert.match(desc.detail, /Clearing this site's data/);
         assert.match(desc.detail, /still saved on this device/);
     });
 });
