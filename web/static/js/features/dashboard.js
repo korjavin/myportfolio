@@ -122,10 +122,18 @@ export async function render(container) {
     });
 
     if (!snapshot || snapshot.positions.length + snapshot.accounts.length === 0) {
-        container.replaceChildren(head, ui.card(ui.emptyState(
-            'Nothing to value yet. Record a transaction and your total value, '
-            + 'allocation and performance appear here.'
-        )));
+        // Dashboard is DEFAULT_SCREEN_ID, so this is the first thing a visitor
+        // with no data sees — and until cnd.2 it had nothing to click and no
+        // reason to stay. The demo link is offered here only: the other screens'
+        // empty states are one deliberate tap further in, by which point this
+        // one has already been seen.
+        container.replaceChildren(head, ui.card(
+            ui.emptyState(
+                'Nothing to value yet. Record a transaction and your total value, '
+                + 'allocation and performance appear here.'
+            ),
+            ui.demoLink()
+        ));
         return;
     }
 
