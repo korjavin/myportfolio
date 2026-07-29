@@ -441,9 +441,19 @@ Two guards were widened during the port, and **frontend executors should expect 
 
 ### Assets are served from the root, not `/static/`
 
-`web/embed.go` does `//go:embed static`, which **roots the served filesystem at `web/static`**. So an
-asset stored at `web/static/css/styles.css` is served from **`/css/styles.css`** — writing
-`/static/css/styles.css` gives a 404.
+`web/embed.go` **roots the served filesystem at `web/static`**. So an asset stored at
+`web/static/css/styles.css` is served from **`/css/styles.css`** — writing `/static/css/styles.css`
+gives a 404.
+
+**`web/domain/` is the one exception, and it is served at `/domain/`.** §2 puts the domain modules
+*outside* `web/static` while the screens `import` them, and nothing said how those two facts met on
+the wire — so every feature module's imports 404'd and the app rendered nothing, with no server-side
+error to point at it. `embed.go` now serves that tree under an explicit `/domain/` prefix, listing
+modules **per file** so `*.test.js` and ~108 KB of Portfolio Performance fixtures stay out of the
+binary. It is a prefix switch rather than a general fallback on purpose: a fallback would also start
+answering `/static/…`, silently resurrecting the prefixed paths that have already 404'd twice here.
+`features.embed-domain.test.js` fails if that per-file list drifts from the service worker's
+precache list — the two must agree or an offline cold start serves a shell whose imports are missing.
 
 Two files have already shipped with the wrong prefix by two different authors, so this is a
 documentation defect rather than carelessness — and, worse, **neither failure was visible at
