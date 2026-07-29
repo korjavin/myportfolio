@@ -78,6 +78,7 @@ func (v *vault) enrollAfterRedeem(grant string, rotation *recoveryMaterialReques
 	response := virtualwebauthn.CreateAttestationResponse(testRP(), d.auth, d.cred, *opts)
 
 	body := recoveryEnrollFinishRequest{
+		Grant:      grant,
 		Credential: json.RawMessage(response),
 		Envelope:   envelopeWire{V: 1, Nonce: []byte("twelve-bytes"), CT: []byte("recovered-device-dek"), MAC: []byte("mac")},
 	}
@@ -410,15 +411,16 @@ func TestRecovery_EnrollBeginRefusesWithoutAValidGrant(t *testing.T) {
 }
 
 func TestRecoveryGrant_RoundTripsAndExpiresOnASeparateKey(t *testing.T) {
-	grant, err := newRecoveryGrant("ACCOUNT123", testSessionSecret)
+	redeemed := sha256.Sum256(kitVerifier)
+	grant, err := newRecoveryGrant("ACCOUNT123", redeemed[:], testSessionSecret)
 	if err != nil {
 		t.Fatalf("newRecoveryGrant: %v", err)
 	}
-	got, ok := verifyRecoveryGrant(grant, testSessionSecret)
-	if !ok || got != "ACCOUNT123" {
-		t.Fatalf("verifyRecoveryGrant = %q, %v; want ACCOUNT123, true", got, ok)
+	got, gotHash, ok := verifyRecoveryGrant(grant, testSessionSecret)
+	if !ok || got != "ACCOUNT123" || !bytes.Equal(gotHash, redeemed[:]) {
+		t.Fatalf("verifyRecoveryGrant = %q/%x, %v; want ACCOUNT123 and the redeemed hash", got, gotHash, ok)
 	}
-	if _, ok := verifyRecoveryGrant(grant, "a-different-secret"); ok {
+	if _, _, ok := verifyRecoveryGrant(grant, "a-different-secret"); ok {
 		t.Error("a grant verified under the wrong secret")
 	}
 	// The key prefix is what stops the two token types being interchangeable in
@@ -428,12 +430,95 @@ func TestRecoveryGrant_RoundTripsAndExpiresOnASeparateKey(t *testing.T) {
 	}
 	// Two grants for the same account differ: the nonce makes them
 	// non-guessable even inside the same second.
-	second, err := newRecoveryGrant("ACCOUNT123", testSessionSecret)
+	second, err := newRecoveryGrant("ACCOUNT123", redeemed[:], testSessionSecret)
 	if err != nil {
 		t.Fatalf("newRecoveryGrant: %v", err)
 	}
 	if second == grant {
 		t.Error("two grants for the same account are byte-identical")
+	}
+}
+
+// The burn has to survive concurrency, not just sequencing. A code can be
+// redeemed twice before either enrollment finishes — by a legitimate user who
+// retried, or by someone who scraped the code off the machine it was typed
+// into. Only the FIRST completed enrollment may take effect; the second must
+// leave nothing behind, or the old code would get a fresh 10 minutes of
+// authority over recovery material the user has already been told is new.
+func TestRecovery_ASecondGrantCannotUndoTheFirstRotation(t *testing.T) {
+	v := newVault(t)
+	accountID, _, _ := v.signupWithKit()
+
+	// Two grants from the same live code, both minted before either finishes.
+	_, first := v.grantFrom(v.redeem(accountID, kitVerifier))
+	_, second := v.grantFrom(v.redeem(accountID, kitVerifier))
+
+	if rec, _ := v.enrollAfterRedeem(first, &recoveryMaterialRequest{Envelope: newKitEnvelope, Verifier: rotatedVerifier}); rec.Code != http.StatusOK {
+		t.Fatalf("first enrollment = %d, body %q", rec.Code, rec.Body.String())
+	}
+	credentialsAfterFirst := v.countRows("credentials")
+
+	attackerVerifier := []byte("verifier-only-the-attacker-knows")
+	rec, _ := v.enrollAfterRedeem(second, &recoveryMaterialRequest{
+		Envelope: envelopeWire{V: 1, Nonce: []byte("attacker-non"), CT: []byte("attacker-wrapped-dek"), MAC: []byte("m")},
+		Verifier: attackerVerifier,
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second enrollment on the burned code = %d, want 409", rec.Code)
+	}
+
+	// The winner's kit is still the account's kit...
+	wantHash := sha256.Sum256(rotatedVerifier)
+	if !bytes.Equal(v.verifierHash(accountID), wantHash[:]) {
+		t.Fatal("a stale grant overwrote the recovery material the first redemption rotated in")
+	}
+	env, err := v.db.GetEnvelope(t.Context(), accountID, store.RecoveryRef)
+	if err != nil || string(env.CT) != string(newKitEnvelope.CT) {
+		t.Fatalf("recovery envelope = %+v, err %v; want the first redemption's", env, err)
+	}
+	// ...and the loser got no passkey out of it either. A rolled-back rotation
+	// with a live credential would be the worst of both.
+	if got := v.countRows("credentials"); got != credentialsAfterFirst {
+		t.Fatalf("the losing enrollment left a credential behind (%d, was %d)", got, credentialsAfterFirst)
+	}
+	if got := v.redeem(accountID, attackerVerifier).Code; got != http.StatusForbidden {
+		t.Fatalf("the loser's code redeems = %d, want 403", got)
+	}
+}
+
+// The challenge and the grant are two independent authorities and they have to
+// name the same account, or a caller holding a grant for their OWN account
+// could splice it onto a ceremony begun for someone else's.
+func TestRecovery_EnrollFinishRejectsAGrantForAnotherAccount(t *testing.T) {
+	v := newVault(t)
+	victim, _, _ := v.signupWithKit()
+	attackerHash := sha256.Sum256([]byte("attackers-own-verifier"))
+	foreign, err := newRecoveryGrant("SOMEOTHERACCOUNT", attackerHash[:], testSessionSecret)
+	if err != nil {
+		t.Fatalf("newRecoveryGrant: %v", err)
+	}
+
+	_, grant := v.grantFrom(v.redeem(victim, kitVerifier))
+	beginRec := v.do(http.MethodPost, "/api/recovery/enroll/begin", recoveryEnrollBeginRequest{Grant: grant})
+	opts, err := virtualwebauthn.ParseAttestationOptions(beginRec.Body.String())
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	challenge := cookieNamed(beginRec, recoveryChallengeCookie)
+	auth := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserHandle: []byte(opts.UserID)})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	rec := v.do(http.MethodPost, "/api/recovery/enroll/finish", recoveryEnrollFinishRequest{
+		Grant:      foreign,
+		Credential: json.RawMessage(virtualwebauthn.CreateAttestationResponse(testRP(), auth, cred, *opts)),
+		Envelope:   envelopeWire{V: 1, Nonce: []byte("twelve-bytes"), CT: []byte("ct"), MAC: []byte("mac")},
+		Recovery:   recoveryMaterialRequest{Envelope: newKitEnvelope, Verifier: rotatedVerifier},
+	}, challenge)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("finish with a grant for another account = %d, want 403", rec.Code)
+	}
+	if got := v.countRows("credentials"); got != 1 {
+		t.Fatalf("the spliced finish enrolled a credential (%d credentials)", got)
 	}
 }
 
@@ -457,6 +542,7 @@ func TestRecovery_EnrollChallengeIsSingleUse(t *testing.T) {
 
 	finish := func() int {
 		return v.do(http.MethodPost, "/api/recovery/enroll/finish", recoveryEnrollFinishRequest{
+			Grant:      grant,
 			Credential: json.RawMessage(response),
 			Envelope:   envelopeWire{V: 1, Nonce: []byte("twelve-bytes"), CT: []byte("ct"), MAC: []byte("mac")},
 			Recovery:   recoveryMaterialRequest{Envelope: newKitEnvelope, Verifier: rotatedVerifier},
@@ -527,6 +613,7 @@ func TestRecovery_EnrollFinishRejectsForeignOrigin(t *testing.T) {
 	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
 
 	rec := v.do(http.MethodPost, "/api/recovery/enroll/finish", recoveryEnrollFinishRequest{
+		Grant:      grant,
 		Credential: json.RawMessage(virtualwebauthn.CreateAttestationResponse(evil, auth, cred, *opts)),
 		Envelope:   envelopeWire{V: 1, Nonce: []byte("twelve-bytes"), CT: []byte("ct"), MAC: []byte("mac")},
 		Recovery:   recoveryMaterialRequest{Envelope: newKitEnvelope, Verifier: rotatedVerifier},

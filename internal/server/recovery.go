@@ -201,7 +201,7 @@ func (a *API) redeemRecoveryCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grant, err := newRecoveryGrant(req.AccountID, a.sessionSecret)
+	grant, err := newRecoveryGrant(req.AccountID, hash[:], a.sessionSecret)
 	if err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
@@ -230,7 +230,7 @@ func (a *API) recoveryEnrollBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	accountID, ok := verifyRecoveryGrant(req.Grant, a.sessionSecret)
+	accountID, _, ok := verifyRecoveryGrant(req.Grant, a.sessionSecret)
 	if !ok {
 		http.Error(w, "recovery grant invalid or expired", http.StatusForbidden)
 		return
@@ -269,6 +269,10 @@ func (a *API) recoveryEnrollBegin(w http.ResponseWriter, r *http.Request) {
 // recovery material is rejected, so a client cannot enroll a passkey and then
 // "get around to" replacing the code it just burned.
 type recoveryEnrollFinishRequest struct {
+	// Grant is presented again here, not merely at begin. It is what names the
+	// verifier hash this enrollment is allowed to replace, so the rotation can
+	// be a compare-and-swap rather than a blind overwrite.
+	Grant      string          `json:"grant"`
 	Credential json.RawMessage `json:"credential"`
 	// Envelope wraps the DEK under the NEW passkey's KEK.
 	Envelope envelopeWire `json:"envelope"`
@@ -306,6 +310,16 @@ func (a *API) recoveryEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Recovery.Verifier) == 0 || len(req.Recovery.Verifier) > maxVerifierLen {
 		http.Error(w, "rotated recovery material is required", http.StatusBadRequest)
+		return
+	}
+
+	// Two independent authorities, and they must agree. The challenge cookie
+	// proves this is the ceremony begin started; the grant names WHICH verifier
+	// this caller is entitled to replace. A grant for a different account than
+	// the challenge is a cross-account splice attempt.
+	grantAccount, redeemedHash, ok := verifyRecoveryGrant(req.Grant, a.sessionSecret)
+	if !ok || grantAccount != ceremonyState.accountID {
+		http.Error(w, "recovery grant invalid or expired", http.StatusForbidden)
 		return
 	}
 
@@ -347,8 +361,15 @@ func (a *API) recoveryEnrollFinish(w http.ResponseWriter, r *http.Request) {
 		Nonce: req.Recovery.Envelope.Nonce,
 		CT:    req.Recovery.Envelope.CT,
 		MAC:   req.Recovery.Envelope.MAC,
-	}, verifierHash[:], time.Now().UTC())
+	}, redeemedHash, verifierHash[:], time.Now().UTC())
 	if err != nil {
+		if errors.Is(err, store.ErrRecoveryStale) {
+			// Someone finished a redemption of this same code first. The code is
+			// burned, this enrollment rolled back whole, and starting over needs
+			// the NEW kit — which only the party that won holds.
+			http.Error(w, "that recovery code has already been redeemed", http.StatusConflict)
+			return
+		}
 		if errors.Is(err, store.ErrAccountExists) {
 			http.Error(w, "already registered", http.StatusConflict)
 			return
@@ -367,50 +388,66 @@ func (a *API) recoveryEnrollFinish(w http.ResponseWriter, r *http.Request) {
 // that account". Same shape as a session token — base64url(payload).hex(hmac) —
 // but a distinct HMAC key prefix, so neither can ever be presented as the other.
 //
-// ponytail: stateless, so it is replayable until it expires rather than strictly
-// single-use. Nothing is gained by a replay: it can only be obtained by holding
-// the recovery code, and the first successful enrollment rotates that code away.
-// Make it a stored nonce if the TTL ever needs to grow.
-func newRecoveryGrant(accountID, secret string) (string, error) {
+// The grant NAMES the verifier hash it was issued against, and enrollment
+// compare-and-swaps on it. Without that binding the burn only holds for the
+// first redemption: a code redeemed twice before either enrollment finishes
+// yields two grants, and the second would overwrite the recovery material the
+// first just rotated in — handing the old, possibly-scraped code a fresh 10
+// minutes of authority after the user was told it was dead.
+//
+// Carrying the hash discloses nothing: a grant is only ever issued to a caller
+// who just produced the verifier it hashes.
+//
+// ponytail: stateless, so a grant is replayable until it expires rather than
+// strictly single-use. That is now harmless — the compare-and-swap makes the
+// SECOND completed enrollment fail regardless of how many grants exist. Make it
+// a stored nonce only if the TTL ever needs to grow.
+func newRecoveryGrant(accountID string, verifierHash []byte, secret string) (string, error) {
 	nonce, err := randomToken(16)
 	if err != nil {
 		return "", err
 	}
-	payload := fmt.Sprintf("%s|%s|%d", accountID, nonce, time.Now().Unix())
+	payload := fmt.Sprintf("%s|%s|%d|%s", accountID, nonce, time.Now().Unix(), hex.EncodeToString(verifierHash))
 	h := hmac.New(sha256.New, []byte(secret+"|mp/recovery-grant"))
 	h.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func verifyRecoveryGrant(token, secret string) (accountID string, ok bool) {
+// verifyRecoveryGrant returns the account the grant authorises and the verifier
+// hash it was issued against, if the signature is valid and it has not expired.
+func verifyRecoveryGrant(token, secret string) (accountID string, verifierHash []byte, ok bool) {
 	rawPayload, sig, found := strings.Cut(token, ".")
 	if !found {
-		return "", false
+		return "", nil, false
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(rawPayload)
 	if err != nil {
-		return "", false
+		return "", nil, false
 	}
 	h := hmac.New(sha256.New, []byte(secret+"|mp/recovery-grant"))
 	h.Write(payload)
 	want, err := hex.DecodeString(sig)
 	if err != nil || !hmac.Equal(h.Sum(nil), want) {
-		return "", false
+		return "", nil, false
 	}
 	parts := strings.Split(string(payload), "|")
-	if len(parts) != 3 {
-		return "", false
+	if len(parts) != 4 {
+		return "", nil, false
 	}
 	ts, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil {
-		return "", false
+		return "", nil, false
 	}
 	// Bounded on BOTH sides, for the reason session.go documents: without a
 	// future-skew bound, time.Since is negative for a forward-dated token and
 	// the TTL check passes forever.
 	age := time.Since(time.Unix(ts, 0))
 	if age > recoveryGrantTTL || age < -sessionMaxFutureSkew {
-		return "", false
+		return "", nil, false
 	}
-	return parts[0], true
+	redeemed, err := hex.DecodeString(parts[3])
+	if err != nil || len(redeemed) != sha256.Size {
+		return "", nil, false
+	}
+	return parts[0], redeemed, true
 }

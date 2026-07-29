@@ -21,6 +21,11 @@ var ErrAccountExists = errors.New("store: account or credential already exists")
 // it straight back in the 409 without a second, racy read.
 var ErrVersionConflict = errors.New("store: state version conflict")
 
+// ErrRecoveryStale is returned by EnrollRecoveredCredential when the recovery
+// verifier it was authorised against is no longer the one on the account —
+// i.e. that code has already been redeemed to completion by someone else.
+var ErrRecoveryStale = errors.New("store: recovery code already redeemed")
+
 // Credential is one registered passkey.
 type Credential struct {
 	ID             []byte
@@ -286,7 +291,16 @@ func (d *DB) RecoveryVerifierHash(ctx context.Context, accountID string) ([]byte
 // request later, where a closed tab or a failed upload would leave a live code
 // the user has been told is dead. Overwriting recovery_verifier_hash here IS the
 // burn: the old verifier ceases to exist in the same commit.
-func (d *DB) EnrollRecoveredCredential(ctx context.Context, cred Credential, env, recEnv Envelope, verifierHash []byte, now time.Time) error {
+//
+// expectHash is the verifier hash the caller's authority was granted against,
+// and the UPDATE is a compare-and-swap on it. Without that compare the burn is
+// only as good as the FIRST redemption: nothing stops a code being redeemed
+// twice before either enrollment finishes, and the second grant would then
+// happily overwrite the recovery material the first one just rotated in —
+// re-arming an attacker who scraped the old code, minutes after the user was
+// told it was dead. The whole enrollment rolls back on a stale hash, so a loser
+// of that race gets no credential either.
+func (d *DB) EnrollRecoveredCredential(ctx context.Context, cred Credential, env, recEnv Envelope, expectHash, verifierHash []byte, now time.Time) error {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin recovery enrollment: %w", err)
@@ -304,10 +318,18 @@ func (d *DB) EnrollRecoveredCredential(ctx context.Context, cred Credential, env
 	if err := upsertEnvelope(ctx, tx, recEnv); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE accounts SET recovery_verifier_hash = ? WHERE id = ?`,
-		verifierHash, cred.AccountID); err != nil {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE accounts SET recovery_verifier_hash = ? WHERE id = ? AND recovery_verifier_hash = ?`,
+		verifierHash, cred.AccountID, expectHash)
+	if err != nil {
 		return fmt.Errorf("store: rotate recovery verifier: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: rotate recovery verifier: %w", err)
+	}
+	if rows != 1 {
+		return ErrRecoveryStale
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit recovery enrollment: %w", err)

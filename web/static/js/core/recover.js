@@ -193,6 +193,10 @@ async function enroll(app, ctx) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      // The grant rides along a second time: it names the verifier this
+      // rotation is entitled to replace, which is what makes the burn a
+      // compare-and-swap rather than a blind overwrite.
+      grant: ctx.grant,
       credential: finishBody,
       envelope: envelopeToWire(envelope),
       recovery: material,
