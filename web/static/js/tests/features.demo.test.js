@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { demoRecords, createDemoRecords } from '../features/demo.js';
 import { createPortfolioDomain } from '../../../domain/portfolio.js';
 import { createPerformanceDomain } from '../../../domain/perf.js';
+import { createFxRates } from '../../../domain/fx.js';
+import { marketValue, convert } from '../../../domain/money.js';
 import { RECORD, SETTINGS_ID } from '../../../domain/schema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -106,6 +108,62 @@ describe('demo mode — the seed through the real engines', () => {
         assert.equal(snapshot.costBasisMethod, 'fifo');
     });
 
+    test('the reporting-currency total is NOT the naive sum of the native values', () => {
+        // bd myportfolio-cnd.3, and the entire point of the feature. Every money
+        // field on a position is in `reportingCurrency`, but `price` and
+        // `currency` stay in the SECURITY's own currency — so re-valuing each
+        // position from its own price gives a different number, and a demo where
+        // those two agree exercises no conversion at all.
+        const foreign = snapshot.positions.filter((p) => p.currency !== snapshot.reportingCurrency);
+        assert.equal(foreign.length, 1,
+            `expected exactly one non-${snapshot.reportingCurrency} position, got `
+            + JSON.stringify(foreign.map((p) => [p.securityId, p.currency])));
+        assert.equal(foreign[0].currency, 'USD');
+        assert.ok(foreign[0].shares > 0, 'the USD position must still be open, or nothing needs a rate');
+
+        const native = snapshot.positions.reduce((a, p) => a + marketValue(p.shares, p.price), 0);
+        assert.notEqual(snapshot.totals.marketValue, native,
+            `totals.marketValue ${snapshot.totals.marketValue} equals the naive native-currency sum, `
+            + 'so no position was converted');
+        // …and the whole difference is the USD position's, which pins WHICH
+        // number moved rather than merely that some number did.
+        assert.equal(
+            snapshot.totals.marketValue - native,
+            foreign[0].marketValue - marketValue(foreign[0].shares, foreign[0].price)
+        );
+    });
+
+    test('the USD position keeps a USD price, converted at the CLOSE\'s day', () => {
+        const p = snapshot.positions.find((q) => q.currency === 'USD');
+        // The price is the security's own stored close, untouched — a market
+        // fact about the security, not a portfolio amount. Read back out of the
+        // seed's price chunk rather than restated here.
+        const chunk = seed.find((r) => r.recordType === RECORD.price
+            && r.securityId === p.securityId && r.year === p.priceDate.slice(0, 4));
+        assert.equal(p.price, chunk.closes[p.priceDate.slice(5)],
+            'the position price was converted; it must stay in the security\'s own currency');
+
+        // B8's valuation-date rule: market value takes the rate for the CLOSE's
+        // day, not the trade dates. Reproduced through the real lookup, which
+        // inverts the stored EURUSD to get USD->EUR.
+        const rates = createFxRates(seed.filter((r) => r.recordType === RECORD.fx));
+        const applicable = rates.rate('USD', 'EUR', p.priceDate);
+        assert.ok(applicable, `no USDEUR rate applicable to ${p.priceDate}`);
+        assert.equal(p.marketValue, convert(marketValue(p.shares, p.price), applicable.rate));
+    });
+
+    test('no fx issue code appears', () => {
+        // Named explicitly rather than left to the blanket "issues is empty"
+        // assertion: `malformed_fx` (fx.js) and `currency_not_converted`
+        // (portfolio.js) are the two codes this bead can regress, and a gap
+        // means a position drops out of the totals entirely.
+        const fxIssues = snapshot.issues.filter(
+            (i) => i.code === 'malformed_fx' || i.code === 'currency_not_converted'
+        );
+        assert.deepEqual(fxIssues, [],
+            `fx issues:\n${fxIssues.map((i) => `  • ${i.code} ${i.recordId}: ${i.message}`).join('\n')}`);
+    });
+
     test('TTWROR and IRR are both finite and NOT equal', async () => {
         const perf = await createPerformanceDomain({ records: createDemoRecords(seed) }).performance({});
         assert.deepEqual(perf.issues, [], 'the performance engine reports issues');
@@ -145,13 +203,59 @@ describe('demo mode — the seed itself', () => {
         const ids = seed.map((r) => r.recordId);
         assert.equal(new Set(ids).size, ids.length, 'duplicate recordId in the seed');
         assert.ok(ids.every((id) => /^[a-z0-9_]+$/.test(id)), 'a recordId is not a stable literal');
-        for (const type of [RECORD.account, RECORD.security, RECORD.transaction, RECORD.price]) {
+        for (const type of [RECORD.account, RECORD.security, RECORD.transaction, RECORD.price, RECORD.fx]) {
             assert.ok(seed.some((r) => r.recordType === type), `no ${type} records`);
         }
         assert.ok(seed.some((r) => r.recordId === SETTINGS_ID && r.recordType === RECORD.settings),
             'no settings singleton');
         assert.ok(seed.every((r) => r.deleted === false && Number.isInteger(r.clientTs)),
             'a record is not in §3 stored shape');
+    });
+
+    test('an fx rate covers every day the price chunks cover', () => {
+        // THE coverage guard. perf.js values at every sub-period boundary in the
+        // log, so a day with a close and no rate is a `currency_not_converted`
+        // gap several hundred lines away. Set equality, not "no gap wider than
+        // FX_CARRY_FORWARD_DAYS": the carry-forward window exists for a real
+        // provider's weekends, and leaning on it here would let a rate go
+        // missing without anything going red.
+        const seed = demoRecords({ today: TODAY });
+        const priceDays = new Set();
+        for (const r of seed) {
+            if (r.recordType !== RECORD.price || r.securityId !== 'security_demo_vwce') continue;
+            for (const md of Object.keys(r.closes)) priceDays.add(`${r.year}-${md}`);
+        }
+        const fxDays = seed.filter((r) => r.recordType === RECORD.fx).map((r) => r.date);
+        assert.ok(priceDays.size > 1800, `only ${priceDays.size} priced days in the fixture`);
+        assert.deepEqual(fxDays, [...priceDays].sort(),
+            'the EURUSD series must cover exactly the days the price chunks cover, in order');
+    });
+
+    test('rates are positive 1e8 integers that move — never an exact decimal', () => {
+        // §5: FX is the ONE quantity where the lossless-round-trip claim does
+        // not hold — PP stores exchangeRate as an arbitrary-precision BigDecimal
+        // and quantising to 1e8 genuinely rounds. So this asserts integer-ness,
+        // a plausible band and direction, and deliberately not a value.
+        const fxRecs = demoRecords({ today: TODAY }).filter((r) => r.recordType === RECORD.fx);
+        assert.ok(fxRecs.length > 0, 'the fixture has no fx records at all');
+        for (const r of fxRecs) {
+            assert.equal(r.pair, 'EURUSD');
+            assert.ok(Number.isSafeInteger(r.rate) && r.rate > 0, `${r.recordId} rate ${r.rate}`);
+            assert.ok(r.rate > 50_000_000 && r.rate < 200_000_000,
+                `${r.recordId} rate ${r.rate} is outside any plausible EURUSD band`);
+        }
+        // A flat series would satisfy every assertion above and convert nothing
+        // interesting; the waypoints run 1.12 -> 1.16 over the span.
+        assert.ok(fxRecs[fxRecs.length - 1].rate > fxRecs[0].rate,
+            `the series does not move: ${fxRecs[0].rate} -> ${fxRecs[fxRecs.length - 1].rate}`);
+
+        // The `fx` field §4 puts on a transaction is the rate that produced its
+        // euro cash leg, so it must be one of the stored fixings for its own day.
+        const byDate = new Map(fxRecs.map((r) => [r.date, r.rate]));
+        const traded = demoRecords({ today: TODAY })
+            .filter((r) => r.recordType === RECORD.transaction && r.fx !== undefined);
+        assert.ok(traded.length > 0, 'no transaction carries the §4 `fx` field');
+        for (const tx of traded) assert.equal(tx.fx, byDate.get(tx.date), `${tx.recordId} fx`);
     });
 
     test('a rubbish `today` is refused rather than rolled forward', () => {
