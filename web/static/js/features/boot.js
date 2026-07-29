@@ -180,27 +180,64 @@ subscribeSync(paintNotice);
 window.addEventListener('online', paintNotice);
 window.addEventListener('offline', paintNotice);
 
-// The wire (ARCHITECTURE.md §3): whether this app is backed up at all comes down
-// to these two calls. startSync picks the port implementation — localRecords
-// with no vault on the device, vaultRecords with one — hands it to the store,
-// and then pulls. That first pull is also the signup migration: with no blob on
-// the server yet, the union of local and remote is the whole offline-built
-// portfolio, so it uploads intact.
+// ?demo=1 (bd myportfolio-cnd.1) takes the OTHER branch entirely: a third
+// implementation of the §3 port, in memory, seeded with a fabricated portfolio.
 //
-// It also picks the DATABASE. `db` is the pre-signup mirror; openMirror gives an
-// unlocked account its own namespaced one and moves any pre-signup rows into it,
-// so two accounts can share a browser profile without either seeing the other's
-// records (bd myportfolio-18h.12). The first refresh() is startSync's job for
-// the same reason — it fires through onRecords the moment that choice is made,
-// and refreshing before it would paint the empty pre-signup mirror over a
-// signed-in user's portfolio. refresh() cannot reject: it records the failure on
-// state.error and the screens render it.
-startSync({ db, openMirror, openMeta: openSyncMeta, adopt: useRecords, onRecords: refresh }).catch((err) => {
-    // startSync reports its own failures through describeSync; anything that
-    // escapes it is a bug in this file, not a sync state. The screens still have
-    // to come off "Opening your portfolio…" — a shell that never paints because
-    // the sync wiring threw is worse than one with no sync.
-    console.error('boot: sync wiring failed', err);
-    refresh();
-});
-watchFocus({ onRecords: refresh });
+// startSync() and watchFocus() are NOT called in that branch, and that is the
+// isolation guarantee rather than a tidiness preference. startSync calls
+// tryWarmUnlock(), which reads the LDK device database and can adopt
+// vaultRecords — a demo that ran it would be one bug away from syncing invented
+// trades into somebody's real vault. No Dexie handle is opened either, so the
+// isolation does not depend on the per-account namespacing being right.
+//
+// The import is DYNAMIC on purpose, and converting it to a static one breaks two
+// things at once: real users would download the fixture as part of the shell's
+// module closure, and architecture.sw-precache.test.js's ESM walker (which
+// follows static specifiers only) would start demanding a PRECACHE entry for it.
+const demo = new URLSearchParams(location.search).has('demo');
+
+if (demo) {
+    // The port is swapped BEFORE the import is attempted, and the label goes up
+    // with it. store.js starts on localRecords, so a demo whose fixture failed
+    // to load — offline before demo.js is cached, say — would otherwise refresh
+    // through the pre-signup Dexie mirror and paint the visitor's own portfolio
+    // under a demo URL. An empty port cannot: it makes "no IndexedDB operation
+    // happens in demo mode" unconditional rather than dependent on a network.
+    useRecords({ list: async () => [], put: async () => {}, del: async () => {} });
+    document.getElementById('demo-banner').classList.remove('hidden');
+
+    // `today` comes from the shell; demo.js never calls the clock itself, which
+    // is what lets its test pin a date and assert byte-identical output.
+    import('./demo.js').then((m) => {
+        useRecords(m.createDemoRecords(m.demoRecords({ today: new Date().toISOString().slice(0, 10) })));
+    }).catch((err) => {
+        // The empty port above still stands, so the screens come off "Opening
+        // your portfolio…" into an empty demo rather than hanging.
+        console.error('boot: demo mode failed to load', err);
+    }).then(refresh);
+} else {
+    // The wire (ARCHITECTURE.md §3): whether this app is backed up at all comes
+    // down to these two calls. startSync picks the port implementation —
+    // localRecords with no vault on the device, vaultRecords with one — hands it
+    // to the store, and then pulls. That first pull is also the signup
+    // migration: with no blob on the server yet, the union of local and remote
+    // is the whole offline-built portfolio, so it uploads intact.
+    //
+    // It also picks the DATABASE. `db` is the pre-signup mirror; openMirror
+    // gives an unlocked account its own namespaced one and moves any pre-signup
+    // rows into it, so two accounts can share a browser profile without either
+    // seeing the other's records (bd myportfolio-18h.12). The first refresh() is
+    // startSync's job for the same reason — it fires through onRecords the
+    // moment that choice is made, and refreshing before it would paint the empty
+    // pre-signup mirror over a signed-in user's portfolio. refresh() cannot
+    // reject: it records the failure on state.error and the screens render it.
+    startSync({ db, openMirror, openMeta: openSyncMeta, adopt: useRecords, onRecords: refresh }).catch((err) => {
+        // startSync reports its own failures through describeSync; anything that
+        // escapes it is a bug in this file, not a sync state. The screens still
+        // have to come off "Opening your portfolio…" — a shell that never paints
+        // because the sync wiring threw is worse than one with no sync.
+        console.error('boot: sync wiring failed', err);
+        refresh();
+    });
+    watchFocus({ onRecords: refresh });
+}
