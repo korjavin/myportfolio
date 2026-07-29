@@ -625,13 +625,22 @@ Consequences, and both halves are binding:
 live in, so the two cannot drift silently. The pairing id is query-escaped on both legs — the browser
 chose it, and an id containing `&`, `/` or `#` would otherwise rewrite the URL.
 
-### Confirm the CSP admits the device WebSocket *before* debugging anything
+### The CSP does admit the device WebSocket — measured, not assumed
 
-§7's `connect-src` is a static allowlist with no `wss:` token. C4's device leg is same-origin, so
-`'self'` is expected to cover it — but **verify it against a running binary rather than assuming**,
-because the failure mode is the worst one this design has: a CSP-blocked WebSocket surfaces as a bare
-`onclose`, which is indistinguishable from *"no device online"* — the same unattributable symptom the
-pairing-code checksum was added to eliminate. Ten minutes of checking beats a day of chasing it.
+§7's `connect-src` is a static allowlist with **no `wss:` token**, which looks alarming and is fine:
+CSP3's `'self'` covers a same-origin `wss:` socket from an `https:` document. This was **measured
+against a running binary in headless Chrome**, not reasoned about — a same-origin
+`ws://…/api/mcp/relay/device` reached the handler (failing only on the handshake's own 401), while a
+cross-origin `ws://` on the same page was refused with *"violates the following Content Security
+Policy directive"*. That negative control is what makes the positive result mean anything: it proves
+the policy was live rather than absent.
+
+**`connect-src` therefore needs no entry for the relay, and adding one would be wrong** — the
+allowlist is deliberately gated, and this socket is already covered.
+
+Kept here because it is the first thing to re-check if the device leg ever fails to connect: a
+CSP-blocked WebSocket surfaces as a bare `onclose`, indistinguishable from *"no device online"* —
+the same unattributable symptom the pairing-code checksum was added to eliminate.
 
 ### Do not re-derive these — they are scar tissue
 
