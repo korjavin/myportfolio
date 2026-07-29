@@ -484,9 +484,15 @@ caller forge a fresh bucket per request and the limiter stops existing. That fai
 been found and fixed once in this codebase; it is regression-tested, and the test is why the
 configured-peer design exists at all.
 
-Also required at the edge: HSTS, and `X-Forwarded-Proto` set by Traefik so the app knows it is
-behind TLS. WebAuthn requires a secure context — no ceremony works over plain HTTP on a non-loopback
-host, so a misconfigured proxy presents as "passkeys don't work", not as a TLS warning.
+**TLS termination is entirely Traefik's business.** An earlier version of this section claimed the
+app needs `X-Forwarded-Proto` "so it knows it is behind TLS" and listed HSTS as an edge requirement.
+Both were wrong: nothing in `internal/` reads that header, and the app already sets HSTS itself
+(`internal/server/server.go`). Traefik sets the header anyway and nothing is broken, but the stated
+reason was invented — so do not add an edge HSTS header and end up with two sources for one value.
+
+What *is* true and matters: **WebAuthn requires a secure context.** No ceremony works over plain HTTP
+on a non-loopback host, so a proxy that fails to terminate TLS properly presents as *"passkeys don't
+work"* rather than as a TLS warning — a symptom that points nowhere near its cause.
 
 ## 11. Tracks
 
