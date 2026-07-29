@@ -27,13 +27,15 @@ import (
 // in-memory DEK and drive the non-extractable LDK — and names a strict CSP with
 // zero third-party script as the real defense.
 //
-// connect-src is 'self' plus the quote providers, because §7 quotes go
-// browser-direct — with 'self' alone the browser blocks every provider fetch
-// and the whole quotes feature is inert. The hostnames are NOT written here:
-// they are lifted from quotes.js's exported QUOTE_HOSTS (below), so there is
-// one list of "who may we contact", not two that drift silently in a direction
-// nobody notices until either an XSS uses the gap or a legitimate fetch is
-// blocked and a user just sees a provider that never works.
+// connect-src is 'self' plus the hosts the client actually fetches from,
+// because §7 quotes and §5 FX rates both go browser-direct — with 'self' alone
+// the browser blocks every one of those fetches and the feature is inert while
+// its unit tests stay green, because there is no CSP in node. The hostnames are
+// NOT written here: they are lifted from quotes.js's exported QUOTE_HOSTS and
+// fx.js's exported FX_HOSTS (below), so there is one list per module of "who
+// may we contact", not two that drift silently in a direction nobody notices
+// until either an XSS uses the gap or a legitimate fetch is blocked and a user
+// just sees a provider that never works.
 //
 // Never a bare `https:`/`wss:`/`*` token, on any document this origin serves: a
 // same-origin child frame inherits the CSP, so one relaxed document is a bypass
@@ -41,13 +43,18 @@ import (
 //
 // Stated honestly, since §8's posture is to name what we have NOT solved: each
 // host here widens where an on-origin XSS can post a decrypted portfolio. The
-// CSP narrows the exfiltration target set from "anywhere" to these two hosts —
-// it does not close the hole. Two hosts is the entire budget; a third needs a
-// reason, and adding one fails TestQuoteHostAllowlist until a human agrees.
-var contentSecurityPolicy = buildCSP(quoteHosts(web.StaticFS))
+// CSP narrows the exfiltration target set from "anywhere" to these three hosts
+// — it does not close the hole. Three hosts is the entire budget; a fourth
+// needs a reason, and adding one fails TestQuoteHostAllowlist until a human
+// agrees. The third, data-api.ecb.europa.eu, was agreed on myportfolio-53h: it
+// is keyless and CORS-enabled, without it every mixed-currency portfolio shows
+// conversion gaps instead of a total, and it learns which currencies you hold —
+// not which instruments, which is a smaller leak than the two quote hosts.
+var contentSecurityPolicy = buildCSP(append(
+	frozenHosts(web.StaticFS, "domain/quotes.js", "QUOTE_HOSTS"),
+	frozenHosts(web.StaticFS, "domain/fx.js", "FX_HOSTS")...))
 
-// quoteHostsBlock and hostLiteral lift the values out of quotes.js's frozen
-// QUOTE_HOSTS map:
+// hostLiteral lifts the values out of a frozen host map:
 //
 //	export const QUOTE_HOSTS = Object.freeze({
 //	  coingecko: 'api.coingecko.com',
@@ -55,46 +62,48 @@ var contentSecurityPolicy = buildCSP(quoteHosts(web.StaticFS))
 //	});
 //
 // A regex over the served asset, rather than a Go code generator or a
-// hand-copied list: quotes.js is already embedded and already served from this
-// binary (web/embed.go lists it explicitly), so reading it costs one ReadFile
-// and no build step, and there is no generated file to forget to regenerate. If
-// the map is ever reformatted past what this matches, the derivation loses a
-// host and TestQuoteHostAllowlist fails — a reformat cannot silently narrow or
-// widen egress.
-var (
-	quoteHostsBlock = regexp.MustCompile(`QUOTE_HOSTS\s*=\s*Object\.freeze\(\{([^}]*)\}`)
-	hostLiteral     = regexp.MustCompile(`'([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})'`)
-)
+// hand-copied list: both modules are already embedded and already served from
+// this binary (web/embed.go lists them explicitly), so reading them costs one
+// ReadFile each and no build step, and there is no generated file to forget to
+// regenerate. If a map is ever reformatted past what this matches, the
+// derivation loses a host and TestQuoteHostAllowlist fails — a reformat cannot
+// silently narrow or widen egress.
+var hostLiteral = regexp.MustCompile(`'([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})'`)
 
-// quoteHosts panics rather than degrading to 'self': the input is a file
-// compiled into this binary, so a failure here means the binary was built
-// wrong, and every test in this package runs the same code path. Falling back
-// silently would reproduce exactly the bug this function exists to fix.
-func quoteHosts(fsys fs.FS) []string {
-	src, err := fs.ReadFile(fsys, "domain/quotes.js")
+// frozenHosts reads one `export const <mapName> = Object.freeze({...})` out of
+// one embedded module. It is parameterised rather than duplicated per module:
+// the only thing that differed between the quotes and FX cases was the filename
+// and the map name.
+//
+// It panics rather than degrading to 'self': the input is a file compiled into
+// this binary, so a failure here means the binary was built wrong, and every
+// test in this package runs the same code path. Falling back silently would
+// reproduce exactly the bug this function exists to fix.
+func frozenHosts(fsys fs.FS, path, mapName string) []string {
+	src, err := fs.ReadFile(fsys, path)
 	if err != nil {
-		panic("server: read domain/quotes.js for the CSP connect-src allowlist: " + err.Error())
+		panic("server: read " + path + " for the CSP connect-src allowlist: " + err.Error())
 	}
-	block := quoteHostsBlock.FindSubmatch(src)
+	block := regexp.MustCompile(mapName + `\s*=\s*Object\.freeze\(\{([^}]*)\}`).FindSubmatch(src)
 	if block == nil {
-		panic("server: no QUOTE_HOSTS = Object.freeze({...}) in domain/quotes.js")
+		panic("server: no " + mapName + " = Object.freeze({...}) in " + path)
 	}
 	var hosts []string
 	for _, m := range hostLiteral.FindAllSubmatch(block[1], -1) {
 		hosts = append(hosts, string(m[1]))
 	}
 	if len(hosts) == 0 {
-		panic("server: QUOTE_HOSTS in domain/quotes.js has no hostnames")
+		panic("server: " + mapName + " in " + path + " has no hostnames")
 	}
 	return hosts
 }
 
 // buildCSP scheme-qualifies each host (`https://api.example.com`, not the bare
 // hostname) so a plaintext-http document on this origin cannot be talked into
-// fetching quotes over http.
-func buildCSP(quoteHosts []string) string {
+// fetching quotes or FX rates over http.
+func buildCSP(connectHosts []string) string {
 	connect := "'self'"
-	for _, h := range quoteHosts {
+	for _, h := range connectHosts {
 		connect += " https://" + h
 	}
 	return "default-src 'self'; " +
