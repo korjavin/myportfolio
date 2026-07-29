@@ -46,10 +46,10 @@ globalThis.Dexie = chainableNoop();
 const { QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders } =
     await import('../features/settings.js');
 
-/** What the card's Save handler builds from the rendered rows. */
+/** What the card's Save handler builds from the rendered rows, untouched. */
 const editsFrom = (rows) => rows.map((row) => ({
     name: row.name,
-    needsKey: row.needsKey,
+    keyField: row.keyField,
     enabled: row.enabled,
     apiKey: row.apiKey,
 }));
@@ -81,10 +81,10 @@ describe('settings — quoteProviders is merged, never replaced', () => {
         // The bead's acceptance criterion. Configure them in either order and
         // the map holds both.
         let stored = mergeQuoteProviders({}, [
-            { name: 'coingecko', needsKey: false, enabled: true, apiKey: '' },
+            { name: 'coingecko', keyField: true, enabled: true, apiKey: '' },
         ]);
         stored = mergeQuoteProviders(stored, [
-            { name: 'twelvedata', needsKey: true, enabled: true, apiKey: 'TD-KEY' },
+            { name: 'twelvedata', keyField: true, enabled: true, apiKey: 'TD-KEY' },
         ]);
         assert.deepEqual(stored, { coingecko: {}, twelvedata: { apiKey: 'TD-KEY' } });
 
@@ -139,15 +139,15 @@ describe('settings — quoteProviders is merged, never replaced', () => {
     test('the stored map is not mutated in place', () => {
         const stored = { twelvedata: { apiKey: 'TD-KEY' } };
         const before = JSON.stringify(stored);
-        mergeQuoteProviders(stored, [{ name: 'twelvedata', needsKey: true, enabled: false, apiKey: '' }]);
-        mergeQuoteProviders(stored, [{ name: 'coingecko', needsKey: false, enabled: true, apiKey: '' }]);
+        mergeQuoteProviders(stored, [{ name: 'twelvedata', keyField: true, enabled: false, apiKey: '' }]);
+        mergeQuoteProviders(stored, [{ name: 'coingecko', keyField: true, enabled: true, apiKey: '' }]);
         assert.equal(JSON.stringify(stored), before);
     });
 
     test('a name the card never rendered is left exactly as stored', () => {
         const stored = { twelvedata: { apiKey: 'TD-KEY' } };
         assert.deepEqual(
-            mergeQuoteProviders(stored, [{ name: 'coingecko', needsKey: false, enabled: true, apiKey: '' }]),
+            mergeQuoteProviders(stored, [{ name: 'coingecko', keyField: true, enabled: true, apiKey: '' }]),
             { coingecko: {}, twelvedata: { apiKey: 'TD-KEY' } }
         );
     });
@@ -155,7 +155,7 @@ describe('settings — quoteProviders is merged, never replaced', () => {
     test('a garbled or absent map does not throw', () => {
         for (const junk of [undefined, null, 'nope', 42]) {
             assert.deepEqual(
-                mergeQuoteProviders(junk, [{ name: 'coingecko', needsKey: false, enabled: true, apiKey: '' }]),
+                mergeQuoteProviders(junk, [{ name: 'coingecko', keyField: true, enabled: true, apiKey: '' }]),
                 { coingecko: {} }
             );
             assert.ok(Array.isArray(quoteProviderRows(junk)));
@@ -163,7 +163,7 @@ describe('settings — quoteProviders is merged, never replaced', () => {
         // A provider whose config is not an object must not spread into one.
         assert.deepEqual(
             mergeQuoteProviders({ twelvedata: 'TD-KEY' }, [
-                { name: 'twelvedata', needsKey: true, enabled: true, apiKey: 'REAL' },
+                { name: 'twelvedata', keyField: true, enabled: true, apiKey: 'REAL' },
             ]),
             { twelvedata: { apiKey: 'REAL' } }
         );
@@ -178,25 +178,42 @@ describe('settings — a key is never filed under a provider it was not typed fo
         assert.equal(byName.get('coingecko').apiKey, '');
     });
 
-    test('a keyless row cannot write a key even if one is handed to it', () => {
+    test('a key typed into one row lands under that row and nowhere else', () => {
+        const stored = { twelvedata: { apiKey: 'TD-KEY' } };
+        const edits = editsFrom(quoteProviderRows(stored))
+            .map((e) => (e.name === 'coingecko' ? { ...e, enabled: true, apiKey: 'CG-DEMO' } : e));
+        assert.deepEqual(mergeQuoteProviders(stored, edits), {
+            coingecko: { apiKey: 'CG-DEMO' },
+            twelvedata: { apiKey: 'TD-KEY' },
+        });
+    });
+
+    test('a row with no key field of its own never writes one', () => {
         // The structural half of the 8cb4a3f fix: the merge refuses, so a future
         // wiring mistake in the card cannot resurrect the credential-crossing
         // bug on its own.
         const next = mergeQuoteProviders({}, [
-            { name: 'coingecko', needsKey: false, enabled: true, apiKey: 'SOMEONE-ELSES-KEY' },
+            { name: 'finnhub', keyField: false, enabled: true, apiKey: 'SOMEONE-ELSES-KEY' },
         ]);
-        assert.deepEqual(next, { coingecko: {} });
+        assert.deepEqual(next, { finnhub: {} });
     });
 
-    test('a key an older build misfiled under CoinGecko is scrubbed on save', () => {
-        // 8cb4a3f: the single shared key field kept the previous provider's
-        // value, so Save could store a Finnhub key under `coingecko`. That is
-        // not inert — quotes.js forwards a CoinGecko config's apiKey as
-        // `x_cg_demo_api_key`, i.e. it would hand another vendor's credential to
-        // CoinGecko on the next refresh. The card offers no CoinGecko key field,
-        // so saving must remove one.
-        const stored = { coingecko: { apiKey: 'FINNHUB-KEY' }, twelvedata: { apiKey: 'TD-KEY' } };
-        assert.deepEqual(reopenAndSave(stored), {
+    test('a key stored under CoinGecko is visible and editable, not silently kept or dropped', () => {
+        // quotes.js sends a stored CoinGecko key as `x_cg_demo_api_key`, so what
+        // sits here is neither inert nor safe to guess about: it may be a real
+        // demo key raising the free-tier limit, or another vendor's credential
+        // that 8cb4a3f's shared key field misfiled — and from the stored map
+        // alone the two are indistinguishable. So the card renders it in
+        // CoinGecko's OWN field: an untouched save keeps it, and clearing the
+        // field is how it goes away. Deleting it behind the user's back would
+        // break the legitimate case with no way to put it back.
+        const stored = { coingecko: { apiKey: 'CG-DEMO' }, twelvedata: { apiKey: 'TD-KEY' } };
+        assert.equal(quoteProviderRows(stored).find((r) => r.name === 'coingecko').apiKey, 'CG-DEMO');
+        assert.deepEqual(reopenAndSave(stored), stored);
+
+        const cleared = editsFrom(quoteProviderRows(stored))
+            .map((e) => (e.name === 'coingecko' ? { ...e, apiKey: '' } : e));
+        assert.deepEqual(mergeQuoteProviders(stored, cleared), {
             coingecko: {},
             twelvedata: { apiKey: 'TD-KEY' },
         });
@@ -212,11 +229,12 @@ describe('settings — providers dropped from the list are still reachable', () 
         const legacy = rows.find((r) => r.name === 'finnhub');
         assert.ok(legacy, 'no row offered for a stored provider the card no longer lists');
         assert.equal(legacy.unsupported, true);
-        assert.equal(legacy.needsKey, false);
-        assert.equal(legacy.apiKey, '', 'a dropped provider must not re-render its credential');
+        assert.equal(legacy.keyField, false, 'a dropped provider must not re-render its credential');
+        assert.equal(legacy.apiKey, '');
 
-        // Left alone it stays visible, minus the credential nothing can use.
-        assert.deepEqual(reopenAndSave(stored), { finnhub: {}, twelvedata: { apiKey: 'TD-KEY' } });
+        // Left alone it survives byte for byte — it has no field of its own, so
+        // the merge does not touch what it holds.
+        assert.deepEqual(reopenAndSave(stored), stored);
 
         // Toggled off it is gone, and the supported one is untouched.
         const edits = editsFrom(rows).map((e) => (e.name === 'finnhub' ? { ...e, enabled: false } : e));
@@ -247,8 +265,10 @@ describe('settings — the card is wired to the merge', () => {
 
     test('there is one key field per provider, not one shared field', () => {
         // The old card had a single `apiKey` input and a <select>; the fix is
-        // that a key input only ever exists inside a row's own scope.
+        // that a key input only ever exists inside a row's own scope, and the
+        // edit it produces reads that input and nothing else.
         assert.doesNotMatch(source, /providerSel/);
-        assert.match(source, /row\.needsKey/);
+        assert.match(source, /row\.keyField\s*\n?\s*\?\s*ui\.input\(row\.apiKey/);
+        assert.match(source, /apiKey:\s*key\s*\?\s*key\.value\.trim\(\)\s*:\s*''/);
     });
 });

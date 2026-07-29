@@ -53,18 +53,23 @@ export const QUOTE_PROVIDERS = [
     {
         name: 'coingecko',
         label: 'CoinGecko',
-        // Deliberately does not promise that switching it off stops CoinGecko
-        // being used: quotes.js prices any security routed to `coingecko`
-        // whether or not the map lists it, because a keyless provider can never
-        // be skipped for `no_api_key`. Listing it is what the §7 CSP allowlist
-        // will be derived from — see myportfolio-18h.9.
-        note: 'Crypto. The free tier is keyless, so listing it here is all the configuration there is.',
+        // The note deliberately does not promise that switching this off stops
+        // CoinGecko being used: quotes.js prices any security routed to
+        // `coingecko` whether or not the map lists it, because a provider that
+        // needs no key can never be skipped for `no_api_key`. Listing it is
+        // what the §7 CSP allowlist will be derived from (myportfolio-18h.9).
+        note: 'Crypto. The free tier needs no key, so nothing but the choice is stored.',
+        // Optional all the same: quotes.js sends a stored CoinGecko key as
+        // `x_cg_demo_api_key`, which raises the keyless rate limit. The field
+        // exists so that key is visible and editable rather than silently
+        // carried — see mergeQuoteProviders.
+        keyNote: 'Optional. A CoinGecko demo key only raises the free-tier rate limit.',
         needsKey: false,
     },
     {
         name: 'twelvedata',
         label: 'Twelve Data',
-        note: 'Stocks and ETFs. Bring your own key — it never leaves this device.',
+        note: 'Stocks and ETFs. Bring your own key — it never leaves this device. Blank turns it off.',
         needsKey: true,
     },
 ];
@@ -81,25 +86,30 @@ function configOf(map, name) {
  * the DOM builder and the tests work from the same thing rather than from two
  * descriptions of it that can disagree.
  *
- * A row carries its OWN key and nothing else — that is the structural half of
- * the fix for 8cb4a3f, where a single shared key field meant Save could file
- * one provider's credential under another's name.
+ * `keyField` says whether the row renders a credential input of its own. Only a
+ * row that does may write `apiKey`, and only under its own name — that is the
+ * structural half of the fix for 8cb4a3f, where one shared key field meant Save
+ * could file one provider's credential under another's.
  *
  * Providers that are stored but no longer supported still get a row: an install
  * that configured Finnhub before it was dropped would otherwise be left with an
- * inert credential it can neither see nor delete.
+ * inert credential it can neither see nor delete. They render no key field, so
+ * whatever they hold is carried through untouched until the row is switched off.
  */
 export function quoteProviderRows(stored) {
     const map = stored && typeof stored === 'object' ? stored : {};
     const rows = QUOTE_PROVIDERS.map((provider) => {
         const config = configOf(map, provider.name);
-        const apiKey = provider.needsKey && typeof config?.apiKey === 'string' ? config.apiKey : '';
+        const apiKey = typeof config?.apiKey === 'string' ? config.apiKey : '';
         return {
             ...provider,
             apiKey,
-            // A keyed provider with no key is not configured — quotes.js would
-            // skip every one of its securities with `no_api_key`. A keyless one
-            // is configured by being in the map at all.
+            keyField: true,
+            // A provider that requires a key and has none is not configured —
+            // quotes.js would skip every one of its securities with
+            // `no_api_key`, so the key field is also its on switch. One that
+            // needs no key is configured by being in the map at all, and gets
+            // an explicit toggle instead.
             enabled: provider.needsKey ? apiKey !== '' : Object.hasOwn(map, provider.name),
         };
     });
@@ -111,6 +121,7 @@ export function quoteProviderRows(stored) {
             label: name,
             note: 'Stored by an older version. quotes.js does not know it, so it prices nothing.',
             needsKey: false,
+            keyField: false,
             apiKey: '',
             enabled: true,
             unsupported: true,
@@ -124,14 +135,17 @@ export function quoteProviderRows(stored) {
  * Replacing is the bug: it made configuring an equity provider erase CoinGecko,
  * silently, so a portfolio holding both stopped pricing half of itself.
  *
- * Two invariants, both load-bearing:
+ * Three invariants, all load-bearing:
  *
- *  - Only a row that rendered its own key field may write `apiKey`, and only
- *    under its own name. Every other row has its `apiKey` *removed*, which also
- *    scrubs a credential an older build misfiled there (8cb4a3f). That is not
- *    hygiene theatre: quotes.js forwards a stored CoinGecko key as
- *    `x_cg_demo_api_key`, so a Finnhub key sitting under `coingecko` would be
- *    handed to CoinGecko on the next refresh.
+ *  - `apiKey` is written only from a row that rendered its own key field, and
+ *    only under that row's own name. A row with no field of its own never
+ *    touches the stored key at all. Both halves matter: 8cb4a3f filed one
+ *    provider's credential under another's name, and quotes.js forwards a
+ *    stored CoinGecko key as `x_cg_demo_api_key` — so a crossed key is not
+ *    inert, it is handed to the wrong vendor on the next refresh.
+ *  - Nothing is destroyed that the user cannot see. Clearing a key field is how
+ *    a key is removed, which is why every provider that accepts one renders it
+ *    rather than being quietly rewritten behind a password mask.
  *  - Anything else in a provider's config (`minIntervalMs`, whatever a later
  *    version adds) survives, because this card does not own those fields.
  *
@@ -147,8 +161,10 @@ export function mergeQuoteProviders(stored, edits) {
             continue;
         }
         const config = { ...(configOf(next, name) ?? {}) };
-        if (edit.needsKey) config.apiKey = edit.apiKey ?? '';
-        else delete config.apiKey;
+        if (edit.keyField) {
+            if (edit.apiKey) config.apiKey = edit.apiKey;
+            else delete config.apiKey;
+        }
         next[name] = config;
     }
     return next;
@@ -188,22 +204,30 @@ function quotesCard(rerender) {
     const reads = [];
 
     for (const row of rows) {
-        if (row.needsKey) {
-            // Rendered with the stored key in it, so saving an untouched form
-            // keeps it. A field that rendered blank for secrecy would read back
-            // as "no key" and delete the provider on the next Save.
-            const key = ui.input(row.apiKey, { type: 'password', placeholder: 'API key' });
-            nodes.push(ui.field(`${row.label} API key`, key));
-            nodes.push(ui.el('p', 'wg-muted text-sm m-0', `${row.note} Blank turns it off.`));
-            reads.push(() => {
-                const apiKey = key.value.trim();
-                return { name: row.name, needsKey: true, enabled: apiKey !== '', apiKey };
-            });
-        } else {
-            const { node, input } = toggleControl(row.enabled, `Use ${row.label}`);
-            nodes.push(settingsRow(row.label, row.note, node));
-            reads.push(() => ({ name: row.name, needsKey: false, enabled: input.checked, apiKey: '' }));
+        // A provider that requires a key needs no switch — the key is the
+        // switch. Everything else gets an explicit one, which is also the only
+        // way to delete a provider this build no longer supports.
+        const toggle = row.needsKey ? null : toggleControl(row.enabled, `Use ${row.label}`);
+        if (toggle) nodes.push(settingsRow(row.label, row.note, toggle.node));
+
+        // Rendered with the stored key in it, so saving an untouched form keeps
+        // it. A field that rendered blank for secrecy would read back as "no
+        // key" and delete the credential on the next Save.
+        const key = row.keyField
+            ? ui.input(row.apiKey, { type: 'password', placeholder: toggle ? 'Optional key' : 'API key' })
+            : null;
+        if (key) {
+            nodes.push(ui.field(toggle ? `${row.label} key` : `${row.label} API key`, key));
+            nodes.push(ui.el('p', 'wg-muted text-sm m-0', toggle ? row.keyNote : row.note));
         }
+
+        reads.push(() => ({
+            name: row.name,
+            keyField: row.keyField,
+            // Only ever this row's own field, never another's.
+            apiKey: key ? key.value.trim() : '',
+            enabled: toggle ? toggle.input.checked : Boolean(key && key.value.trim()),
+        }));
     }
 
     const save = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Save providers', async () => {
