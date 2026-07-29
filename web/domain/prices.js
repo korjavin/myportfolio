@@ -73,16 +73,27 @@ export function createPricesDomain({ records }) {
   async function series(securityId, { from, to } = {}) {
     if (!securityId) return [];
     const chunks = (await records.list(RECORD.price)).filter((r) => r.securityId === securityId);
-    const out = [];
+
+    // ONE POINT PER DAY, first chunk in port order wins. Two chunks for the
+    // same security-year are reachable — ppimport.js mints
+    // `price_<hash>` and store.putPrice mints `price_<securityId>_<year>`, so
+    // importing a PP file and then typing a close by hand leaves both, which is
+    // why quotes.js has its own "lowest recordId wins" tiebreak. Appending both
+    // would put two points on one date and let the second decide the chart's
+    // latest close, while portfolio.js — which keeps the first close it sees at
+    // an equal date, off the same records.list order — values the holdings row
+    // off the other one. Same rule here, so the two never disagree.
+    const byDate = new Map();
     for (const { date, close } of eachClose(chunks)) {
       // String comparison is exact for zero-padded ISO days, which is why the
       // key validation above is not optional.
       if (from && date < from) continue;
       if (to && date > to) continue;
-      out.push({ date, close });
+      if (!byDate.has(date)) byDate.set(date, close);
     }
-    out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    return out;
+    return [...byDate.entries()]
+      .map(([date, close]) => ({ date, close }))
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   }
 
   return { series };

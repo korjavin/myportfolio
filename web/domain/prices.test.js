@@ -139,6 +139,24 @@ test('the last point agrees with the quote portfolio.js values the position at',
   assert.equal(last.close, position.price);
   assert.equal(last.close, 4200000000, 'a malformed key must not win the latest-close race in either reader');
 
+  // Two chunks for the same security-year, disagreeing about one day. This is
+  // reachable: ppimport.js mints price_<hash> for a security-year and
+  // store.putPrice mints price_<securityId>_<year>, so importing a PP file and
+  // then typing a close by hand leaves both behind (quotes.js carries its own
+  // tiebreak for exactly this). The chart must not draw two points on one date,
+  // and the one it treats as the latest must be the one the holdings row is
+  // valued at.
+  f.put('price', chunk('sec_1', '2024', { '01-02': 7777000000 }), 'price_pp_deadbeef');
+  const merged = await f.series('sec_1');
+  const mergedSnap = await f.snapshot();
+  assert.deepEqual(
+    merged.map((p) => p.date).filter((d) => d === '2024-01-02'),
+    ['2024-01-02'],
+    'a duplicated date must collapse to one point'
+  );
+  assert.equal(merged[merged.length - 1].close, mergedSnap.positions[0].price);
+  assert.equal(merged[merged.length - 1].date, mergedSnap.positions[0].priceDate);
+
   // And under a window: asOf and `to` must select the same close.
   const asOf = '2023-06-30';
   const clipped = await f.series('sec_1', { to: asOf });
