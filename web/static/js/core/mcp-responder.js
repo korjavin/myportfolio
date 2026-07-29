@@ -470,39 +470,57 @@ let electing = false;
 let releaseLock = null;
 let active = null; // { pairingId, responder }
 
-async function reconcile() {
-    if (!controllerRecords) {
-        if (active) { active.responder.stop(); active = null; }
-        return;
-    }
-    const records = controllerRecords;
-    const pairing = await readPairing(records);
-    const nextId = pairing ? pairing.pairingId : null;
-    if ((active && active.pairingId) === nextId) return; // unchanged
-    if (active) { active.responder.stop(); active = null; }
-    if (!pairing) return;
+function releaseElection() {
+    if (releaseLock) { releaseLock(); releaseLock = null; }
+    electing = false;
+}
 
-    const responder = createResponder({
-        pairingId: pairing.pairingId,
-        key: fromBase64(pairing.key),
-        run: createRunner({ records }),
-        onStalePairing: (code) => {
-            if (code === STATUS_PAIRING_REPLACED) {
-                // The account still HAS a pairing; the vault record names it, or
-                // will once this device syncs. Purging here would delete the live
-                // pairing on every synced device. Step aside instead: dropping the
-                // election lets the tab that re-paired — already queued on the
-                // lock — take over with the right key.
-                stopResponder();
-                return;
-            }
-            // 4404 only: no pairing at all. The record is a tombstone pointing at
-            // nothing, so it goes.
-            purgePairing(records).catch((e) => console.error('[mcp] pairing purge failed', e));
-        },
-    });
-    active = { pairingId: pairing.pairingId, responder };
-    responder.connect();
+async function reconcile() {
+    try {
+        if (!controllerRecords) {
+            if (active) { active.responder.stop(); active = null; }
+            return;
+        }
+        const records = controllerRecords;
+        const pairing = await readPairing(records);
+        const nextId = pairing ? pairing.pairingId : null;
+        if ((active && active.pairingId) === nextId) return; // unchanged
+        if (active) { active.responder.stop(); active = null; }
+        if (!pairing) return;
+
+        const responder = createResponder({
+            pairingId: pairing.pairingId,
+            key: fromBase64(pairing.key),
+            run: createRunner({ records }),
+            onStalePairing: (code) => {
+                if (code === STATUS_PAIRING_REPLACED) {
+                    // The account still HAS a pairing; the vault record names it, or
+                    // will once this device syncs. Purging here would delete the live
+                    // pairing on every synced device. Step aside instead: dropping the
+                    // election lets the tab that re-paired — already queued on the
+                    // lock — take over with the right key.
+                    stopResponder();
+                    return;
+                }
+                // 4404 only: no pairing at all. The record is a tombstone pointing at
+                // nothing, so it goes.
+                purgePairing(records).catch((e) => console.error('[mcp] pairing purge failed', e));
+            },
+        });
+        active = { pairingId: pairing.pairingId, responder };
+        responder.connect();
+    } catch (e) {
+        console.error('[mcp] responder reconcile failed', e);
+    } finally {
+        // NEVER hold the election with nothing to answer. Every user who has not
+        // run Connect Claude reaches this — the first tab to boot would win the
+        // lock, find no pairing, and squat it for the tab's lifetime with no
+        // record-change hook to reconcile again. A second tab that then paired
+        // would queue behind a no-op holder and no device leg would connect at
+        // all until someone reloaded. `finally`, not a line after the try, so the
+        // early returns above are covered too. Found by codex review.
+        if (!active) releaseElection();
+    }
 }
 
 /**
@@ -521,7 +539,7 @@ export function refreshResponder({ records }) {
         // browser without Web Locks gets one responder per tab, which the relay
         // resolves by evicting all but the newest; that is worse than an election
         // and better than no connector.
-        return reconcile().catch((e) => console.error('[mcp] responder reconcile failed', e));
+        return reconcile();
     }
     if (electing) return Promise.resolve(); // an election is in flight; its reconcile reads the latest port
     electing = true;
@@ -532,7 +550,9 @@ export function refreshResponder({ records }) {
     const reconciled = new Promise((resolve) => { settle = resolve; });
     navigator.locks.request('mcp-responder', () => new Promise((release) => {
         releaseLock = release;
-        settle(reconcile().catch((e) => console.error('[mcp] responder reconcile failed', e)));
+        // reconcile() never rejects and releases the lock itself when there is
+        // nothing to answer, so this promise can resolve before the tab dies.
+        settle(reconcile());
     })).catch((e) => {
         electing = false;
         console.error('[mcp] responder lock failed', e);
@@ -545,6 +565,5 @@ export function refreshResponder({ records }) {
 export function stopResponder() {
     controllerRecords = null;
     if (active) { active.responder.stop(); active = null; }
-    if (releaseLock) { releaseLock(); releaseLock = null; }
-    electing = false;
+    releaseElection();
 }

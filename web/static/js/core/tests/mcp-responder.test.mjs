@@ -532,6 +532,53 @@ describe('the Web Lock election', () => {
         }
     });
 
+    it('a tab with no pairing does not squat the election', async () => {
+        // Found by codex review. Every user who has not run Connect Claude
+        // reaches this: the first tab to boot wins the lock, finds no pairing,
+        // and — before the fix — held it for the tab's lifetime with no
+        // record-change hook to reconcile again. A second tab that then paired
+        // queued behind a no-op holder, so NO device leg connected at all.
+        const port = memoryPort();
+        let holders = 0;
+        let released = 0;
+        globalThis.navigator = {
+            locks: {
+                request(_, fn) {
+                    holders += 1;
+                    return Promise.resolve(fn()).then(() => { released += 1; });
+                },
+            },
+        };
+        globalThis.location = { protocol: 'https:', host: 'portfolio.example' };
+        const dialled = [];
+        globalThis.WebSocket = function (url) {
+            dialled.push(url);
+            return { readyState: 1, send() {}, close() {} };
+        };
+        try {
+            await R.refreshResponder({ records: port });
+            await new Promise((r) => setTimeout(r, 5));
+            assert.equal(released, 1, 'the lock must be handed back when there is nothing to answer');
+            assert.deepEqual(dialled, []);
+
+            // Now the pairing arrives (this tab pairs, or a sibling tab pairs and
+            // it syncs). The election must be winnable again — before the fix,
+            // `electing` stayed true and this call returned without doing
+            // anything at all.
+            await port.put(R.MCP_PAIRING_TYPE, R.MCP_PAIRING_ID, {
+                pairingId: 'p9', key: Buffer.from(KEY).toString('base64'),
+            });
+            await R.refreshResponder({ records: port });
+            assert.equal(holders, 2, 'the second election never ran');
+            assert.deepEqual(dialled, ['wss://portfolio.example/api/mcp/relay/device?pairing=p9']);
+        } finally {
+            R.stopResponder();
+            delete globalThis.navigator;
+            delete globalThis.location;
+            delete globalThis.WebSocket;
+        }
+    });
+
     it('with no pairing record it opens no socket at all', async () => {
         let dialled = 0;
         globalThis.WebSocket = function () { dialled += 1; return { readyState: 1, send() {}, close() {} }; };
