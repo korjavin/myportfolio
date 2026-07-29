@@ -35,6 +35,7 @@
 
 import { RECORD } from './schema.js';
 import { parseFixed, DECIMALS } from './money.js';
+import { CASH_SIGN } from './portfolio.js';
 
 // PP applied its share/quote precision migrations when loading a file at
 // version < 49 (ClientFactory.upgradeModel: shares 6->8 digits, quotes 4->8).
@@ -528,6 +529,14 @@ function importXml(text, options, report) {
     const shares = intOf(textOf(portfolioTx, 'shares', ctx), txLocation, 'shares', ctx);
     const secId = securityId(childNamed(portfolioTx, 'security', ctx));
     const acctId = accountId(cashAccount, 'cash');
+    // §4: a trade names both accounts — the cash one it settles on and the
+    // securities one the shares land in, which is what keys the position. PP's
+    // buysell cross-entry carries both, so nothing has to be inferred.
+    const pfId = accountId(childNamed(crossEntry, 'portfolio', ctx), 'securities');
+    if (!pfId) {
+      report.add('warning', 'pp_trade_unattributed', txLocation,
+        `${ppType} cross-entry names no securities account, so the position it moves cannot be attributed to one`);
+    }
     const note = textOf(portfolioTx, 'note', ctx);
     const { fees, taxes, fx } = unitsOf(portfolioTx, currency, txLocation);
 
@@ -539,7 +548,7 @@ function importXml(text, options, report) {
       return;
     }
 
-    const key = [ppType, acctId, secId, date, shares, amount, fees, taxes, currency, note ?? ''].join('|');
+    const key = [ppType, acctId, pfId ?? '', secId, date, shares, amount, fees, taxes, currency, note ?? ''].join('|');
     const recordId = txRecordId(portfolioTx, key);
     records.push({
       recordType: RECORD.transaction,
@@ -549,6 +558,7 @@ function importXml(text, options, report) {
       // <amount>, which is the whole reason import round-trips.
       type: ppType === 'BUY' ? 'buy' : 'sell',
       accountId: acctId,
+      ...(pfId ? { portfolioId: pfId } : {}),
       securityId: secId,
       date,
       shares,
@@ -803,16 +813,23 @@ const CSV_FIELDS = {
 const CSV_EXPORT_ORDER = ['date', 'type', 'value', 'currency', 'grossAmount', 'grossCurrency',
   'exchangeRate', 'fees', 'taxes', 'shares', 'isin', 'wkn', 'ticker', 'securityName', 'note'];
 
-// AccountTransaction.Type's isDebit flag, which is what the exporter uses to
-// sign the Value column of a *cash account* export. BUY/SELL are deliberately
-// absent: a securities-account export signs them the other way round
-// (isLiquidation, so a buy is positive), which is why direction is taken from
-// the type and never from the sign — see the Value handling below.
-const PP_DEBIT = {
-  REMOVAL: true, INTEREST_CHARGE: true, FEES: true, TAXES: true, TRANSFER_OUT: true,
-  DEPOSIT: false, INTEREST: false, DIVIDENDS: false, FEES_REFUND: false, TAX_REFUND: false,
-  TRANSFER_IN: false,
-};
+// Which way a PP cash-account row should move the balance — read off the engine's
+// own CASH_SIGN through the §4 type this importer maps to, rather than restated
+// here as PP's isDebit flag. Two copies of "which way does this type move cash"
+// drift, and the drift shows up as the importer booking the opposite sign from
+// the engine that folds its records.
+//
+// BUY/SELL fall out as null because they are not in ACCOUNT_TX_TYPES: a
+// securities-account export signs them the other way round (isLiquidation, so a
+// buy is positive), which is why direction is taken from the type and never from
+// the sign — see the Value handling below.
+function expectedCashSign(ppType) {
+  const mapping = ACCOUNT_TX_TYPES[ppType];
+  if (!mapping) return null;
+  // A `negate`d type is PP's sign-flipped twin (FEES_REFUND, TAX_REFUND,
+  // INTEREST_CHARGE): same §4 type, amount the other way, so cash too.
+  return CASH_SIGN[mapping.type] * (mapping.negate ? -1 : 1);
+}
 
 // Type column holds Type.toString(), i.e. the localised label from PP's
 // model/labels*.properties. English and German cover PP's two primary locales;
@@ -1026,6 +1043,31 @@ function importCsv(text, options, report) {
     return id;
   };
 
+  // PP's transaction export names no securities account either — one file per
+  // account, and the depot is not a column — but §4 keys a position by the
+  // securities account it sits in. So the file gets one, created on the first
+  // row that names a security and reported like the cash account above. Naming
+  // an account the export omits is a stated fact; deciding which of several
+  // depots a row belongs to would be a guess, and there is only ever one here.
+  let portfolioAccountId = null;
+  const portfolioRecordId = (currency, location) => {
+    if (portfolioAccountId) return portfolioAccountId;
+    const name = options.portfolioName ?? `${defaultAccountName} (securities)`;
+    portfolioAccountId = idHashed(RECORD.account, `csv-portfolio|${norm(name)}`);
+    records.push({
+      recordType: RECORD.account,
+      recordId: portfolioAccountId,
+      name,
+      kind: 'securities',
+      currency: currency ?? options.currency ?? null,
+      closed: false,
+    });
+    report.add('info', 'csv_no_portfolio_column', location,
+      "PP's transaction export does not name the securities account a trade settles into, so every position "
+      + `was booked to "${name}". Pass options.portfolioName to change it.`);
+    return portfolioAccountId;
+  };
+
   const securityIdByKey = new Map();
   const securityRecords = new Map();
   const securityRecordId = (isin, wkn, ticker, name, currency, location) => {
@@ -1192,7 +1234,7 @@ function importCsv(text, options, report) {
     // For the cash-account types the sign IS PP's own isDebit flag, so a
     // disagreement means the row is not what its Type column claims. Worth
     // saying; not worth overriding PP with.
-    const expectedSign = PP_DEBIT[ppType] === undefined ? null : (PP_DEBIT[ppType] ? -1 : 1);
+    const expectedSign = expectedCashSign(ppType);
     if (expectedSign !== null && signedValue !== 0 && Math.sign(signedValue) !== expectedSign) {
       report.add('info', 'csv_sign_mismatch', location,
         `Value ${cell(row, 'value')} runs the opposite way to a ${ppType}; imported by type, not by sign`, raw);
@@ -1208,7 +1250,7 @@ function importCsv(text, options, report) {
       recordId: idHashed(RECORD.transaction, n === 1 ? key : `${key}#${n}`),
       type: mapping.type,
       accountId: acctId,
-      ...(secId ? { securityId: secId } : {}),
+      ...(secId ? { securityId: secId, portfolioId: portfolioRecordId(currency, location) } : {}),
       date,
       ...(shares ? { shares } : {}),
       amount,

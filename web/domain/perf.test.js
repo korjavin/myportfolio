@@ -19,10 +19,15 @@ function fixture() {
 
 function basics(f, { currency = 'EUR' } = {}) {
   f.put('account', { name: 'Cash', kind: 'cash', currency }, 'acct_1');
+  // §4 keys a position by (accountId, securityId) where that accountId is the
+  // SECURITIES account — so a trade names the depot as well as the cash account
+  // it settles on. Nothing else in this file depends on it: a securities account
+  // holds no cash, so every balance and total below is unchanged.
+  f.put('account', { name: 'Depot', kind: 'securities', currency }, 'pf_1');
   f.put('security', { name: 'Acme', ticker: 'ACME', currency, assetClass: 'stock' }, 'sec_1');
 }
 
-const tx = (body) => ({ accountId: 'acct_1', currency: 'EUR', ...body });
+const tx = (body) => ({ accountId: 'acct_1', portfolioId: 'pf_1', currency: 'EUR', ...body });
 const eur = (x) => Math.round(x * 100);              // €        -> 1e2 units
 const sh = (x) => Math.round(x * 1e8);               // shares   -> 1e8 units
 const px = (x) => Math.round(x * 1e8);               // price    -> 1e8 units

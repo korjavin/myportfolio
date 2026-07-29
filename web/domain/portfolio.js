@@ -6,7 +6,7 @@
 // All arithmetic is on §5 fixed-point integers (amounts 1e2, shares 1e8,
 // prices 1e8). Nothing here returns a currency amount as a fractional number.
 
-import { RECORD, SETTINGS_ID } from './schema.js';
+import { RECORD, SETTINGS_ID, COST_BASIS_METHODS } from './schema.js';
 import { marketValue, proportion } from './money.js';
 
 // --- Semantics -------------------------------------------------------------
@@ -28,14 +28,33 @@ import { marketValue, proportion } from './money.js';
 //                       proceeds = amount + taxes   (sell) == gross - fees
 // while cash always moves by the full `amount`.
 //
-// Cost basis is moving-average (the bead's "average/moving" basis), matching
-// PP's moving-average purchase price. FIFO lot tracking is deferred; it changes
-// only the costRemoved computation below.
-// ponytail: moving-average basis only. Jurisdictions that require FIFO/LIFO for
-// realized gains need lot tracking — swap `proportion(...)` for a lot queue.
+// A POSITION IS KEYED BY (accountId, securityId) — §4. The securities account is
+// modelled, so the same ETF held at two brokers is two positions with a
+// portfolio-wide aggregate on top (`snapshot().securities`). Because §4's
+// `accountId` is the *cash* leg, a buy/sell names both accounts: `accountId` for
+// the money and `portfolioId` for where the shares land, and it is the latter
+// that keys the position. A trade that names only the cash account cannot be
+// attributed to a securities account, so it is surfaced (`missing_portfolio`)
+// and folded into an unattributed position rather than guessed onto one.
+//
+// Position identity is OPAQUE to callers: nothing outside this module may
+// rebuild a position key from a securityId, because a securityId no longer
+// identifies one position.
+//
+// LOTS ARE TRACKED ALWAYS. Each buy opens a lot (shares, cost, acquisition day)
+// and each sell consumes them oldest-first, whatever `settings.costBasisMethod`
+// says — the method (`fifo` | `moving_average`, default `fifo`) chooses only how
+// realized gain is *reported*. Tracking unconditionally is what makes the two
+// views agree, and it is not reversible: lots cannot be recovered from a
+// moving-average fold after the fact. FIFO is the default because it is what
+// most EU tax authorities require for declaring capital gains, and a merely
+// indicative number is the wrong default in a filing context.
 
 // Which way `amount` moves the account balance, for every §4 transaction type.
-const CASH_SIGN = {
+// Exported because it is the single definition of "which way does this type move
+// cash": ppimport.js reads it to check PP's own sign against ours. A second copy
+// drifts into the importer booking the opposite sign from the engine.
+export const CASH_SIGN = {
   buy: -1,
   sell: +1,
   dividend: +1,
@@ -49,6 +68,48 @@ const CASH_SIGN = {
 };
 
 const dayOf = (date) => String(date ?? '').slice(0, 10);
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// The same rule perf.js's dayMs() enforces, and deliberately not a second one:
+// a string that is not a real UTC calendar day is rejected, never rolled
+// forward. Date.UTC(2024, 1, 30) quietly becomes March 1, so round-tripping the
+// string is what catches it. An undated record used to slice to '' — sorting
+// before every real date and landing in EVERY snapshot including the opening
+// valuation — which made the portfolio wrong everywhere at once with nothing
+// looking broken.
+// ponytail: duplicated from perf.js rather than shared, because perf.js imports
+// portfolio.js and the shared home would be a third module. Fold them together
+// when a third caller needs it.
+function isCalendarDay(day) {
+  if (!DAY_RE.test(day)) return false;
+  const ms = Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)));
+  return new Date(ms).toISOString().slice(0, 10) === day;
+}
+
+// Consume `shares` oldest-first out of `lots`, returning the cost that left with
+// them. Partial consumption uses proportion(), which rounds once, so what leaves
+// and what stays still add up to the lot's cost exactly — and emptying the queue
+// removes every cent of basis, leaving no dust behind a closed position.
+function consumeLots(lots, shares) {
+  let want = shares;
+  let cost = 0;
+  while (want > 0 && lots.length > 0) {
+    const lot = lots[0];
+    if (lot.shares <= want) {
+      cost += lot.cost;
+      want -= lot.shares;
+      lots.shift();
+    } else {
+      const take = proportion(lot.cost, want, lot.shares);
+      cost += take;
+      lot.cost -= take;
+      lot.shares -= want;
+      want = 0;
+    }
+  }
+  return cost;
+}
 
 function byDateThenId(a, b) {
   const da = dayOf(a.date);
@@ -77,6 +138,16 @@ export function createPortfolioDomain({ records }) {
     const settings = settingsRecs.find((r) => r.recordId === SETTINGS_ID) || {};
     const reportingCurrency = settings.reportingCurrency || null;
 
+    // §4: the method chooses only how realized gain is reported. An unknown one
+    // is surfaced rather than silently read as the default, because the two
+    // methods give different gain numbers on the same records.
+    let costBasisMethod = settings.costBasisMethod ?? COST_BASIS_METHODS[0];
+    if (!COST_BASIS_METHODS.includes(costBasisMethod)) {
+      issue('unknown_cost_basis_method', SETTINGS_ID,
+        `costBasisMethod ${JSON.stringify(settings.costBasisMethod)} is not one of ${COST_BASIS_METHODS.join(', ')}; reporting ${COST_BASIS_METHODS[0]}`);
+      costBasisMethod = COST_BASIS_METHODS[0];
+    }
+
     const securities = new Map(securityRecs.map((s) => [s.recordId, s]));
 
     const accounts = new Map(accountRecs.map((a) => [a.recordId, {
@@ -88,13 +159,26 @@ export function createPortfolioDomain({ records }) {
       balance: 0,
     }]));
 
+    // Keyed by (accountId, securityId), where accountId is the SECURITIES
+    // account the shares live in (a transaction's `portfolioId`) and null means
+    // "no securities account was named". The key is built here and nowhere else;
+    // callers read `positions` as a list.
     const positions = new Map();
-    const position = (securityId) => {
-      let p = positions.get(securityId);
+    // NUL separates the two ids because both are opaque strings (§4): any
+    // printable separator could occur inside one, and then "a|b" + "c" and "a" +
+    // "b|c" would collide into a single holding.
+    const positionKey = (accountId, securityId) => `${accountId ?? ''}\u0000${securityId}`;
+    const position = (accountId, securityId) => {
+      const key = positionKey(accountId, securityId);
+      let p = positions.get(key);
       if (!p) {
         const sec = securities.get(securityId);
         if (!sec) issue('unknown_security', securityId, `no security record ${securityId}`);
+        const acct = accountId === null ? null : accounts.get(accountId);
+        if (accountId !== null && !acct) issue('unknown_account', accountId, `no account record ${accountId}`);
         p = {
+          accountId: accountId ?? null,
+          accountName: acct?.name ?? null,
           securityId,
           name: sec?.name ?? null,
           ticker: sec?.ticker ?? null,
@@ -102,15 +186,37 @@ export function createPortfolioDomain({ records }) {
           currency: sec?.currency ?? null,
           assetClass: sec?.assetClass ?? null,
           shares: 0,      // 1e8
-          cost: 0,        // 1e2 — moving-average basis of the shares still held
+          cost: 0,        // 1e2 — basis of the shares still held, per costBasisMethod
           realized: 0,    // 1e2
           dividends: 0,   // 1e2
           fees: 0,        // 1e2
           taxes: 0,       // 1e2
+          // Acquisition lots, oldest first: { date, shares (1e8), cost (1e2) }.
+          // Tracked whatever the reporting method is — see the header.
+          lots: [],
         };
-        positions.set(securityId, p);
+        positions.set(key, p);
       }
       return p;
+    };
+
+    // A dividend, or a fee or tax booked against a security, names the cash
+    // account it settled on — Portfolio Performance's own model has no depot on
+    // one either. So it cannot be keyed to a securities account up front, and
+    // guessing one mid-fold would depend on record order. Collected here and
+    // attributed after the fold, where the security's positions are all known:
+    // if exactly one position holds it there is no ambiguity, and if there are
+    // several the extras land in the unattributed position rather than being
+    // split by a rule nobody chose.
+    const unattributed = [];
+    const add = (p, { dividends = 0, fees = 0, taxes = 0 }) => {
+      p.dividends += dividends;
+      p.fees += fees;
+      p.taxes += taxes;
+    };
+    const attribute = (tx, extras) => {
+      if (tx.portfolioId) add(position(tx.portfolioId, tx.securityId), extras);
+      else unattributed.push({ securityId: tx.securityId, extras });
     };
 
     // A fractional amount reaching the engine means a float leaked into a money
@@ -128,7 +234,17 @@ export function createPortfolioDomain({ records }) {
     const mixedCurrencies = new Set();
 
     for (const tx of txRecs.slice().sort(byDateThenId)) {
-      if (asOf && dayOf(tx.date) > asOf) continue;
+      const day = dayOf(tx.date);
+      // Nothing without a real calendar day is folded at all — not into cash,
+      // not into a position, not into any snapshot. It cannot be placed in time,
+      // and an unplaceable record that is folded anyway lands in every snapshot
+      // including the opening valuation. Same code perf.js already raises.
+      if (!isCalendarDay(day)) {
+        issue('undated_transaction', tx.recordId,
+          `transaction date ${JSON.stringify(tx.date)} is not a YYYY-MM-DD day`);
+        continue;
+      }
+      if (asOf && day > asOf) continue;
 
       const sign = CASH_SIGN[tx.type];
       if (sign === undefined) {
@@ -172,7 +288,16 @@ export function createPortfolioDomain({ records }) {
           issue('missing_security', tx.recordId, `${tx.type} has no securityId`);
           continue;
         }
-        const p = position(tx.securityId);
+        // §4: a buy/sell names both accounts. Without `portfolioId` the shares
+        // cannot be attributed to a securities account, and picking one would
+        // invent a holding at a broker the record never mentions — so it is
+        // surfaced and the position is held unattributed (accountId null). The
+        // cash leg above still stands: that money really did move.
+        if (!tx.portfolioId) {
+          issue('missing_portfolio', tx.recordId,
+            `${tx.type} names no portfolioId, so the securities account its shares land in is unknown`);
+        }
+        const p = position(tx.portfolioId ?? null, tx.securityId);
         const shares = units(tx, 'shares');
         if (shares <= 0) {
           // Direction comes from the type, so `shares` is always a positive
@@ -186,10 +311,15 @@ export function createPortfolioDomain({ records }) {
         }
 
         if (tx.type === 'buy') {
+          const lotCost = amount - taxes; // gross + fees
           p.shares += shares;
-          p.cost += amount - taxes; // gross + fees
+          p.cost += lotCost;
+          p.lots.push({ date: day, shares, cost: lotCost });
         } else {
           const proceeds = amount + taxes; // gross - fees
+          // Lots are consumed oldest-first under both methods; only the number
+          // reported as removed basis differs.
+          const lotCost = consumeLots(p.lots, shares);
           let costRemoved;
           if (p.shares <= 0) {
             // Selling shares we have no record of buying. Surfaced, not clamped:
@@ -202,9 +332,14 @@ export function createPortfolioDomain({ records }) {
             issue('oversell', tx.recordId,
               `sell of ${shares} exceeds ${p.shares} held for ${tx.securityId}`);
             costRemoved = p.cost;
+          } else if (costBasisMethod === 'fifo') {
+            // The oldest lots' own cost, so a full exit removes exactly what the
+            // lots carried and leaves no dust.
+            costRemoved = lotCost;
           } else {
             // Moving average. proportion(cost, shares, held) === cost when the
-            // whole position goes, so a full exit leaves no rounding dust.
+            // whole position goes, so a full exit leaves no rounding dust here
+            // either.
             costRemoved = proportion(p.cost, shares, p.shares);
           }
           p.shares -= shares;
@@ -223,10 +358,7 @@ export function createPortfolioDomain({ records }) {
           issue('missing_security', tx.recordId, 'dividend has no securityId');
           continue;
         }
-        const p = position(tx.securityId);
-        p.dividends += amount;
-        p.fees += fees;
-        p.taxes += taxes;
+        attribute(tx, { dividends: amount, fees, taxes });
         continue;
       }
 
@@ -234,26 +366,35 @@ export function createPortfolioDomain({ records }) {
       // Attributed to a security when one is named, so a custody fee on a holding
       // shows up against it, but never capitalised into the basis.
       if (tx.type === 'fee' || tx.type === 'tax') {
-        const p = tx.securityId ? position(tx.securityId) : null;
-        if (p) p[tx.type === 'fee' ? 'fees' : 'taxes'] += amount;
+        if (tx.securityId) {
+          attribute(tx, tx.type === 'fee' ? { fees: amount } : { taxes: amount });
+        }
         continue;
       }
 
       // deposit / removal / interest / transfer_*: cash only, already applied.
       // Any fees or taxes broken out on them are still reported.
-      if (tx.securityId) {
-        const p = position(tx.securityId);
-        p.fees += fees;
-        p.taxes += taxes;
-      }
+      if (tx.securityId) attribute(tx, { fees, taxes });
+    }
+
+    for (const { securityId, extras } of unattributed) {
+      const held = [...positions.values()].filter((p) => p.securityId === securityId);
+      // One position holding the security is not a guess — it is the only place
+      // the income can have come from. Several, and the record does not say
+      // which, so it goes to the unattributed position of that security.
+      add(held.length === 1 ? held[0] : position(null, securityId), extras);
     }
 
     const quotes = latestCloses(priceRecs, asOf, issue);
 
+    // A close belongs to the security, so it is missing for every position
+    // holding it at once — said once rather than once per broker.
+    const unpriced = new Set();
     for (const p of positions.values()) {
       const quote = quotes.get(p.securityId);
       if (!quote) {
-        if (p.shares !== 0) {
+        if (p.shares !== 0 && !unpriced.has(p.securityId)) {
+          unpriced.add(p.securityId);
           issue('no_price', p.securityId, `no price record for ${p.securityId}${asOf ? ` on or before ${asOf}` : ''}`);
         }
         p.price = null;
@@ -268,8 +409,13 @@ export function createPortfolioDomain({ records }) {
       p.unrealized = p.marketValue - p.cost;
     }
 
-    const positionList = [...positions.values()]
-      .sort((a, b) => String(a.name ?? a.securityId).localeCompare(String(b.name ?? b.securityId)));
+    const label = (p) => String(p.name ?? p.securityId);
+    const positionList = [...positions.values()].sort((a, b) => (
+      label(a).localeCompare(label(b))
+      // Two brokers holding the same security are adjacent and in a stable
+      // order, rather than in whichever order their first trade folded.
+      || String(a.accountName ?? a.accountId ?? '').localeCompare(String(b.accountName ?? b.accountId ?? ''))
+    ));
     const accountList = [...accounts.values()]
       .sort((a, b) => String(a.name ?? a.accountId).localeCompare(String(b.name ?? b.accountId)));
 
@@ -277,10 +423,51 @@ export function createPortfolioDomain({ records }) {
     const cash = sum(accountList, 'balance');
     const value = sum(positionList, 'marketValue');
 
+    // The portfolio-wide view of a security: the same ETF at two brokers is two
+    // positions and one of these. Shares, basis and gains add up; the quote is
+    // the security's own, so `marketValue` is null exactly when every position
+    // holding it is unvalued.
+    const securityList = [];
+    const bySecurity = new Map();
+    for (const p of positionList) {
+      let s = bySecurity.get(p.securityId);
+      if (!s) {
+        s = {
+          securityId: p.securityId,
+          name: p.name,
+          ticker: p.ticker,
+          isin: p.isin,
+          currency: p.currency,
+          assetClass: p.assetClass,
+          accountIds: [],
+          shares: 0,
+          cost: 0,
+          realized: 0,
+          dividends: 0,
+          fees: 0,
+          taxes: 0,
+          price: p.price,
+          priceDate: p.priceDate,
+          marketValue: p.marketValue === null ? null : 0,
+          unrealized: p.unrealized === null ? null : 0,
+        };
+        bySecurity.set(p.securityId, s);
+        securityList.push(s);
+      }
+      s.accountIds.push(p.accountId);
+      for (const k of ['shares', 'cost', 'realized', 'dividends', 'fees', 'taxes']) s[k] += p[k];
+      if (s.marketValue !== null) {
+        s.marketValue += p.marketValue;
+        s.unrealized += p.unrealized;
+      }
+    }
+
     return {
       asOf: asOf ?? null,
       reportingCurrency,
+      costBasisMethod,
       positions: positionList,
+      securities: securityList,
       accounts: accountList,
       issues,
       totals: {

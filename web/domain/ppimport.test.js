@@ -29,7 +29,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { parsePP, batches } from './ppimport.js';
-import { createPortfolioDomain } from './portfolio.js';
+import { createPortfolioDomain, CASH_SIGN } from './portfolio.js';
 
 const fixture = (name) => readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8');
 
@@ -131,32 +131,48 @@ test('XML: amounts, shares and fees arrive as the file\'s own integers', () => {
   // account `amount` moves on".
   const cashId = ofType(records, 'account').find((a) => a.name === 'Konto').recordId;
   assert.ok(trades.every((t) => t.accountId === cashId));
+  // …and names the securities account its shares land in as well, which is the
+  // other half of §4's position key. PP's buysell cross-entry carries both, so
+  // the depot is read out of the file rather than inferred.
+  const depot = (name) => ofType(records, 'account').find((a) => a.name === name).recordId;
+  assert.deepEqual(trades.map((t) => t.portfolioId), [
+    depot('Depot 1'), depot('Depot 2'), depot('Depot 1'), depot('Depot 2'), depot('Depot 4'),
+  ]);
   assert.equal(trades[4].note, 'buy-in should be 1000');
   assert.ok(trades.every((t) => Number.isSafeInteger(t.amount) && Number.isSafeInteger(t.shares)));
 });
 
 test('XML: the imported portfolio matches the source portfolio', async () => {
-  const { records } = parsePP(fixture('Issue4446FIFOMultipleTransfers.xml'));
+  const { records, report } = parsePP(fixture('Issue4446FIFOMultipleTransfers.xml'));
   const port = fakeRecords();
   await applyAll(records, port);
   const snapshot = await createPortfolioDomain({ records: port }).snapshot();
 
-  // Per-security share total: 5 + 5 + 5 + 5 - 10 = 10 shares (1e8 scale).
-  assert.equal(snapshot.positions.length, 1);
-  assert.equal(snapshot.positions[0].shares, 10 * 1e8);
+  // Per-security share total: 5 + 5 + 5 + 5 - 10 = 10 shares (1e8 scale). That
+  // is the portfolio-wide view; §4 keys the holdings themselves by the depot
+  // they sit in, and this file uses four.
+  assert.equal(snapshot.securities.length, 1);
+  assert.equal(snapshot.securities[0].shares, 10 * 1e8);
 
   // Cash: -500 -500 -1000 -1000 +3000 = 0.00 on "Konto", nothing anywhere else.
   const konto = snapshot.accounts.find((a) => a.name === 'Konto');
   assert.equal(konto.balance, 0);
   assert.equal(snapshot.totals.cash, 0);
 
-  // Moving-average basis: 3000.00 bought, half the position sold.
-  assert.equal(snapshot.positions[0].cost, 150000);
-  assert.equal(snapshot.positions[0].realized, 150000);
-
-  // The engine's only complaint is the missing price feed — no unknown types,
-  // no dangling accounts, no non-integer units.
-  assert.deepEqual([...new Set(snapshot.issues.map((i) => i.code))], ['no_price']);
+  // And here is what a depot-keyed fold makes visible that a security-keyed one
+  // hid: this file only balances because it moves shares between depots, and §4
+  // cannot carry a cost basis across that move (myportfolio-g7e.10), so the
+  // importer refuses the six transfer legs. Depot 4 therefore sells shares it
+  // was never seen to receive — an oversell, said out loud, rather than a
+  // plausible-looking basis silently borrowed from a different broker.
+  assert.deepEqual(snapshot.positions.map((p) => [p.accountName, p.shares, p.cost, p.realized]), [
+    ['Depot 1', 10 * 1e8, 150000, 0],
+    ['Depot 2', 10 * 1e8, 150000, 0],
+    ['Depot 4', -10 * 1e8, 0, 300000],
+  ]);
+  assert.deepEqual([...new Set(snapshot.issues.map((i) => i.code))], ['oversell', 'no_price']);
+  assert.ok(report.entries.some((e) => e.code === 'security_transfer_unsupported'),
+    'the import report already named the reason');
 });
 
 test('XML: re-importing the same file produces zero new records', async () => {
@@ -182,7 +198,7 @@ test('XML: re-importing the same file produces zero new records', async () => {
   // ...and the portfolio is unchanged, which is the thing the user would
   // actually notice if idempotency were broken.
   const snapshot = await createPortfolioDomain({ records: port }).snapshot();
-  assert.equal(snapshot.positions[0].shares, 10 * 1e8);
+  assert.equal(snapshot.securities[0].shares, 10 * 1e8);
   assert.equal(snapshot.totals.cash, 0);
 });
 
@@ -223,14 +239,18 @@ test('XML: a larger real file reconciles against the raw source text', async () 
   assert.equal(closes, rawCloses);
   assert.ok(prices.length < 10, `expected chunking, got ${prices.length} price records for ${closes} closes`);
 
-  // And the engine folds it with no complaints at all: every account resolved,
-  // every unit an integer, the position priced.
+  // And the engine folds it cleanly: every account resolved, every unit an
+  // integer, the holding priced. The one complaint is the same §4 gap as the
+  // smaller file — this portfolio moved its shares from one depot to the other,
+  // that transfer is not representable (myportfolio-g7e.10) and so was not
+  // imported, and the depot that sold them is short by exactly that transfer.
   const port = fakeRecords();
   await applyAll(records, port);
   const snapshot = await createPortfolioDomain({ records: port }).snapshot();
-  assert.deepEqual(snapshot.issues, []);
-  assert.equal(snapshot.positions.length, 1);
-  assert.ok(snapshot.positions[0].shares > 0);
+  assert.deepEqual([...new Set(snapshot.issues.map((i) => i.code))], ['oversell']);
+  assert.equal(snapshot.securities.length, 1);
+  assert.equal(snapshot.positions.length, 2, 'two depots, so two holdings of the one security');
+  assert.ok(snapshot.securities[0].shares > 0);
   assert.ok(snapshot.totals.marketValue > 0);
   assert.ok(Number.isSafeInteger(snapshot.totals.total));
 });
@@ -587,6 +607,71 @@ test('CSV: a file that is not a transaction export is refused with a reason', ()
   assert.deepEqual(records, []);
   assert.equal(report.ok, false);
   assert.match(report.entries[0].message, /transaction export/);
+});
+
+test('CSV: trades land in a securities account, because §4 keys a position by one', async () => {
+  const { records, report } = parsePP(CSV_EN, { accountName: 'Broker' });
+
+  const depot = ofType(records, 'account').find((a) => a.kind === 'securities');
+  assert.equal(depot.name, 'Broker (securities)', 'named after the file, since the export does not name one');
+  // Every row that names a security says which securities account it sits in;
+  // the cash-only rows do not invent one.
+  const tx = ofType(records, 'transaction');
+  assert.deepEqual(tx.map((t) => [t.type, t.portfolioId ?? null]), [
+    ['buy', depot.recordId],
+    ['deposit', null],
+    ['dividend', depot.recordId],
+    ['sell', depot.recordId],
+  ]);
+  // A created account is a stated fact, not a silent one.
+  assert.ok(codes(report).includes('csv_no_portfolio_column'));
+
+  // …and the engine therefore folds one attributed holding, with no complaint
+  // about an unattributed trade.
+  const port = fakeRecords();
+  await applyAll(records, port);
+  const snapshot = await createPortfolioDomain({ records: port }).snapshot();
+  const position = snapshot.positions[0];
+  assert.equal(snapshot.positions.length, 1);
+  assert.equal(position.accountId, depot.recordId);
+  assert.equal(position.shares, 5 * 1e8);
+  assert.equal(position.dividends, 2500);
+  assert.ok(!snapshot.issues.some((i) => i.code === 'missing_portfolio'));
+});
+
+test('CSV: the sign PP gives a row is checked against the engine\'s own CASH_SIGN', () => {
+  // Not a second table: ppimport reads portfolio.js's CASH_SIGN through the §4
+  // type it maps to, so the importer cannot come to book a type the other way
+  // round from the engine that folds it.
+  const row = (label, value) => [CSV_EN_HEADER,
+    `2020-11-02T00:00,${label},"${value}",EUR,,,,,,,,,,,`].join('\r\n');
+  const cases = [
+    ['Deposit', 'deposit', +1], ['Withdrawal', 'removal', -1],
+    ['Interest', 'interest', +1], ['Interest charge', 'interest', -1],
+    ['Fees', 'fee', -1], ['Fees refund', 'fee', +1],
+    ['Taxes', 'tax', -1], ['Tax refund', 'tax', +1],
+  ];
+
+  for (const [label, type, sign] of cases) {
+    // PP signs the Value column by its own isDebit flag, which must be the same
+    // direction CASH_SIGN gives the §4 type the row maps to.
+    const agreeing = parsePP(row(label, sign > 0 ? '100.00' : '-100.00'));
+    const tx = ofType(agreeing.records, 'transaction')[0];
+    assert.equal(tx.type, type, label);
+    assert.equal(CASH_SIGN[tx.type] * Math.sign(tx.amount), sign, `${label} moves cash the wrong way`);
+    assert.ok(!codes(agreeing.report).includes('csv_sign_mismatch'), `${label} should not look mismatched`);
+
+    // Flip PP's own sign and the disagreement is reported, not silently obeyed.
+    const flipped = parsePP(row(label, sign > 0 ? '-100.00' : '100.00'));
+    assert.ok(codes(flipped.report).includes('csv_sign_mismatch'), `${label} reversed should be reported`);
+    assert.equal(ofType(flipped.records, 'transaction')[0].amount, tx.amount,
+      `${label} is imported by type, not by sign`);
+  }
+
+  // BUY/SELL are excluded on purpose: a securities-account export signs them the
+  // other way round, so their direction can only come from the type.
+  const buy = parsePP(row('Buy', '500.00'));
+  assert.ok(!codes(buy.report).includes('csv_sign_mismatch'));
 });
 
 // ---------------------------------------------------------------------------
