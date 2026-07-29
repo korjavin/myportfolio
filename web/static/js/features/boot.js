@@ -16,7 +16,7 @@
 
 import { renderScreen, resolveScreenId, screenTitle } from './screens.js';
 import { refresh, subscribe, useRecords } from './store.js';
-import { db } from '../core/localdb.js';
+import { db, openMirror, openSyncMeta } from '../core/localdb.js';
 import { startSync, watchFocus, subscribeSync, syncState, describeSync } from './sync.js';
 import { syncNotice } from './ui.js';
 
@@ -171,9 +171,7 @@ render(false);
 window.addEventListener('hashchange', () => render(true));
 
 // All of these are deliberately after the first paint: the shell must be on
-// screen before either the database or the network is touched. refresh() cannot
-// reject — it records the failure on state.error and the screens render it.
-refresh();
+// screen before either the database or the network is touched.
 registerServiceWorker();
 
 subscribeSync(paintNotice);
@@ -188,9 +186,21 @@ window.addEventListener('offline', paintNotice);
 // and then pulls. That first pull is also the signup migration: with no blob on
 // the server yet, the union of local and remote is the whole offline-built
 // portfolio, so it uploads intact.
-startSync({ db, adopt: useRecords, onRecords: refresh }).catch((err) => {
+//
+// It also picks the DATABASE. `db` is the pre-signup mirror; openMirror gives an
+// unlocked account its own namespaced one and moves any pre-signup rows into it,
+// so two accounts can share a browser profile without either seeing the other's
+// records (bd myportfolio-18h.12). The first refresh() is startSync's job for
+// the same reason — it fires through onRecords the moment that choice is made,
+// and refreshing before it would paint the empty pre-signup mirror over a
+// signed-in user's portfolio. refresh() cannot reject: it records the failure on
+// state.error and the screens render it.
+startSync({ db, openMirror, openMeta: openSyncMeta, adopt: useRecords, onRecords: refresh }).catch((err) => {
     // startSync reports its own failures through describeSync; anything that
-    // escapes it is a bug in this file, not a sync state.
+    // escapes it is a bug in this file, not a sync state. The screens still have
+    // to come off "Opening your portfolio…" — a shell that never paints because
+    // the sync wiring threw is worse than one with no sync.
     console.error('boot: sync wiring failed', err);
+    refresh();
 });
 watchFocus({ onRecords: refresh });
