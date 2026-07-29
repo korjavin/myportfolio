@@ -118,12 +118,26 @@ async function pull(onRecords) {
 }
 
 /**
- * Choose the port implementation and hand it to the store.
+ * Choose the port implementation — and, now, the database it reads — and hand
+ * it to the store.
  *
- * `adopt` is only ever called with a vault that OPENED. A device that fails the
- * §3 one-vault-per-profile guard keeps serving its records from localRecords —
- * unsynced, intact, and loudly flagged — rather than uploading them into
- * somebody else's vault.
+ * `adopt` is only ever called with a vault that OPENED. A device that fails
+ * state-sync's wrong-account backstop keeps serving its records from
+ * localRecords — unsynced, intact, and loudly flagged — rather than uploading
+ * them into somebody else's vault.
+ *
+ * `db` is the PRE-SIGNUP mirror: what a user with no account has been typing
+ * into. Which database an account actually reads is `openMirror(accountId, db)`,
+ * and where its sync metadata lives is `openMeta(accountId)` — both supplied by
+ * the caller, because storage names belong to localdb.js and this file stays
+ * importable under `node --test` with no browser (bd myportfolio-18h.12).
+ * The defaults are the un-namespaced behaviour, which is what the doubles in the
+ * tests want; boot.js passes the real ones.
+ *
+ * `onRecords` is called as soon as the port is settled, on EVERY exit path,
+ * before any network. The store starts on the pre-signup mirror, so re-deriving
+ * the screens before this decision would paint an empty portfolio over a
+ * signed-in user's real one until the vault opened.
  */
 export async function startSync({
     db,
@@ -131,6 +145,8 @@ export async function startSync({
     onRecords = () => {},
     warm = tryWarmUnlock,
     create = createVaultRecords,
+    openMirror = async (_accountId, mirror) => mirror,
+    openMeta = () => undefined,
     now = Date.now,
     ...options
 } = {}) {
@@ -153,20 +169,29 @@ export async function startSync({
         // left is the device database itself being unavailable.
         fatal = err;
         emit();
+        await onRecords();
         return null;
     }
     // No vault on this device. localRecords stays, and the app is complete
     // without it (§3) — this is not an error state and must not read as one.
     if (!ctx) {
         emit();
+        await onRecords();
         return null;
     }
 
     try {
+        // The account's own mirror, with anything typed before signup migrated
+        // into it. Opening it can fail (private browsing, a blocked upgrade) and
+        // that failure belongs in the same place as a vault that would not open:
+        // the app keeps serving the pre-signup mirror rather than syncing rows
+        // it cannot vouch for.
+        const mirror = await openMirror(ctx.accountId, db);
         vault = await create({
-            db,
+            db: mirror,
             dek: ctx.dek,
             accountId: ctx.accountId,
+            meta: openMeta(ctx.accountId),
             onStatus,
             now,
             ...options,
@@ -174,15 +199,22 @@ export async function startSync({
     } catch (err) {
         // 'wrong-account' lands here: state-sync claims the mirror before it
         // touches the wire, precisely so a vault used entirely offline still
-        // trips the guard.
+        // trips the guard. Per-account mirrors make it unreachable in normal
+        // use; it stays as the backstop for the case they do not cover, a mirror
+        // this build did not name.
         fatal = err;
         emit();
+        await onRecords();
         return null;
     }
 
     accountId = ctx.accountId;
     adopt(vault);
     emit();
+    // The port is settled: paint what is already in this account's mirror before
+    // going near the network, so an offline launch shows the portfolio rather
+    // than waiting out a pull that is going to fail.
+    await onRecords();
     await pull(onRecords);
     return vault;
 }
