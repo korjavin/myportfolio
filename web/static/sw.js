@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v7';
+const CACHE_VERSION = 'v9';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -98,6 +98,7 @@ const PRECACHE = [
     // missing, which is worse than not painting at all.
     '/domain/schema.js',
     '/domain/money.js',
+    '/domain/fx.js',
     '/domain/portfolio.js',
     '/domain/perf.js',
     '/domain/prices.js',

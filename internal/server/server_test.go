@@ -177,17 +177,24 @@ func cspDirective(csp, name string) string {
 	return ""
 }
 
-// A9. connect-src is derived from quotes.js's exported QUOTE_HOSTS, so it
-// cannot drift out of sync with what the client actually fetches — there is one
-// list, not two. The flip side is that editing that map silently changes what
-// this origin is allowed to talk to, so this pin is the human gate: every host
-// here is one more place an on-origin XSS could post a decrypted portfolio, and
-// widening the set has to be typed twice, on purpose. This test failing means
-// either QUOTE_HOSTS changed (agree with it, then update the pin) or the
-// derivation stopped matching the file (fix the derivation — quotes are inert
-// without it, which is the bug A9 exists to fix).
+// A9. connect-src is derived from quotes.js's exported QUOTE_HOSTS and fx.js's
+// exported FX_HOSTS, so it cannot drift out of sync with what the client
+// actually fetches — there is one list per module, not a second copy in Go. The
+// flip side is that editing either map silently changes what this origin is
+// allowed to talk to, so this pin is the human gate: every host here is one
+// more place an on-origin XSS could post a decrypted portfolio, and widening
+// the set has to be typed twice, on purpose. This test failing means either a
+// host map changed (agree with it, then update the pin) or the derivation
+// stopped matching a file (fix the derivation — the fetcher is inert without
+// it, which is the bug A9 exists to fix, and myportfolio-53h is the second time
+// it shipped).
+//
+// The ECB host was added on myportfolio-53h, deliberately: FX_HOSTS shipped in
+// B8 with nothing deriving from it, so createFxDomain().refresh() could only
+// ever report fetch_failed in a real browser. Three hosts is the budget now; a
+// fourth still reds this test until someone types it.
 func TestQuoteHostAllowlist(t *testing.T) {
-	const want = "'self' https://api.coingecko.com https://api.twelvedata.com"
+	const want = "'self' https://api.coingecko.com https://api.twelvedata.com https://data-api.ecb.europa.eu"
 
 	h := newTestServer(t)
 	for _, path := range cspRoutes {

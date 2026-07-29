@@ -51,6 +51,19 @@
       <button type="button" id="update-dismiss" class="wg-toolbar-btn wg-toolbar-btn--secondary">Later</button>
     </div>
 
+    <!-- Demo-mode honesty label (bd myportfolio-cnd.1). Fabricated financial
+         data shown without a label is what gets screenshotted out of context,
+         so this is persistent, sits above every screen, and has no dismiss
+         button on purpose. Unhidden by js/features/boot.js under ?demo=1.
+
+         The exit link is "./" rather than "/": architecture.asset-paths
+         resolves every rooted href against the embedded tree and "/" is a
+         directory, not a file. "./" reaches the same page and drops the query. -->
+    <div id="demo-banner" class="wg-demo-banner hidden" role="status">
+      <span class="wg-demo-banner__text">Demo portfolio — the data below is made up.</span>
+      <a class="wg-toolbar-btn wg-toolbar-btn--secondary" href="./">Exit demo</a>
+    </div>
+
     <div id="app">
       <!-- Screens sit directly on the stage: no section-header banner, the
            active bottom-nav pill is the sole screen indicator (§9). -->
