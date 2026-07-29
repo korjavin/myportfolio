@@ -9,7 +9,7 @@
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import {
-    buildTxBody, emptyTxForm, txToForm,
+    buildTxBody, emptyTxForm, txToForm, defaultPortfolioId,
     SECURITY_TYPES, SHARE_TYPES,
 } from './forms.js';
 import { TX_TYPES, RECORD } from '../../../domain/schema.js';
@@ -112,9 +112,11 @@ export function openTxModal(record, defaults) {
         label: 'Securities account (shares land here)',
         noun: 'depot',
         options: depotOptions,
-        // A stored portfolioId always wins over the default. One depot is not a
-        // guess — it is the only place the shares can be — while two would be.
-        value: values.portfolioId || (depots.length === 1 ? depots[0].recordId : ''),
+        value: defaultPortfolioId({
+            stored: values.portfolioId,
+            depotIds: depots.map((a) => a.recordId),
+            editing,
+        }),
     });
     const security = entityPicker({
         label: 'Security',

@@ -24,7 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-    buildTxBody, txToForm, emptyTxForm, todayLocal, buildPriceChunk,
+    buildTxBody, txToForm, emptyTxForm, todayLocal, buildPriceChunk, defaultPortfolioId,
     SECURITY_TYPES, SHARE_TYPES, SIGNED_TYPES,
 } from '../features/forms.js';
 
@@ -259,6 +259,29 @@ describe('forms — §4 validation', () => {
     });
 });
 
+describe('forms — which depot a form opens on', () => {
+    test('a new transaction prefills the only securities account, and never one of two', () => {
+        assert.equal(defaultPortfolioId({ depotIds: ['d1'] }), 'd1');
+        assert.equal(defaultPortfolioId({ depotIds: ['d1', 'd2'] }), '');
+        assert.equal(defaultPortfolioId({ depotIds: [] }), '');
+    });
+
+    test('a stored value wins over the prefill, in both directions', () => {
+        assert.equal(defaultPortfolioId({ stored: 'd2', depotIds: ['d1'] }), 'd2');
+        assert.equal(defaultPortfolioId({ stored: 'd2', depotIds: ['d1'], editing: true }), 'd2');
+    });
+
+    test('an edit never invents a depot the record did not have', () => {
+        // Found by codex review. `portfolioId` is optional on a dividend, so
+        // prefilling the only depot when editing means pressing Save on an
+        // untouched imported record writes an attribution the user never made
+        // — and portfolio.js then books the income to a freshly created
+        // zero-share position at that depot instead of to the position that
+        // actually holds the shares. A no-op save must move nothing.
+        assert.equal(defaultPortfolioId({ stored: '', depotIds: ['d1'], editing: true }), '');
+    });
+});
+
 describe('forms — form defaults', () => {
     test('todayLocal reads the LOCAL calendar day, not the UTC one', () => {
         // 2024-03-15T23:30 local is 2024-03-16 UTC in a positive-offset zone.
@@ -420,5 +443,25 @@ describe('forms — the render boundary stays one-way', () => {
             '§4: a buy/sell names both accounts, so the transaction body handed to '
             + `buildTxBody must carry portfolioId: ${offenders.join(', ')}`
         );
+    });
+
+    test('defaultPortfolioId is always told whether the form is an edit', () => {
+        // The prefill is only safe on a new transaction (see the unit tests
+        // above). A call site that omits `editing` silently gets the new-form
+        // behaviour on an edit, which writes a depot the record never had —
+        // and that lives in the same DOM-bound handler, out of reach of a
+        // behavioural test.
+        const dir = path.join(REPO_ROOT, 'web/static/js/features');
+        const offenders = [];
+        for (const name of fs.readdirSync(dir)) {
+            if (!name.endsWith('.js') || name === 'forms.js') continue;
+            const source = fs.readFileSync(path.join(dir, name), 'utf8')
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/^\s*\/\/[^\n]*$/gm, '');
+            for (const call of source.matchAll(/\bdefaultPortfolioId\s*\(\s*\{[\s\S]*?\n\s*\}\)/g)) {
+                if (!/\bediting\b/.test(call[0])) offenders.push(name);
+            }
+        }
+        assert.deepEqual(offenders, [], `${offenders.join(', ')} must pass \`editing\` to defaultPortfolioId`);
     });
 });

@@ -119,6 +119,28 @@ export function txToForm(record) {
     };
 }
 
+/**
+ * Which securities account a form opens on.
+ *
+ * A stored value always wins, and AN EDIT NEVER INVENTS ONE: a record saved
+ * without a depot must come back out without one. Prefilling the only depot on
+ * an edit looks harmless and is not — `portfolioId` is optional on a dividend,
+ * so pressing Save on an untouched imported record would write an attribution
+ * the user never made, and portfolio.js then books the income to a freshly
+ * created zero-share position at that depot instead of to the position actually
+ * holding the shares. That is the same no-op-save corruption as overwriting
+ * `currency`, arriving from the other direction.
+ *
+ * On a NEW transaction the prefill is not a guess: with one securities account
+ * there is only one place shares can land. With two there is a choice, and the
+ * form asks rather than picking.
+ */
+export function defaultPortfolioId({ stored, depotIds = [], editing = false } = {}) {
+    if (stored) return stored;
+    if (editing) return '';
+    return depotIds.length === 1 ? depotIds[0] : '';
+}
+
 function parseInto(target, values, key, decimals, label, errors, { required = false } = {}) {
     const raw = String(values[key] ?? '').trim();
     if (raw === '') {
