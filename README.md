@@ -5,6 +5,10 @@ Mobile-first, and built so the server can never read your data.
 
 **Status: early. Under active construction, not yet usable.**
 
+**Try it:** open any deployment at `/?demo=1` — no signup, no data entry. The portfolio you see is
+fabricated, it lives only in the tab's memory, and nothing is written to your device or the server;
+reloading without the parameter throws it away.
+
 ## What it is
 
 [Portfolio Performance](https://www.portfolio-performance.info/) is the open-source benchmark for
