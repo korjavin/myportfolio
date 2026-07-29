@@ -160,7 +160,18 @@ time the build starts. There is no tag trigger: `ci.yml` runs on master pushes a
 a tag push is never covered by CI and could not be gated. `workflow_dispatch` remains as a
 deliberate manual override.
 
-Two consequences worth knowing. GitHub runs only the **default branch's** copy of a `workflow_run`
+Two guards come with that shape, both for `workflow_run` footguns rather than for anything specific
+to this app:
+
+- The job requires `workflow_run.event == 'push'` from this repository. The `branches: [master]`
+  filter matches the *triggering run's* head branch, and CI also runs on pull requests — so a fork
+  PR opened from a branch named `master` would otherwise reach a job holding `contents: write` and
+  `packages: write` and get unreviewed code published.
+- A run whose tested SHA is no longer `origin/master` skips instead of shipping. CI runs can finish
+  out of order, and the concurrency group serialises runs without ordering them, so a late run would
+  otherwise force-push `deploy` back to an older commit.
+
+Two more consequences worth knowing. GitHub runs only the **default branch's** copy of a `workflow_run`
 workflow, so edits to `release.yml` take effect on merge and are never exercised by the PR that
 makes them. And CI is untouched by all of this — it remains the sole correctness gate; the release
 workflow only ships.
