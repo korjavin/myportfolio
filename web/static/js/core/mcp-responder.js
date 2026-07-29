@@ -422,6 +422,16 @@ export function createResponder({
         ws.onmessage = (ev) => { onFrame(ev.data).catch((e) => console.error('[mcp] frame failed', e)); };
         ws.onclose = (ev) => {
             status = 'idle';
+            // Once this leg has been stopped, its fate is nobody's business —
+            // and acting on a late close is destructive rather than merely
+            // untidy. Re-pairing runs exactly into it: the relay closes the OLD
+            // leg with 4409 when the new pairing is minted, reconcile() stops
+            // that responder and starts the new one, and then the queued 4409
+            // arrives. Without this guard it reaches onStalePairing, which calls
+            // stopResponder() and tears down the responder that just took over —
+            // leaving the tab idle on a pairing it holds the right key for.
+            // Found by codex review.
+            if (stopped) return;
             const code = ev?.code;
             // 4404 and 4409 are both terminal for THIS leg and mean opposite
             // things about the vault record — see the constants. Everything else,

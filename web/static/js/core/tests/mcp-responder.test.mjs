@@ -383,6 +383,111 @@ describe('the pairing record', () => {
 
 // --- The election -----------------------------------------------------------
 
+// Stands the real controller up over stubbed platform globals and returns the
+// levers a test needs: the elected socket, whether the lock was released, and
+// the port to inspect afterwards.
+async function electedResponder() {
+    const port = memoryPort();
+    await port.put(R.MCP_PAIRING_TYPE, R.MCP_PAIRING_ID, {
+        pairingId: 'p1', key: Buffer.from(KEY).toString('base64'),
+    });
+    const state = { port, released: false, held: [], sockets: [] };
+    globalThis.navigator = {
+        locks: {
+            request(name, fn) {
+                state.held.push(name);
+                return Promise.resolve(fn()).then(() => { state.released = true; });
+            },
+        },
+    };
+    globalThis.location = { protocol: 'https:', host: 'portfolio.example' };
+    globalThis.WebSocket = function (url) {
+        const s = { url, readyState: 1, send() {}, close() {} };
+        state.sockets.push(s);
+        return s;
+    };
+    state.teardown = () => {
+        R.stopResponder();
+        delete globalThis.navigator;
+        delete globalThis.location;
+        delete globalThis.WebSocket;
+    };
+    await R.refreshResponder({ records: port });
+    return state;
+}
+
+// The close codes are not interchangeable and the difference is destructive:
+// the pairing record is CRDT-synced, so a tab that purges on 4409 deletes the
+// pairing every other device just adopted. Swap the two codes in
+// mcp-responder.js's onStalePairing and both of these must go red.
+describe('close codes, end to end through the controller', () => {
+    it('4404 purges the pairing record — it points at nothing', async () => {
+        const s = await electedResponder();
+        try {
+            s.sockets[0].onclose({ code: R.STATUS_NO_PAIRING });
+            // The purge is a promise the close handler does not await.
+            await new Promise((r) => setTimeout(r, 10));
+            assert.equal(await R.readPairing(s.port), null);
+            assert.equal(s.port.map.get(R.MCP_PAIRING_ID).deleted, true);
+        } finally {
+            s.teardown();
+        }
+    });
+
+    it('4409 keeps the record and releases the election instead', async () => {
+        const s = await electedResponder();
+        try {
+            s.sockets[0].onclose({ code: R.STATUS_PAIRING_REPLACED });
+            await new Promise((r) => setTimeout(r, 10));
+            assert.deepEqual(await R.readPairing(s.port), { pairingId: 'p1', key: Buffer.from(KEY).toString('base64') },
+                'purging on 4409 deletes the live pairing on every synced device');
+            assert.equal(s.released, true,
+                'the tab holding the current key is queued on the lock and can only take over if this one steps aside');
+        } finally {
+            s.teardown();
+        }
+    });
+
+    it('a 4409 that arrives after the leg was stopped does not tear down its replacement', async () => {
+        // The re-pairing race, found by codex review. The relay closes the OLD
+        // leg with 4409 the moment a new pairing is minted; reconcile() has
+        // already stopped that responder and started the new one by the time the
+        // event is delivered. Acting on it releases the election and leaves the
+        // tab idle holding the right key.
+        const s = await electedResponder();
+        try {
+            const stale = s.sockets[0];
+            // Re-pair: the vault record now names a different pairing.
+            await s.port.put(R.MCP_PAIRING_TYPE, R.MCP_PAIRING_ID, {
+                pairingId: 'p2', key: Buffer.from(KEY).toString('base64'),
+            });
+            await R.refreshResponder({ records: s.port });
+            assert.equal(s.sockets.length, 2, 'the new pairing must get its own leg');
+            assert.match(s.sockets[1].url, /pairing=p2$/);
+
+            stale.onclose({ code: R.STATUS_PAIRING_REPLACED });
+            await new Promise((r) => setTimeout(r, 10));
+
+            assert.equal(s.released, false, 'the replacement leg lost the election to a dead one');
+            assert.ok(await R.readPairing(s.port), 'and the pairing record must still be there');
+        } finally {
+            s.teardown();
+        }
+    });
+
+    it('an ordinary drop touches neither the record nor the election', async () => {
+        const s = await electedResponder();
+        try {
+            s.sockets[0].onclose({ code: 1006 });
+            await new Promise((r) => setTimeout(r, 10));
+            assert.ok(await R.readPairing(s.port));
+            assert.equal(s.released, false, '1006 is a transient drop — stepping aside on it hands the slot away for nothing');
+        } finally {
+            s.teardown();
+        }
+    });
+});
+
 describe('the Web Lock election', () => {
     it('elects one tab, connects it, and hands the lock on when it steps aside', async () => {
         const port = memoryPort();
