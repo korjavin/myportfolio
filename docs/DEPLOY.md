@@ -144,16 +144,26 @@ credential in Portainer for `ghcr.io`.
 ## 5. How a release flows
 
 ```
-push to master (or a v* tag)
-  └─ .github/workflows/release.yml
-       ├─ build the image, push ghcr.io/korjavin/myportfolio:<sha>     (SHA only, never :latest)
-       ├─ force-push `deploy` with compose.yaml pinned to that SHA
-       └─ POST the Portainer webhook
-             └─ Portainer pulls `deploy`, re-reads compose.yaml, recreates the container
+push to master
+  └─ .github/workflows/ci.yml            build, vet, CGO-free build, go test, gofmt, node --test
+       └─ on success only:  .github/workflows/release.yml
+            ├─ build the image, push ghcr.io/korjavin/myportfolio:<sha>   (SHA only, never :latest)
+            ├─ force-push `deploy` with compose.yaml pinned to that SHA
+            └─ POST the Portainer webhook
+                  └─ Portainer pulls `deploy`, re-reads compose.yaml, recreates the container
 ```
 
-CI (`.github/workflows/ci.yml`) is untouched and remains the correctness gate. The release workflow
-only ships.
+The release workflow triggers on **CI completing successfully**, not on the push itself — a `push`
+trigger would run alongside CI and happily ship a commit whose tests had just gone red. It uses
+`workflow_run.head_sha`, the commit CI actually tested, rather than whatever master's head is by the
+time the build starts. There is no tag trigger: `ci.yml` runs on master pushes and pull requests, so
+a tag push is never covered by CI and could not be gated. `workflow_dispatch` remains as a
+deliberate manual override.
+
+Two consequences worth knowing. GitHub runs only the **default branch's** copy of a `workflow_run`
+workflow, so edits to `release.yml` take effect on merge and are never exercised by the PR that
+makes them. And CI is untouched by all of this — it remains the sole correctness gate; the release
+workflow only ships.
 
 To roll back: point the Portainer stack at an earlier `deploy` commit, or edit the image tag in the
 stack. The `deploy` branch is force-pushed, so its history is not a reliable log — GHCR's tag list is.
