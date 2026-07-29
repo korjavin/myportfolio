@@ -82,11 +82,28 @@ export function openTxModal(record, defaults) {
     const typeSel = ui.select(TX_TYPES.map((t) => ({ value: t, label: fmt.txTypeLabel(t) })), values.type);
     const dateInput = ui.input(values.date, { type: 'date' });
 
+    // §4 gives the two legs different account KINDS, so each picker offers one
+    // kind and never the other: a cash account is not a place shares can land.
+    // An account with no kind is cash — that is what quick-add creates and what
+    // Settings defaults to.
+    const isDepot = (a) => a.kind === 'securities';
+    const depots = state.accounts.filter(isDepot);
+
     const account = entityPicker({
         label: 'Account (cash moves here)',
         noun: 'account',
-        options: state.accounts.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
+        options: state.accounts.filter((a) => !isDepot(a))
+            .map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
         value: values.accountId,
+    });
+    const portfolio = entityPicker({
+        label: 'Securities account (shares land here)',
+        noun: 'depot',
+        options: depots.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
+        // A stored portfolioId always wins, so an edit cannot silently
+        // re-attribute an imported trade. Otherwise one depot is not a guess —
+        // it is the only place the shares can be — while two would be.
+        value: values.portfolioId || (depots.length === 1 ? depots[0].recordId : ''),
     });
     const security = entityPicker({
         label: 'Security',
@@ -102,7 +119,7 @@ export function openTxModal(record, defaults) {
     const noteInput = ui.input(values.note, { placeholder: 'Optional' });
 
     const securityBlock = ui.el('div', 'wg-field-group');
-    for (const node of security.nodes) securityBlock.appendChild(node);
+    for (const node of [...security.nodes, ...portfolio.nodes]) securityBlock.appendChild(node);
     const sharesField = ui.field('Shares', sharesInput);
 
     // Which fields a type may carry is §4's, not this screen's. Show only the
@@ -147,6 +164,7 @@ export function openTxModal(record, defaults) {
     async function save(close) {
         const type = typeSel.value;
         let accountId = account.value();
+        let portfolioId = portfolio.value();
         let securityId = security.value();
 
         // Resolve the inline "+ New …" pickers first: a transaction that names
@@ -162,6 +180,19 @@ export function openTxModal(record, defaults) {
                     // securities-kind account is created from Settings, where
                     // the distinction is visible and deliberate.
                     kind: 'cash',
+                    currency: reportingCurrency(),
+                    closed: false,
+                });
+            }
+            if (SECURITY_TYPES.has(type) && portfolio.isNew()) {
+                if (!portfolio.newName()) return showErrors(['Name the new securities account.']);
+                portfolioId = await putAccount(null, {
+                    name: portfolio.newName(),
+                    // Securities, unlike the cash picker above: this is the
+                    // account the shares land in, and §4 keys the position by
+                    // it. Creating it here is what keeps a first trade one
+                    // modal deep for a user who has never opened Settings.
+                    kind: 'securities',
                     currency: reportingCurrency(),
                     closed: false,
                 });
@@ -185,6 +216,7 @@ export function openTxModal(record, defaults) {
             type,
             date: dateInput.value,
             accountId,
+            portfolioId,
             securityId,
             shares: sharesInput.value,
             amount: amountInput.value,

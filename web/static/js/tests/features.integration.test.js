@@ -54,6 +54,11 @@ async function fixture() {
     await records.put(RECORD.account, 'acct_cash', {
         name: 'Broker cash', kind: 'cash', currency: 'EUR', closed: false,
     });
+    // §4: the shares leg. A trade names both, and this is the one that keys the
+    // position — the fixture has always needed it, it just had nowhere to say so.
+    await records.put(RECORD.account, 'acct_depot', {
+        name: 'Broker depot', kind: 'securities', currency: 'EUR', closed: false,
+    });
     await records.put(RECORD.security, 'sec_vwce', {
         name: 'FTSE All-World', ticker: 'VWCE', currency: 'EUR', quote: {},
     });
@@ -66,7 +71,8 @@ const DEPOSIT_FORM = {
     amount: '10000.00', currency: 'EUR',
 };
 const BUY_FORM = {
-    type: 'buy', date: '2024-03-15', accountId: 'acct_cash', securityId: 'sec_vwce',
+    type: 'buy', date: '2024-03-15', accountId: 'acct_cash', portfolioId: 'acct_depot',
+    securityId: 'sec_vwce',
     shares: '10', amount: '1234.56', fees: '4.56', taxes: '', currency: 'EUR',
 };
 
@@ -102,6 +108,44 @@ describe('screens → engine: adding a transaction', () => {
         assert.equal(position.marketValue, null);
         assert.equal(fmt.money(position.marketValue), fmt.UNKNOWN);
         assert.ok(snap.issues.some((i) => i.code === 'no_price'));
+    });
+
+    test('a trade entered in the form is attributed to a depot, not to nothing', async () => {
+        // The bug this bead is: the form collected only the cash account, so
+        // §4's position key had a null securities account, portfolio.js raised
+        // `missing_portfolio` on every manually entered trade, and Holdings
+        // showed a holding that belonged to no broker. Asserted through the
+        // real engine on the real form output, so it fails if the form stops
+        // collecting the field OR if the engine stops reading it.
+        const { records, portfolio } = await fixture();
+        await records.put(RECORD.transaction, 'tx_1', buildTxBody(DEPOSIT_FORM).body);
+        await records.put(RECORD.transaction, 'tx_2', buildTxBody(BUY_FORM).body);
+
+        const snap = await portfolio.snapshot();
+        assert.deepEqual(snap.issues.filter((i) => i.code === 'missing_portfolio'), []);
+        const [position] = snap.positions;
+        assert.equal(position.accountId, 'acct_depot');
+        assert.equal(position.accountName, 'Broker depot');
+        // …and the row says which broker, so a second depot holding the same
+        // ETF does not render as a duplicate of the first.
+        assert.equal(fmt.positionLabel(position), 'VWCE · FTSE All-World · Broker depot');
+    });
+
+    test('the same security at two brokers is two positions with two labels', async () => {
+        const { records, portfolio } = await fixture();
+        await records.put(RECORD.account, 'acct_depot2', {
+            name: 'Second depot', kind: 'securities', currency: 'EUR', closed: false,
+        });
+        await records.put(RECORD.transaction, 'tx_1', buildTxBody(DEPOSIT_FORM).body);
+        await records.put(RECORD.transaction, 'tx_2', buildTxBody(BUY_FORM).body);
+        await records.put(RECORD.transaction, 'tx_3', buildTxBody({
+            ...BUY_FORM, portfolioId: 'acct_depot2', date: '2024-04-01', amount: '600.00', shares: '5',
+        }).body);
+
+        const snap = await portfolio.snapshot();
+        assert.equal(snap.positions.length, 2);
+        const labels = snap.positions.map(fmt.positionLabel);
+        assert.equal(new Set(labels).size, 2, `two rows rendered identically: ${labels.join(' | ')}`);
     });
 
     test('entering a close gives the position a value and a live gain', async () => {
@@ -184,6 +228,32 @@ describe('screens → engine: editing a transaction', () => {
         );
     });
 
+    test('an imported trade keeps its depot through a no-op edit', async () => {
+        // The importer writes portfolioId; the form must hand it back. A form
+        // that drops a field it does not collect re-attributes an imported
+        // trade to nothing the moment someone opens it and presses Save — the
+        // holding leaves its broker and the issue banner lights up, with no
+        // edit having been made. Asserted on the engine's attribution, not on
+        // the body, because that is what the user would see change.
+        const { records, portfolio } = await fixture();
+        await records.put(RECORD.transaction, 'tx_pp', {
+            type: 'buy', date: '2024-03-15', accountId: 'acct_cash', portfolioId: 'acct_depot',
+            securityId: 'sec_vwce', shares: 1000000000, amount: 123456, currency: 'EUR',
+        });
+        const before = await portfolio.snapshot();
+        assert.equal(before.positions[0].accountId, 'acct_depot');
+
+        const stored = (await records.list(RECORD.transaction)).find((r) => r.recordId === 'tx_pp');
+        const { body, errors } = buildTxBody(txToForm(stored));
+        assert.deepEqual(errors, []);
+        await records.put(RECORD.transaction, 'tx_pp', body);
+
+        const after = await portfolio.snapshot();
+        assert.equal(after.positions[0].accountId, 'acct_depot');
+        assert.deepEqual(after.issues.filter((i) => i.code === 'missing_portfolio'), []);
+        assert.equal(after.positions.length, 1);
+    });
+
     test('editing the amount is reflected in cash and basis immediately', async () => {
         const { records, portfolio } = await fixture();
         await records.put(RECORD.transaction, 'tx_1', buildTxBody(DEPOSIT_FORM).body);
@@ -246,6 +316,6 @@ describe('screens → engine: performance', () => {
         const perf = await performance.performance({});
         assert.equal(perf.portfolio, null);
         assert.deepEqual(perf.issues, []);
-        assert.equal(records._raw.size, 2);
+        assert.equal(records._raw.size, 3);
     });
 });
