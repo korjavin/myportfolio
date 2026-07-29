@@ -145,11 +145,16 @@ describe('port hygiene (ARCHITECTURE.md 8)', () => {
       'encryptRecord', 'decryptRecord', // no oplog
       'encryptSnapshot', 'decryptSnapshot', // replaced by encryptState/decryptState
       'encryptPushPayload', 'decryptPushPayload', // no push
-      'sealMCPFrame', 'openMCPFrame', // no MCP relay
       'openInboxEvent', 'generateInboxKeypair', 'inboxCryptoSupported', // no X25519 inbox
     ]) {
       assert.equal(c[dropped], undefined, `crypto.js re-exports dropped primitive ${dropped}`);
     }
+    // sealMCPFrame/openMCPFrame were on this list — ARCHITECTURE.md §8.3 said
+    // "no MCP relay" — and the owner reversed that: the AI connector is a
+    // headline goal (§11). They are now REQUIRED, and tested in
+    // mcp-frame.test.mjs against vectors the Go shim decrypts too.
+    assert.equal(typeof c.sealMCPFrame, 'function');
+    assert.equal(typeof c.openMCPFrame, 'function');
   });
 
   it('keeps toBase64 chunked rather than a per-char loop', () => {
