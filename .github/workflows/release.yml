@@ -1,0 +1,166 @@
+# Build the image, publish it to GHCR, pin it into the `deploy` branch, and
+# poke Portainer. CI (.github/workflows/ci.yml) stays the gate on correctness;
+# this workflow only ships what already passed it.
+#
+# Portainer must be pointed at the `deploy` branch, never at master: master
+# carries `:latest` as a placeholder, `deploy` carries the exact commit SHA
+# that was built. See docs/DEPLOY.md.
+
+name: Release
+
+# `workflow_run` and not `push`, because a `push` trigger would run alongside
+# CI rather than after it, and a master commit whose tests went red would ship
+# anyway — the correctness gate would be a comment rather than a mechanism.
+# There is no tag trigger for the same reason: ci.yml runs on master pushes and
+# pull requests, so a tag push is never covered by CI and could not be gated.
+# workflow_dispatch stays as the deliberate manual escape hatch.
+#
+# Note that GitHub only ever runs the copy of this file that is on the default
+# branch, so changes to it take effect on merge, not on the PR that makes them.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write # force-pushes the deploy branch
+  packages: write # pushes to ghcr.io
+
+# The deploy branch is force-pushed, so two runs racing would leave it pinned
+# to whichever finished last rather than whichever is newest.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # A completed CI run can have concluded 'failure', 'cancelled' or
+    # 'timed_out'; only success ships.
+    #
+    # `event == 'push'` and the head-repository check are not redundant with the
+    # `branches: [master]` filter above. That filter matches the TRIGGERING
+    # RUN's head branch, and ci.yml also runs on pull_request — so a fork PR
+    # opened from a branch that happens to be named `master` produces a
+    # successful CI run whose head_branch is `master`, and this job would then
+    # build and publish unreviewed fork code while holding contents:write and
+    # packages:write. Only a push to this repository's own master may ship.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    steps:
+      # On a workflow_run event `github.sha` is the default branch's head at
+      # dispatch time, NOT the commit CI actually tested — so both the checkout
+      # and the image tag have to name head_sha explicitly, or a race would
+      # publish an untested commit under a tested commit's gate.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # CI runs can complete out of order, and `concurrency` serialises runs
+      # without ordering them: an older commit whose CI finished late would
+      # otherwise force-push `deploy` after a newer one had already shipped,
+      # silently rolling production back. Releasing only the current master head
+      # makes a late run a no-op instead — the newer commit's own run is the one
+      # that ships it.
+      - name: Skip a stale run
+        id: fresh
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # A manual dispatch is someone deliberately shipping a specific ref;
+          # it is not a late-arriving event, so it is never stale.
+          if [ "${EVENT}" = "workflow_dispatch" ]; then
+            echo "ship=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --depth=1 origin master
+          head="$(git rev-parse FETCH_HEAD)"
+          if [ "${head}" = "${SHA}" ]; then
+            echo "ship=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ship=false" >> "$GITHUB_OUTPUT"
+            echo "master is now ${head}; ${SHA} is stale, nothing to release." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Third-party actions are pinned to commit SHAs: a mutable tag is a
+      # supply-chain hole, and this job holds a token that can write packages
+      # and branches.
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        if: steps.fresh.outputs.ship == 'true'
+
+      - uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        if: steps.fresh.outputs.ship == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Image name lowercased because GHCR rejects uppercase in a repository
+      # path and GitHub owner names are not case-normalised. The SHA is
+      # resolved once here so the tag and the deploy-branch pin cannot drift
+      # apart.
+      - name: Resolve image reference
+        id: image
+        if: steps.fresh.outputs.ship == 'true'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "sha=${BUILD_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        if: steps.fresh.outputs.ship == 'true'
+        with:
+          context: .
+          push: true
+          # SHA only, deliberately no `:latest`. A moving tag means the answer
+          # to "what is running in production" is "whatever it pointed at when
+          # the container last started", which is not an answer.
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # GitHub context values are interpolated through `env:` rather than
+      # written into the script body: `${{ }}` inside `run:` is textual
+      # substitution before the shell ever sees it, which is a command-injection
+      # surface for anything an outsider can influence.
+      - name: Pin the image into the deploy branch
+        if: steps.fresh.outputs.ship == 'true'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          SHA: ${{ steps.image.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B deploy
+          sed -i -E "s|^(\s*image:\s*)ghcr\.io/\S+|\1${IMAGE}:${SHA}|" compose.yaml
+          grep -q "${IMAGE}:${SHA}" compose.yaml || {
+            echo "compose.yaml image line did not match the rewrite pattern" >&2
+            exit 1
+          }
+          git add compose.yaml
+          git commit -m "deploy: ${IMAGE}:${SHA}"
+          git push --force origin deploy
+
+      # A plain curl rather than a webhook action: it is one line, and it is one
+      # fewer third-party action holding this job's token.
+      - name: Trigger Portainer redeploy
+        if: steps.fresh.outputs.ship == 'true'
+        env:
+          HOOK: ${{ secrets.PORTAINER_REDEPLOY_HOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOOK}" ]; then
+            echo "PORTAINER_REDEPLOY_HOOK is not set — image published and deploy branch updated, but nothing was redeployed." >&2
+            exit 0
+          fi
+          curl -fsS -X POST "${HOOK}"

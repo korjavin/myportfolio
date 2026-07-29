@@ -60,6 +60,17 @@ loaded from a CDN. If one bites you, it is usually right.
 
 Issue tracking uses [beads](https://github.com/gastownhall/beads) (`bd ready`, `bd show <id>`).
 
+## Deployment
+
+A `scratch` container behind Traefik, deployed by Portainer, image built to GHCR by
+`.github/workflows/release.yml`. [`docs/DEPLOY.md`](docs/DEPLOY.md) is the operator guide.
+
+Two things there are not optional reading. **`MYPORTFOLIO_TRUSTED_PROXIES` must name the Traefik
+network** — left at its default every user shares one rate-limit bucket, and widened to "any private
+address" the ceremony rate limiter stops existing; neither failure logs anything. And the named
+volume holds both the SQLite database and the session secret, so **losing it destroys every vault
+irrecoverably** — the server only ever had ciphertext, so there is no restore path on our side.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Vendored components and their terms: [THIRD-PARTY.md](THIRD-PARTY.md).
