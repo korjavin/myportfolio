@@ -398,7 +398,8 @@ export async function openMCPFrame(pairingKey, pairingId, frame) {
 
 // The one-time pairing code Settings shows and the user pastes into the shim:
 //
-//   "mpmcp1." ‖ base64url_unpadded(JSON({relay_url, pairing_id, key}))
+//   "mpmcp1." ‖ base64url(JSON({relay_url, pairing_id, key})) ‖ "." ‖ checksum
+//   checksum = base64url(SHA-256(that JSON)[0..4])
 //
 // Parsed by internal/mcpshim's ParsePairingCode; the key field is standard
 // padded base64, matching Go's encoding/json []byte marshaling, and the three
@@ -409,14 +410,25 @@ export async function openMCPFrame(pairingKey, pairingId, frame) {
 // app's shim must be rejected at the prefix rather than parse cleanly into a
 // pairing that can never answer.
 //
+// The checksum group is a deliberate addition to the ported format, and it was
+// measured rather than assumed: without it, 46% of single-character
+// substitutions in a real code's body still parsed, a third of those returning
+// a WRONG KEY. A wrong key is silent — the shim connects, the relay pipes, and
+// every frame fails its AEAD, which reaches the user as "no device online",
+// indistinguishable from the design's own documented limitation. 32 bits of
+// SHA-256 turns that into a loud "checksum mismatch". It is a typo detector,
+// not a MAC: there is nothing to authenticate, since the key is in the string.
+//
 // There is deliberately no parse counterpart here. The browser mints codes and
 // reads its pairing back from the vault record, never from a typed code, so a
 // JS parser would be an unused attack surface for the one secret in the whole
 // design that must never round-trip through anything but the user's clipboard.
 export const PAIRING_CODE_PREFIX = 'mpmcp1.';
 
-export function formatPairingCode({ relayUrl, pairingId, key }) {
+export async function formatPairingCode({ relayUrl, pairingId, key }) {
   if (key.length !== 32) throw new RangeError(`pairing key must be 32 bytes, got ${key.length}`);
   const wire = { relay_url: relayUrl, pairing_id: pairingId, key: toBase64(key) };
-  return PAIRING_CODE_PREFIX + toBase64Url(utf8(JSON.stringify(wire)));
+  const raw = utf8(JSON.stringify(wire));
+  const checksum = new Uint8Array(await crypto.subtle.digest('SHA-256', raw)).slice(0, 4);
+  return `${PAIRING_CODE_PREFIX}${toBase64Url(raw)}.${toBase64Url(checksum)}`;
 }

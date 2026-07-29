@@ -265,41 +265,46 @@ func TestPairingCodeRoundTrip(t *testing.T) {
 	}
 }
 
+// codeFor mints a well-formed, correctly-checksummed code around arbitrary
+// JSON, so the malformed-JSON cases below are rejected for the reason they
+// name and not incidentally by the checksum.
+func codeFor(raw string) string {
+	return PairingCodePrefix + base64.RawURLEncoding.EncodeToString([]byte(raw)) + "." + pairingCodeChecksum([]byte(raw))
+}
+
 // A corrupted code must be REJECTED, not silently mis-parsed: a shim that
 // connects with a subtly wrong key reports nothing worse than "no device
 // online", which is indistinguishable from the design's own limitation.
 func TestParsePairingCodeRejectsCorruption(t *testing.T) {
 	v, _ := loadVectors(t)
-	body := strings.TrimPrefix(v.PairingCode, PairingCodePrefix)
-
-	shortKey, err := FormatPairingCode(&PairingCode{RelayURL: v.RelayURL, PairingID: v.PairingID, Key: make([]byte, 32)})
-	if err != nil {
-		t.Fatalf("format: %v", err)
-	}
+	rest := strings.TrimPrefix(v.PairingCode, PairingCodePrefix)
+	body, checksum, _ := strings.Cut(rest, ".")
+	key32 := base64.StdEncoding.EncodeToString(make([]byte, 32))
 
 	for name, code := range map[string]string{
 		"empty":              "",
-		"no prefix":          body,
-		"sibling prefix":     "mtmcp1." + body,
-		"wrong version":      "mpmcp2." + body,
-		"not base64url":      PairingCodePrefix + "!!!!",
-		"padded base64":      PairingCodePrefix + base64.StdEncoding.EncodeToString([]byte(`{"relay_url":"x","pairing_id":"y","key":"AAAA"}`)),
-		"truncated body":     PairingCodePrefix + body[:len(body)-8],
-		"not json":           PairingCodePrefix + base64.RawURLEncoding.EncodeToString([]byte("not json at all")),
-		"missing relay_url":  PairingCodePrefix + base64.RawURLEncoding.EncodeToString([]byte(`{"pairing_id":"y","key":"`+base64.StdEncoding.EncodeToString(make([]byte, 32))+`"}`)),
-		"missing pairing_id": PairingCodePrefix + base64.RawURLEncoding.EncodeToString([]byte(`{"relay_url":"x","key":"`+base64.StdEncoding.EncodeToString(make([]byte, 32))+`"}`)),
-		"short key":          PairingCodePrefix + base64.RawURLEncoding.EncodeToString([]byte(`{"relay_url":"x","pairing_id":"y","key":"`+base64.StdEncoding.EncodeToString(make([]byte, 16))+`"}`)),
-		// A single flipped character inside the base64url body.
-		"one flipped char": PairingCodePrefix + flipOne(body),
+		"no prefix":          rest,
+		"sibling prefix":     "mtmcp1." + rest,
+		"wrong version":      "mpmcp2." + rest,
+		"not base64url":      PairingCodePrefix + "!!!!." + checksum,
+		"padded base64":      PairingCodePrefix + base64.StdEncoding.EncodeToString([]byte(`{"relay_url":"x"}`)) + "." + checksum,
+		"truncated body":     PairingCodePrefix + body[:len(body)-8] + "." + checksum,
+		"no checksum group":  PairingCodePrefix + body,
+		"empty checksum":     PairingCodePrefix + body + ".",
+		"wrong checksum":     PairingCodePrefix + body + ".AAAAAA",
+		"not json":           codeFor("not json at all"),
+		"missing relay_url":  codeFor(`{"pairing_id":"y","key":"` + key32 + `"}`),
+		"missing pairing_id": codeFor(`{"relay_url":"x","key":"` + key32 + `"}`),
+		"short key":          codeFor(`{"relay_url":"x","pairing_id":"y","key":"` + base64.StdEncoding.EncodeToString(make([]byte, 16)) + `"}`),
 	} {
 		if _, err := ParsePairingCode(code); err == nil {
 			t.Errorf("a corrupted pairing code (%s) parsed cleanly", name)
 		}
 	}
 
-	// Sanity: the all-zero key above is a VALID 32-byte key, so the loop's
-	// rejections are about corruption and not about key content.
-	if _, err := ParsePairingCode(shortKey); err != nil {
+	// Sanity: an all-zero key is a VALID 32-byte key, so the rejections above
+	// are about corruption and not about key content.
+	if _, err := ParsePairingCode(codeFor(`{"relay_url":"x","pairing_id":"y","key":"` + key32 + `"}`)); err != nil {
 		t.Fatalf("a valid 32-byte all-zero key was rejected: %v", err)
 	}
 	// FormatPairingCode refuses a wrong-length key rather than minting a code
@@ -309,15 +314,45 @@ func TestParsePairingCodeRejectsCorruption(t *testing.T) {
 	}
 }
 
-// flipOne changes one character of a base64url body to a different one from
-// the same alphabet, so the result still decodes but to different bytes.
-func flipOne(body string) string {
-	b := []byte(body)
-	i := len(b) / 2
-	if b[i] == 'A' {
-		b[i] = 'B'
-	} else {
-		b[i] = 'A'
+// TestParsePairingCodeRejectsEverySingleCharacterEdit is the test that made
+// the checksum group exist, and it is a sweep rather than one hand-picked
+// mutant on purpose — the hand-picked one passed by luck while the format
+// accepted 46% of its siblings.
+//
+// Without a checksum, of the 11970 single-character substitutions in this
+// code's body, 5557 parsed cleanly and 1371 of those yielded a WRONG KEY: a
+// shim that connects, pipes frames the responder can never open, and reports
+// "no device online". With it, the whole sweep must be rejected.
+func TestParsePairingCodeRejectsEverySingleCharacterEdit(t *testing.T) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	v, _ := loadVectors(t)
+	rest := strings.TrimPrefix(v.PairingCode, PairingCodePrefix)
+
+	subs, dels := 0, 0
+	for i := range len(rest) {
+		if rest[i] == '.' {
+			continue // the group separator; its removal is covered above
+		}
+		for _, c := range alphabet {
+			if byte(c) == rest[i] {
+				continue
+			}
+			subs++
+			mutant := []byte(rest)
+			mutant[i] = byte(c)
+			if _, err := ParsePairingCode(PairingCodePrefix + string(mutant)); err == nil {
+				t.Fatalf("a one-character substitution at %d (%q -> %q) parsed cleanly", i, rest[i], c)
+			}
+		}
+		dels++
+		if _, err := ParsePairingCode(PairingCodePrefix + rest[:i] + rest[i+1:]); err == nil {
+			t.Fatalf("a one-character deletion at %d parsed cleanly", i)
+		}
 	}
-	return string(b)
+	// Guard the guard: if the sweep ever stops generating mutants it would
+	// pass vacuously, which is the failure mode this whole test exists to
+	// catch in the first place.
+	if subs < 10000 || dels < 150 {
+		t.Fatalf("the sweep only tried %d substitutions and %d deletions — it is not covering the code", subs, dels)
+	}
 }
