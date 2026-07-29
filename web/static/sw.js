@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -65,6 +65,7 @@ const PRECACHE = [
     '/icons/apple-touch-icon.png',
     '/js/components/wg-icons.js',
     '/js/components/wg-bottom-nav.js',
+    '/js/components/wg-sparkline.js',
     '/js/features/boot.js',
     '/js/features/screens.js',
     '/js/features/store.js',
@@ -73,6 +74,7 @@ const PRECACHE = [
     '/js/features/forms.js',
     '/js/features/dashboard.js',
     '/js/features/holdings.js',
+    '/js/features/pricechart.js',
     '/js/features/transactions.js',
     '/js/features/performance.js',
     '/js/features/settings.js',
@@ -96,6 +98,7 @@ const PRECACHE = [
     '/domain/money.js',
     '/domain/portfolio.js',
     '/domain/perf.js',
+    '/domain/prices.js',
     '/domain/ppimport.js',
 ];
 

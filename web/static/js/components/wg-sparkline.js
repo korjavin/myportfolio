@@ -41,9 +41,17 @@
         const max = Math.max(...points);
         const range = (max - min) || 1;
         // Two-point data still renders cleanly; single-point collapses to a dot.
+        //
+        // A degenerate series (one point, or every value identical) has no range
+        // to scale against. Centering it is the only honest answer: the original
+        // `(v - min) / range` puts it flat on the bottom edge, which reads as a
+        // chart that failed to draw rather than as one close. Divide-by-zero is
+        // already excluded by `|| 1` above; this is about where the dot lands.
+        const flat = max === min;
+        const single = points.length === 1;
         const lastX = points.length > 1 ? points.length - 1 : 1;
-        const xOf = (i) => (i / lastX) * width;
-        const yOf = (v) => height - 2 - ((v - min) / range) * (height - 4);
+        const xOf = (i) => (single ? width / 2 : (i / lastX) * width);
+        const yOf = (v) => (flat ? height / 2 : height - 2 - ((v - min) / range) * (height - 4));
 
         const lineD = points.map((v, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)} ${yOf(v).toFixed(1)}`).join(' ');
         const fillD = points.length > 1

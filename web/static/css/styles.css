@@ -1164,6 +1164,31 @@ textarea.wg-input {
     fill: var(--wg-chart-loss-stroke);
 }
 
+/* Price history card (features/pricechart.js). Composes .wg-chart-card for the
+   surface and reads the shared axis-tick tokens for its date labels, so it
+   introduces no colour of its own. The plot scales to the card: the sparkline
+   carries width/height attributes plus a viewBox, so overriding the width in
+   CSS re-scales it for a 360px screen instead of clipping it. */
+.wg-price-chart {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.wg-price-chart__plot .wg-sparkline {
+    width: 100%;
+    height: auto;
+}
+
+.wg-price-chart__axis {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    color: var(--wg-chart-axis-tick-color);
+    font-size: var(--wg-chart-axis-tick-size);
+    font-family: inherit;
+}
+
 /* =============================================
    Ring gauge — Apple-style circular progress.
    Radius is fixed at r=15.9155 in wg-ring.js so
