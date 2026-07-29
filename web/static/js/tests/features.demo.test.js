@@ -135,6 +135,7 @@ describe('demo mode — the seed through the real engines', () => {
 
     test('the USD position keeps a USD price, converted at the CLOSE\'s day', () => {
         const p = snapshot.positions.find((q) => q.currency === 'USD');
+        assert.ok(p, 'the fixture holds no USD position at all');
         // The price is the security's own stored close, untouched — a market
         // fact about the security, not a portfolio amount. Read back out of the
         // seed's price chunk rather than restated here.
