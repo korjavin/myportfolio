@@ -496,7 +496,7 @@ test('bad records are surfaced, not silently absorbed', async () => {
   assert.ok(seen.includes('price_not_chunked'));
 });
 
-test('mixed currencies are flagged once each rather than summed in silence', async () => {
+test('a currency with no stored rate is an explicit gap, flagged once, never summed', async () => {
   const f = fixture();
   basics(f);
   f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
@@ -507,7 +507,14 @@ test('mixed currencies are flagged once each rather than summed in silence', asy
   const snap = await f.snapshot();
 
   assert.equal(snap.reportingCurrency, 'EUR');
+  // One issue for the currency, not one per record: an unfetched currency
+  // misses every one of its days at once and the user's fix is one action.
   assert.deepEqual(codes(snap), ['currency_not_converted']);
+  assert.match(snap.issues[0].message, /no USDEUR rate applicable to 2024-01-10/);
+  // $100.00 has no euro value — not zero, unknown. Only the euro deposit is in
+  // the total, because it is the only amount the engine can actually state.
+  assert.equal(cash(snap), 10000);
+  assert.equal(snap.totals.total, 10000);
 });
 
 test('totals aggregate positions and accounts', async () => {
@@ -747,4 +754,252 @@ test('an undated transaction does not contaminate the opening valuation', async 
   const after = await f.snapshot({ asOf: '2024-01-02' });
   assert.equal(after.totals.cash, 1000000 - 100000, 'the €50,000 that has no date is in neither snapshot');
   assert.equal(after.totals.total, (1000000 - 100000) + 100000);
+});
+
+// --- multi-currency (§4 `fx`, §5 scale 1e8) ---------------------------------
+
+test('a EUR purchase in a USD-reporting portfolio uses the trade date’s rate, and the close’s own rate to value it', async () => {
+  // THE test for this feature. Two rates are stored, five months apart and
+  // deliberately far apart in value, and the snapshot has to use a different
+  // one for the basis than for the valuation:
+  //
+  //   cost        at the TRADE date's rate — €1000 in January cost what it
+  //               cost, and re-converting it at today's rate would rewrite the
+  //               portfolio's history every time the market moved.
+  //   marketValue at the CLOSE's rate — what the holding is worth now is worth
+  //               it at the rate now.
+  //
+  // Swap the two and every number below changes, which is the point.
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'USD' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-01-10', rate: 110000000 }, 'fx_jan');
+  f.put('fx', { pair: 'EURUSD', date: '2024-06-10', rate: 200000000 }, 'fx_jun');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-10', amount: 200000 }), 'tx_dep');
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-10',
+    shares: 1000000000, amount: 100000, fees: 1000,
+  }), 'tx_buy');
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '06-10': 12000000000 } });
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.deepEqual(snap.issues, []);
+  // €1000.00 at €1 = $1.10 is $1100.00. At the June rate it would be $2000.00.
+  assert.equal(p.cost, 110000);
+  assert.equal(p.fees, 1100);
+  // 10 shares at the €120.00 close is €1200.00, at the JUNE rate: $2400.00.
+  // At the January rate it would be $1320.00.
+  assert.equal(p.marketValue, 240000);
+  // The price itself stays in the security's own currency — it is a market
+  // fact about the security, and it is what the user's broker shows.
+  assert.equal(p.price, 12000000000);
+  assert.equal(p.currency, 'EUR');
+  // Gain includes the currency effect, which is what a reporting-currency gain
+  // means: $2400.00 valued now less $1100.00 paid then.
+  assert.equal(p.unrealized, 130000);
+  // Cash moved twice, each leg at its own day's rate: (€2000 - €1000) x 1.10.
+  assert.equal(cash(snap), 110000);
+  assert.equal(snap.totals.total, 110000 + 240000);
+});
+
+test('a EUR-reporting portfolio holding a US ETF converts through the inverse rate', async () => {
+  // The common case this feature exists for: a European holding a US-listed
+  // ETF. Nothing publishes USDEUR — it is 1/EURUSD, and without the inverse
+  // this user sees a gap where their portfolio should be.
+  const f = fixture();
+  f.put('account', { name: 'Cash', kind: 'cash', currency: 'EUR' }, 'acct_1');
+  f.put('account', { name: 'Depot', kind: 'securities', currency: 'EUR' }, 'pf_1');
+  f.put('security', { name: 'VOO', ticker: 'VOO', currency: 'USD', assetClass: 'etf' }, 'sec_1');
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-03-28', rate: 108110000 }, 'fx_1');
+  f.put('transaction', {
+    type: 'buy', accountId: 'acct_1', portfolioId: 'pf_1', securityId: 'sec_1',
+    date: '2024-03-28', shares: 200000000, amount: 100000, currency: 'USD',
+  }, 'tx_buy');
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '03-28': 55000000000 } });
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.deepEqual(snap.issues, []);
+  // $1000.00 / 1.0811 = €925.09 (rate inverted to 0.92498381, then applied).
+  assert.equal(p.cost, 92498);
+  // 2 shares at the $550.00 close = $1100.00 -> €1017.48.
+  assert.equal(p.marketValue, 101748);
+  assert.equal(p.currency, 'USD', 'the security is still a dollar security');
+  assert.equal(snap.totals.marketValue, 101748);
+});
+
+test('a Saturday trade converts at Friday’s fixing — there is no Saturday rate anywhere', async () => {
+  // Easter 2024: the ECB's last fixing before Tuesday 04-02 is Thursday 03-28.
+  // A trade dated over that gap is ordinary settlement paperwork, not an edge
+  // case, and refusing it would leave most retail portfolios full of holes.
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'USD' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-03-28', rate: 108110000 }, 'fx_thu');
+  f.put('fx', { pair: 'EURUSD', date: '2024-04-02', rate: 107490000 }, 'fx_tue');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-03-30', amount: 100000 }), 'tx_sat');
+
+  const snap = await f.snapshot();
+
+  assert.deepEqual(snap.issues, []);
+  // €1000.00 at Thursday's 1.0811, NOT Tuesday's 1.0749 ($1074.90) and not a gap.
+  assert.equal(cash(snap), 108110);
+});
+
+test('a hole in the rate series is a gap, not the nearest rate carried across it', async () => {
+  // The bound on carry-forward is the difference between "Friday's rate applies
+  // on Saturday" and "a January rate applies in June". A total that quietly
+  // uses the wrong rate is worse than one that says which part it could not
+  // compute.
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'USD' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-01-10', rate: 110000000 }, 'fx_jan');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-13', amount: 100000 }), 'tx_covered');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-06-13', amount: 500000 }), 'tx_orphan');
+
+  const snap = await f.snapshot();
+
+  assert.deepEqual(codes(snap), ['currency_not_converted']);
+  assert.match(snap.issues[0].message, /no EURUSD rate applicable to 2024-06-13/);
+  // Only the deposit inside the window is in the total.
+  assert.equal(cash(snap), 110000);
+});
+
+test('an unpriceable currency leaves market value null rather than counting it as zero', async () => {
+  // Same treatment as no_price, and for the same reason: a value that cannot
+  // be computed is null, so the totals leave it out instead of pretending the
+  // holding is worthless.
+  const f = fixture();
+  f.put('account', { name: 'Cash', kind: 'cash', currency: 'EUR' }, 'acct_1');
+  f.put('account', { name: 'Depot', kind: 'securities', currency: 'EUR' }, 'pf_1');
+  f.put('security', { name: 'VOO', currency: 'USD', assetClass: 'etf' }, 'sec_1');
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  // A rate for the trade, none anywhere near the close.
+  f.put('fx', { pair: 'EURUSD', date: '2024-03-28', rate: 108110000 }, 'fx_1');
+  f.put('transaction', {
+    type: 'buy', accountId: 'acct_1', portfolioId: 'pf_1', securityId: 'sec_1',
+    date: '2024-03-28', shares: 200000000, amount: 100000, currency: 'USD',
+  }, 'tx_buy');
+  f.put('price', { securityId: 'sec_1', year: 2025, closes: { '11-14': 55000000000 } });
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.deepEqual(codes(snap), ['currency_not_converted']);
+  assert.equal(p.cost, 92498, 'the basis still converted — its own day had a rate');
+  assert.equal(p.marketValue, null);
+  assert.equal(p.unrealized, null);
+  assert.equal(snap.totals.marketValue, 0);
+  assert.equal(only(snap.securities).marketValue, null);
+});
+
+test('a CHF-reporting portfolio crosses two EUR pairs into a rate neither states', async () => {
+  const f = fixture();
+  f.put('account', { name: 'Cash', kind: 'cash', currency: 'CHF' }, 'acct_1');
+  f.put('settings', { reportingCurrency: 'CHF' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-03-28', rate: 108110000 }, 'fx_usd');
+  f.put('fx', { pair: 'EURCHF', date: '2024-03-28', rate: 97660000 }, 'fx_chf');
+  f.put('transaction', {
+    type: 'deposit', accountId: 'acct_1', date: '2024-03-28', amount: 100000, currency: 'USD',
+  }, 'tx_dep');
+
+  const snap = await f.snapshot();
+
+  assert.deepEqual(snap.issues, []);
+  // $1000.00 x (0.9766 / 1.0811) = CHF 903.34.
+  assert.equal(cash(snap), 90334);
+});
+
+test('totals reconcile against the per-position and per-account conversions', async () => {
+  const f = fixture();
+  f.put('account', { name: 'Cash', kind: 'cash', currency: 'EUR' }, 'acct_1');
+  f.put('account', { name: 'Depot', kind: 'securities', currency: 'EUR' }, 'pf_1');
+  f.put('security', { name: 'Acme', currency: 'EUR', assetClass: 'stock' }, 'sec_1');
+  f.put('security', { name: 'VOO', currency: 'USD', assetClass: 'etf' }, 'sec_2');
+  f.put('settings', { reportingCurrency: 'USD' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-01-10', rate: 110000000 }, 'fx_jan');
+  f.put('fx', { pair: 'EURUSD', date: '2024-06-10', rate: 200000000 }, 'fx_jun');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-10', amount: 1000000 }), 'tx_dep');
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000,
+  }), 'tx_buy_eur');
+  f.put('transaction', {
+    type: 'buy', accountId: 'acct_1', portfolioId: 'pf_1', securityId: 'sec_2',
+    date: '2024-06-10', shares: 200000000, amount: 110000, currency: 'USD',
+  }, 'tx_buy_usd');
+  f.put('transaction', tx({ type: 'dividend', securityId: 'sec_1', date: '2024-06-10', amount: 2500 }), 'tx_div');
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '06-10': 12000000000 } });
+  f.put('price', { securityId: 'sec_2', year: 2024, closes: { '06-10': 55000000000 } });
+
+  const snap = await f.snapshot();
+
+  assert.deepEqual(snap.issues, []);
+  // Every total is exactly the sum of what the parts report — no total is
+  // computed on a second, differently-converted path.
+  const sum = (list, key) => list.reduce((acc, x) => acc + (x[key] ?? 0), 0);
+  for (const key of ['cost', 'realized', 'dividends', 'fees', 'taxes', 'unrealized']) {
+    assert.equal(snap.totals[key], sum(snap.positions, key), key);
+  }
+  assert.equal(snap.totals.marketValue, sum(snap.positions, 'marketValue'));
+  assert.equal(snap.totals.cash, sum(snap.accounts, 'balance'));
+  assert.equal(snap.totals.total, snap.totals.cash + snap.totals.marketValue);
+  // And the parts are the hand-converted numbers, so "reconciles" is not two
+  // wrongs agreeing: the EUR trade at 1.10, the USD trade untouched, the
+  // dividend at 2.00.
+  const byName = Object.fromEntries(snap.positions.map((p) => [p.name, p]));
+  assert.equal(byName.Acme.cost, 110000);
+  assert.equal(byName.Acme.dividends, 5000);
+  assert.equal(byName.VOO.cost, 110000);
+  assert.equal(byName.Acme.marketValue, 240000);
+  assert.equal(byName.VOO.marketValue, 110000);
+});
+
+test('a single-currency portfolio is byte-identical with the FX machinery in play', async () => {
+  // Most users have one currency and must see no change at all — not a
+  // rounding difference, not a reordered issue, nothing.
+  const build = (withFx) => {
+    const f = fixture();
+    basics(f);
+    if (withFx) {
+      f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+      f.put('fx', { pair: 'EURUSD', date: '2024-01-10', rate: 110000000 }, 'fx_1');
+      f.put('fx', { pair: 'EURUSD', date: '2024-06-10', rate: 200000000 }, 'fx_2');
+    }
+    f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: 1000000 }), 'tx_1');
+    f.put('transaction', tx({
+      type: 'buy', securityId: 'sec_1', date: '2024-01-10',
+      shares: 1000000000, amount: 100990, fees: 990,
+    }), 'tx_2');
+    f.put('transaction', tx({
+      type: 'sell', securityId: 'sec_1', date: '2024-02-10',
+      shares: 400000000, amount: 43604, fees: 396, taxes: 500,
+    }), 'tx_3');
+    f.put('transaction', tx({ type: 'dividend', securityId: 'sec_1', date: '2024-03-01', amount: 2500 }), 'tx_4');
+    f.put('price', { securityId: 'sec_1', year: 2024, closes: { '06-10': 11500000000 } });
+    return f.snapshot();
+  };
+
+  const [plain, converted] = await Promise.all([build(false), build(true)]);
+
+  assert.equal(converted.reportingCurrency, 'EUR');
+  assert.equal(plain.reportingCurrency, null);
+  assert.deepEqual({ ...converted, reportingCurrency: null }, plain);
+});
+
+test('case is not a currency difference', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-10', amount: 100000, currency: 'eur' }), 'tx_1');
+
+  const snap = await f.snapshot();
+
+  assert.deepEqual(snap.issues, []);
+  assert.equal(cash(snap), 100000);
+  assert.equal(snap.reportingCurrency, 'EUR', 'and the stored setting is echoed back verbatim');
 });
