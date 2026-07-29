@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -76,8 +76,18 @@ const PRECACHE = [
     '/js/features/transactions.js',
     '/js/features/performance.js',
     '/js/features/settings.js',
+    '/js/features/sync.js',
     '/js/core/localdb.js',
     '/js/core/records.js',
+    // The vault half of the §3 port, pulled in by features/sync.js. These are
+    // on the boot path even with no network: the port implementation is chosen
+    // from the warm LDK cache, which needs no request at all, so a cold start
+    // that could not load them would quietly fall back to an unsynced mirror.
+    '/js/core/vault-records.js',
+    '/js/core/state-sync.js',
+    '/js/core/unlock.js',
+    '/js/core/ldk.js',
+    '/js/core/crypto.js',
     '/vendor/dexie.min.js',
     // web/domain/, served at /domain/ by web/embed.go. These are the pure
     // engines — without them offline the shell paints and then every number is

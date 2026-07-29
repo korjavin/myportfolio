@@ -17,7 +17,38 @@ import { createPerformanceDomain } from '../../../domain/perf.js';
 import { RECORD, SETTINGS_ID, newRecordId } from '../../../domain/schema.js';
 import { buildPriceChunk } from './forms.js';
 
-export const records = localRecords;
+// The §3 port as a STABLE object. The domain factories below capture whatever
+// they are handed once, at module load, and boot has not decided which
+// implementation it is using by then — the vault is opened asynchronously, after
+// the shell has painted. So the swap happens underneath this reference rather
+// than by reassigning it: `records` never changes identity, `impl` does.
+//
+// Reassigning the export instead would leave both domain engines holding
+// localRecords forever, which is a bug that looks exactly like working software
+// — every screen renders, every write lands in the mirror, and nothing is ever
+// backed up.
+let impl = localRecords;
+
+export const records = {
+    list: (recordType) => impl.list(recordType),
+    put: (recordType, recordId, body) => impl.put(recordType, recordId, body),
+    del: (recordType, recordId) => impl.del(recordType, recordId),
+};
+
+/**
+ * Swap the port implementation. Called once, by the vault wiring in sync.js,
+ * with a vaultRecords that has already opened successfully — never speculatively,
+ * because a half-open vault serving reads is how a user ends up staring at an
+ * empty portfolio.
+ */
+export function useRecords(next) {
+    impl = next;
+}
+
+/** Which implementation is live. Exported for the boot test, not for screens. */
+export function isVaultBacked() {
+    return impl !== localRecords;
+}
 
 const portfolio = createPortfolioDomain({ records });
 const performance = createPerformanceDomain({ records });

@@ -15,7 +15,10 @@
 // in-app control on an installed client, never on boot.
 
 import { renderScreen, resolveScreenId, screenTitle } from './screens.js';
-import { refresh, subscribe } from './store.js';
+import { refresh, subscribe, useRecords } from './store.js';
+import { db } from '../core/localdb.js';
+import { startSync, watchFocus, subscribeSync, syncState, describeSync } from './sync.js';
+import { syncNotice } from './ui.js';
 
 const screenEl = document.getElementById('screen');
 const navMountEl = document.getElementById('nav-mount');
@@ -38,7 +41,34 @@ function render(focus) {
     if (focus) screenEl.focus({ preventScroll: true });
     // Screens paint synchronously and only the domain-backed tail is awaited,
     // so a rejection here is a bug in a screen, not a slow database.
-    renderScreen(screenEl, id).catch((err) => console.error('boot: screen render failed', err));
+    renderScreen(screenEl, id)
+        .then(paintNotice)
+        .catch((err) => console.error('boot: screen render failed', err));
+}
+
+// ---------------------------------------------------------------------------
+// The sync affordance
+// ---------------------------------------------------------------------------
+
+// A sync that has stopped working while the app looks fine is the failure this
+// whole design exists to avoid, so the states a human has to act on are put in
+// front of them: an expired session, a wedged vault, a server that has been
+// unreachable for more than one attempt. Settings carries the full picture,
+// including the states that are NOT problems.
+//
+// There is deliberately no reassuring green tick here. An indicator that says
+// "synced" is only worth anything if it can be trusted, and one that is drawn
+// from a status nobody re-checks is worse than nothing.
+let noticeEl = null;
+
+function paintNotice() {
+    const desc = describeSync(syncState(), { online: navigator.onLine });
+    // Replaced rather than re-rendered through the store: a status change must
+    // not re-render the whole screen, or a debounced flush landing three seconds
+    // after a keystroke wipes the form the user is still typing into.
+    if (noticeEl) noticeEl.remove();
+    noticeEl = desc.ambient ? syncNotice(desc) : null;
+    if (noticeEl) screenEl.prepend(noticeEl);
 }
 
 function mountNav() {
@@ -140,8 +170,27 @@ mountNav();
 render(false);
 window.addEventListener('hashchange', () => render(true));
 
-// Both are deliberately after the first paint: the shell must be on screen
-// before either the database or the network is touched. refresh() cannot
+// All of these are deliberately after the first paint: the shell must be on
+// screen before either the database or the network is touched. refresh() cannot
 // reject — it records the failure on state.error and the screens render it.
 refresh();
 registerServiceWorker();
+
+subscribeSync(paintNotice);
+// navigator.onLine is the difference between "offline, will sync later" and
+// "sync is broken", and it changes without any sync activity to notice it.
+window.addEventListener('online', paintNotice);
+window.addEventListener('offline', paintNotice);
+
+// The wire (ARCHITECTURE.md §3): whether this app is backed up at all comes down
+// to these two calls. startSync picks the port implementation — localRecords
+// with no vault on the device, vaultRecords with one — hands it to the store,
+// and then pulls. That first pull is also the signup migration: with no blob on
+// the server yet, the union of local and remote is the whole offline-built
+// portfolio, so it uploads intact.
+startSync({ db, adopt: useRecords, onRecords: refresh }).catch((err) => {
+    // startSync reports its own failures through describeSync; anything that
+    // escapes it is a bug in this file, not a sync state.
+    console.error('boot: sync wiring failed', err);
+});
+watchFocus({ onRecords: refresh });
