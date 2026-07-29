@@ -24,7 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-    buildTxBody, txToForm, emptyTxForm, todayLocal, buildPriceChunk,
+    buildTxBody, txToForm, emptyTxForm, todayLocal, buildPriceChunk, defaultPortfolioId,
     SECURITY_TYPES, SHARE_TYPES, SIGNED_TYPES,
 } from '../features/forms.js';
 
@@ -58,7 +58,8 @@ describe('forms — the money round trip', () => {
     for (const shares of SHARES) {
         test(`share count ${shares} survives record → form → record`, () => {
             const record = {
-                type: 'buy', date: '2024-03-15', accountId: 'acct_1', securityId: 'sec_1',
+                type: 'buy', date: '2024-03-15', accountId: 'acct_1', portfolioId: 'acct_depot',
+                securityId: 'sec_1',
                 shares, amount: 123456, fees: 199, taxes: 0, currency: 'EUR',
             };
             const { body, errors } = buildTxBody(txToForm(record));
@@ -96,7 +97,8 @@ describe('forms — the money round trip', () => {
 
     test('a full record round-trips field for field, including fees and taxes', () => {
         const record = {
-            type: 'sell', date: '2024-11-02', accountId: 'acct_1', securityId: 'sec_1',
+            type: 'sell', date: '2024-11-02', accountId: 'acct_1', portfolioId: 'acct_depot',
+            securityId: 'sec_1',
             shares: 250000000, amount: 1000050, fees: 995, taxes: 1234,
             currency: 'EUR', note: 'partial exit',
         };
@@ -110,7 +112,7 @@ describe('forms — the money round trip', () => {
         // renders. Two passes must be a fixed point, or every open-and-close
         // cycle moves the portfolio.
         const record = {
-            type: 'buy', date: '2020-01-31', accountId: 'a', securityId: 's',
+            type: 'buy', date: '2020-01-31', accountId: 'a', portfolioId: 'd', securityId: 's',
             shares: 3, amount: 7, fees: 1, taxes: 2, currency: 'USD',
         };
         const once = buildTxBody(txToForm(record)).body;
@@ -168,11 +170,72 @@ describe('forms — §4 validation', () => {
     });
 
     test('a buy or sell needs a security and a positive share count', () => {
-        const buy = { type: 'buy', date: '2024-03-15', accountId: 'a', amount: '100' };
+        const buy = { type: 'buy', date: '2024-03-15', accountId: 'a', portfolioId: 'd', amount: '100' };
         assert.ok(buildTxBody(buy).errors.some((e) => /needs a security/.test(e)));
         assert.ok(buildTxBody({ ...buy, securityId: 's' }).errors.some((e) => /Shares is required/.test(e)));
         assert.ok(buildTxBody({ ...buy, securityId: 's', shares: '0' }).errors.some((e) => /greater than zero/.test(e)));
         assert.deepEqual(buildTxBody({ ...buy, securityId: 's', shares: '1.5' }).errors, []);
+    });
+
+    test('a buy or sell carries the securities account the shares land in', () => {
+        // §4: the trade names both accounts, and `portfolioId` is the one that
+        // keys the position. Absent, portfolio.js raises `missing_portfolio`
+        // and the holding is attributed to nothing — which is what every
+        // manually entered trade did before this field was collected.
+        for (const type of ['buy', 'sell']) {
+            const trade = {
+                type, date: '2024-03-15', accountId: 'acct_cash', securityId: 'sec_1',
+                shares: '10', amount: '100',
+            };
+            assert.ok(
+                buildTxBody(trade).errors.some((e) => /securities account/.test(e)),
+                `${type} accepted no portfolioId`
+            );
+            const { body, errors } = buildTxBody({ ...trade, portfolioId: 'acct_depot' });
+            assert.deepEqual(errors, []);
+            assert.equal(body.portfolioId, 'acct_depot');
+        }
+    });
+
+    test('a dividend may name a depot but is not required to', () => {
+        // PP's own model has no depot on a dividend, so requiring one would
+        // refuse a record the importer legitimately writes. When it IS named,
+        // the engine attributes the income to that position instead of falling
+        // back to "the only position holding this security".
+        const div = {
+            type: 'dividend', date: '2024-03-15', accountId: 'acct_cash',
+            securityId: 'sec_1', amount: '12.34',
+        };
+        assert.deepEqual(buildTxBody(div).errors, []);
+        assert.equal(buildTxBody(div).body.portfolioId, undefined);
+        assert.equal(buildTxBody({ ...div, portfolioId: 'acct_depot' }).body.portfolioId, 'acct_depot');
+    });
+
+    test('the cash leg and the shares leg cannot be the same account', () => {
+        // §4 splits them by account kind, so one record cannot be both. The
+        // pickers offer each kind in one place only; this is the half of that
+        // rule a pure function can check.
+        const { errors } = buildTxBody({
+            type: 'buy', date: '2024-03-15', accountId: 'acct_1', portfolioId: 'acct_1',
+            securityId: 'sec_1', shares: '1', amount: '100',
+        });
+        assert.ok(errors.some((e) => /same account/.test(e)), errors.join(' | '));
+    });
+
+    test('an imported portfolioId survives an edit untouched', () => {
+        // The PP importer writes portfolioId; a form that renders a record and
+        // drops a field it did not collect corrupts that record on a no-op
+        // save. Same class of bug as overwriting `currency` with the reporting
+        // currency, which silently re-attributed nothing and misvalued a
+        // portfolio. Two passes, because a fixed point is the actual property.
+        const imported = {
+            type: 'buy', date: '2021-06-07', accountId: 'account_pp_cash',
+            portfolioId: 'account_pp_depot', securityId: 'security_pp_1',
+            shares: 100000000, amount: 50000, currency: 'EUR',
+        };
+        const once = buildTxBody(txToForm(imported)).body;
+        assert.equal(once.portfolioId, 'account_pp_depot');
+        assert.deepEqual(buildTxBody(txToForm(once)).body, imported);
     });
 
     test('a security transfer is refused at the form, not stored to fail later', () => {
@@ -193,6 +256,29 @@ describe('forms — §4 validation', () => {
     test('the type sets agree with what the screens hide', () => {
         assert.deepEqual([...SECURITY_TYPES].sort(), ['buy', 'dividend', 'sell']);
         assert.deepEqual([...SHARE_TYPES].sort(), ['buy', 'sell']);
+    });
+});
+
+describe('forms — which depot a form opens on', () => {
+    test('a new transaction prefills the only securities account, and never one of two', () => {
+        assert.equal(defaultPortfolioId({ depotIds: ['d1'] }), 'd1');
+        assert.equal(defaultPortfolioId({ depotIds: ['d1', 'd2'] }), '');
+        assert.equal(defaultPortfolioId({ depotIds: [] }), '');
+    });
+
+    test('a stored value wins over the prefill, in both directions', () => {
+        assert.equal(defaultPortfolioId({ stored: 'd2', depotIds: ['d1'] }), 'd2');
+        assert.equal(defaultPortfolioId({ stored: 'd2', depotIds: ['d1'], editing: true }), 'd2');
+    });
+
+    test('an edit never invents a depot the record did not have', () => {
+        // Found by codex review. `portfolioId` is optional on a dividend, so
+        // prefilling the only depot when editing means pressing Save on an
+        // untouched imported record writes an attribution the user never made
+        // — and portfolio.js then books the income to a freshly created
+        // zero-share position at that depot instead of to the position that
+        // actually holds the shares. A no-op save must move nothing.
+        assert.equal(defaultPortfolioId({ stored: '', depotIds: ['d1'], editing: true }), '');
     });
 });
 
@@ -330,5 +416,52 @@ describe('forms — the render boundary stays one-way', () => {
             'a transaction body must pass its own currency to buildTxBody, not the '
             + `reporting currency: ${offenders.join(', ')}`
         );
+    });
+
+    test('every buildTxBody call site collects portfolioId', () => {
+        // Same shape of guard, and for the same reason: the field is read off a
+        // DOM picker inside save(), and with no jsdom the alternative is a
+        // fixture that restates the fix and stays green when it is reverted.
+        //
+        // Asserted on the ARGUMENT OBJECT, not the file: a screen that merely
+        // mentions portfolioId somewhere while handing buildTxBody a body
+        // without it writes exactly the unattributed trade this bead is about.
+        const dir = path.join(REPO_ROOT, 'web/static/js/features');
+        const offenders = [];
+        for (const name of fs.readdirSync(dir)) {
+            if (!name.endsWith('.js')) continue;
+            const source = fs.readFileSync(path.join(dir, name), 'utf8')
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/^\s*\/\/[^\n]*$/gm, '');
+            for (const call of source.matchAll(/\bbuildTxBody\s*\(\s*\{[\s\S]*?\n\s*\}\)/g)) {
+                if (!/\bportfolioId\b/.test(call[0])) offenders.push(name);
+            }
+        }
+        assert.deepEqual(
+            offenders,
+            [],
+            '§4: a buy/sell names both accounts, so the transaction body handed to '
+            + `buildTxBody must carry portfolioId: ${offenders.join(', ')}`
+        );
+    });
+
+    test('defaultPortfolioId is always told whether the form is an edit', () => {
+        // The prefill is only safe on a new transaction (see the unit tests
+        // above). A call site that omits `editing` silently gets the new-form
+        // behaviour on an edit, which writes a depot the record never had —
+        // and that lives in the same DOM-bound handler, out of reach of a
+        // behavioural test.
+        const dir = path.join(REPO_ROOT, 'web/static/js/features');
+        const offenders = [];
+        for (const name of fs.readdirSync(dir)) {
+            if (!name.endsWith('.js') || name === 'forms.js') continue;
+            const source = fs.readFileSync(path.join(dir, name), 'utf8')
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/^\s*\/\/[^\n]*$/gm, '');
+            for (const call of source.matchAll(/\bdefaultPortfolioId\s*\(\s*\{[\s\S]*?\n\s*\}\)/g)) {
+                if (!/\bediting\b/.test(call[0])) offenders.push(name);
+            }
+        }
+        assert.deepEqual(offenders, [], `${offenders.join(', ')} must pass \`editing\` to defaultPortfolioId`);
     });
 });

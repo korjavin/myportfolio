@@ -9,7 +9,7 @@
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import {
-    buildTxBody, emptyTxForm, txToForm,
+    buildTxBody, emptyTxForm, txToForm, defaultPortfolioId,
     SECURITY_TYPES, SHARE_TYPES,
 } from './forms.js';
 import { TX_TYPES, RECORD } from '../../../domain/schema.js';
@@ -82,11 +82,43 @@ export function openTxModal(record, defaults) {
     const typeSel = ui.select(TX_TYPES.map((t) => ({ value: t, label: fmt.txTypeLabel(t) })), values.type);
     const dateInput = ui.input(values.date, { type: 'date' });
 
+    // §4 gives the two legs different account KINDS, so each picker offers one
+    // kind and never the other: a cash account is not a place shares can land.
+    // An account with no kind is cash — that is what quick-add creates and what
+    // Settings defaults to.
+    const isDepot = (a) => a.kind === 'securities';
+    const depots = state.accounts.filter(isDepot);
+
+    const options = (accounts) => accounts.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId }));
+
+    // The kind filter is about which account a NEW record may name. A stored id
+    // it hides — the account was deleted, or its kind was changed after the
+    // record was written — would be dropped by ui.select's fall back to the
+    // first option, so an edit of a historical record either refuses to save
+    // (the cash leg, which is required) or silently un-attributes it (the
+    // shares leg on a dividend, which is not). Carrying the stored value as its
+    // own option keeps an edit lossless and leaves re-attributing deliberate.
+    const withStored = (opts, storedId) => {
+        if (!storedId || opts.some((o) => o.value === storedId)) return opts;
+        const stored = state.accounts.find((a) => a.recordId === storedId);
+        return [...opts, { value: storedId, label: stored?.name ?? storedId }];
+    };
+
     const account = entityPicker({
         label: 'Account (cash moves here)',
         noun: 'account',
-        options: state.accounts.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
+        options: withStored(options(state.accounts.filter((a) => !isDepot(a))), values.accountId),
         value: values.accountId,
+    });
+    const portfolio = entityPicker({
+        label: 'Securities account (shares land here)',
+        noun: 'depot',
+        options: withStored(options(depots), values.portfolioId),
+        value: defaultPortfolioId({
+            stored: values.portfolioId,
+            depotIds: depots.map((a) => a.recordId),
+            editing,
+        }),
     });
     const security = entityPicker({
         label: 'Security',
@@ -102,7 +134,7 @@ export function openTxModal(record, defaults) {
     const noteInput = ui.input(values.note, { placeholder: 'Optional' });
 
     const securityBlock = ui.el('div', 'wg-field-group');
-    for (const node of security.nodes) securityBlock.appendChild(node);
+    for (const node of [...security.nodes, ...portfolio.nodes]) securityBlock.appendChild(node);
     const sharesField = ui.field('Shares', sharesInput);
 
     // Which fields a type may carry is §4's, not this screen's. Show only the
@@ -147,6 +179,7 @@ export function openTxModal(record, defaults) {
     async function save(close) {
         const type = typeSel.value;
         let accountId = account.value();
+        let portfolioId = portfolio.value();
         let securityId = security.value();
 
         // Resolve the inline "+ New …" pickers first: a transaction that names
@@ -162,6 +195,19 @@ export function openTxModal(record, defaults) {
                     // securities-kind account is created from Settings, where
                     // the distinction is visible and deliberate.
                     kind: 'cash',
+                    currency: reportingCurrency(),
+                    closed: false,
+                });
+            }
+            if (SECURITY_TYPES.has(type) && portfolio.isNew()) {
+                if (!portfolio.newName()) return showErrors(['Name the new securities account.']);
+                portfolioId = await putAccount(null, {
+                    name: portfolio.newName(),
+                    // Securities, unlike the cash picker above: this is the
+                    // account the shares land in, and §4 keys the position by
+                    // it. Creating it here is what keeps a first trade one
+                    // modal deep for a user who has never opened Settings.
+                    kind: 'securities',
                     currency: reportingCurrency(),
                     closed: false,
                 });
@@ -185,6 +231,7 @@ export function openTxModal(record, defaults) {
             type,
             date: dateInput.value,
             accountId,
+            portfolioId,
             securityId,
             shares: sharesInput.value,
             amount: amountInput.value,

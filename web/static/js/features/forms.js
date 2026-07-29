@@ -61,6 +61,7 @@ export function emptyTxForm(defaults = {}) {
         type: 'buy',
         date: todayLocal(),
         accountId: '',
+        portfolioId: '',
         securityId: '',
         shares: '',
         amount: '',
@@ -104,6 +105,10 @@ export function txToForm(record) {
         type: record.type ?? 'buy',
         date: String(record.date ?? '').slice(0, 10),
         accountId: record.accountId ?? '',
+        // §4's second account. Carried back out unconditionally, including for
+        // an imported record: a form that drops a field on edit corrupts the
+        // record on a no-op save, exactly as overwriting `currency` did.
+        portfolioId: record.portfolioId ?? '',
         securityId: record.securityId ?? '',
         shares: forInput(record.shares, DECIMALS.shares, 0),
         amount: fixed(record.amount, DECIMALS.amount),
@@ -112,6 +117,28 @@ export function txToForm(record) {
         note: record.note ?? '',
         currency: record.currency ?? '',
     };
+}
+
+/**
+ * Which securities account a form opens on.
+ *
+ * A stored value always wins, and AN EDIT NEVER INVENTS ONE: a record saved
+ * without a depot must come back out without one. Prefilling the only depot on
+ * an edit looks harmless and is not — `portfolioId` is optional on a dividend,
+ * so pressing Save on an untouched imported record would write an attribution
+ * the user never made, and portfolio.js then books the income to a freshly
+ * created zero-share position at that depot instead of to the position actually
+ * holding the shares. That is the same no-op-save corruption as overwriting
+ * `currency`, arriving from the other direction.
+ *
+ * On a NEW transaction the prefill is not a guess: with one securities account
+ * there is only one place shares can land. With two there is a choice, and the
+ * form asks rather than picking.
+ */
+export function defaultPortfolioId({ stored, depotIds = [], editing = false } = {}) {
+    if (stored) return stored;
+    if (editing) return '';
+    return depotIds.length === 1 ? depotIds[0] : '';
 }
 
 function parseInto(target, values, key, decimals, label, errors, { required = false } = {}) {
@@ -134,15 +161,14 @@ function parseInto(target, values, key, decimals, label, errors, { required = fa
  * The port owns recordId/recordType/clientTs/deleted (§3), so none of them
  * appear here.
  *
- * NOT WRITTEN YET, and this is the one function that will need to: §4 now says
- * a buy/sell names both accounts — `accountId` (the cash leg) and
- * `portfolioId` (where the shares land). Today `portfolioId` is a sentence in
- * ARCHITECTURE.md and nothing else: it is absent from schema.js, from
- * portfolio.js and from ppimport.js, and bd g7e.11 is what introduces it.
- * Adding a required securities-account picker to quick-add — the primary
- * interaction — for a field no engine reads would be a guess at a name and a
- * tax on every transaction for zero effect. When the field is real, it is a
- * second `entityPicker` in transactions.js and one line below.
+ * §4: a buy/sell names BOTH accounts — `accountId` (the cash leg) and
+ * `portfolioId` (the securities account the shares land in), and the latter is
+ * what keys the position. Without it portfolio.js raises `missing_portfolio`
+ * and folds the trade into an unattributed position, so it is required on the
+ * share-moving types rather than merely accepted. A dividend carries it when
+ * known — the engine attributes income to a named depot and only falls back to
+ * "the single position holding this security" when it is absent — but it is
+ * not required there, because PP's own model has no depot on a dividend.
  */
 export function buildTxBody(values) {
     const errors = [];
@@ -158,9 +184,22 @@ export function buildTxBody(values) {
     const body = { type, date, accountId };
 
     const securityId = String(values.securityId ?? '').trim();
+    const portfolioId = String(values.portfolioId ?? '').trim();
     if (SECURITY_TYPES.has(type)) {
         if (!securityId) errors.push(`A ${type} needs a security.`);
         else body.securityId = securityId;
+        if (portfolioId) {
+            // §4 splits the two legs by account KIND, so one record cannot be
+            // both. forms.js sees ids, not kinds — this is the only half of
+            // that rule it can check; the picker enforces the other half by
+            // offering each kind in one place only.
+            if (portfolioId === accountId) {
+                errors.push('The shares cannot land in the same account the cash moves on.');
+            }
+            body.portfolioId = portfolioId;
+        } else if (SHARE_TYPES.has(type)) {
+            errors.push(`A ${type} needs the securities account its shares land in (§4).`);
+        }
     } else if (securityId && (type === 'transfer_in' || type === 'transfer_out')) {
         // §4: security transfers are not representable in v1 — there is no way
         // to express carried-over cost basis, and the engine refuses them. Say
