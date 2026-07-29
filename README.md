@@ -65,11 +65,10 @@ Issue tracking uses [beads](https://github.com/gastownhall/beads) (`bd ready`, `
 A `scratch` container behind Traefik, deployed by Portainer, image built to GHCR by
 `.github/workflows/release.yml`. [`docs/DEPLOY.md`](docs/DEPLOY.md) is the operator guide.
 
-Two things there are not optional reading. **`MYPORTFOLIO_TRUSTED_PROXIES` must name the Traefik
-network** — left at its default every user shares one rate-limit bucket, and widened to "any private
-address" the ceremony rate limiter stops existing; neither failure logs anything. And the named
-volume holds both the SQLite database and the session secret, so **losing it destroys every vault
-irrecoverably** — the server only ever had ciphertext, so there is no restore path on our side.
+The only variable a stack must set is `MYPORTFOLIO_HOST`. One thing there is not optional reading:
+the named volume holds both the SQLite database and the session secret, so **losing it destroys
+every vault irrecoverably** — the server only ever had ciphertext, so there is no restore path on
+our side.
 
 ## License
 

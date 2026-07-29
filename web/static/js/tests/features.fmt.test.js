@@ -135,13 +135,26 @@ describe('fmt — position labels', () => {
     });
 
     test('a position is opaque — two positions of the same security both label', () => {
-        // bd g7e.11 re-keys positions by (accountId, securityId), so the same
-        // ETF held at two brokers becomes two positions. Nothing here dedupes
-        // or keys by securityId, so that is a label change in one function
-        // rather than a rewrite of Holdings and Dashboard.
+        // Positions are keyed by (accountId, securityId), so the same ETF held
+        // at two brokers is two positions. Nothing here dedupes or keys by
+        // securityId, so that stayed a label change in one function rather
+        // than a rewrite of Holdings and Dashboard.
         const a = { securityId: 'sec_1', ticker: 'VWCE', name: 'FTSE All-World' };
         const b = { securityId: 'sec_1', ticker: 'VWCE', name: 'FTSE All-World' };
         assert.equal(fmt.positionLabel(a), fmt.positionLabel(b));
+    });
+
+    test('the broker is part of the name, so two depots do not render alike', () => {
+        // Two rows on Holdings and two bars on the allocation with the same
+        // text read as a duplicate-rendering bug, not as two real holdings.
+        const at = (accountName) => fmt.positionLabel({
+            securityId: 'sec_1', ticker: 'VWCE', name: 'FTSE All-World', accountName,
+        });
+        assert.equal(at('Trade Republic'), 'VWCE · FTSE All-World · Trade Republic');
+        assert.notEqual(at('Trade Republic'), at('Scalable'));
+        // §4's unattributed position has no account, and says nothing rather
+        // than inventing a broker name for it.
+        assert.equal(fmt.positionLabel({ ticker: 'VWCE', accountName: null }), 'VWCE');
     });
 });
 

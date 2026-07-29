@@ -26,9 +26,11 @@ const FILTERS = [
 let filter = 'open';
 
 // How a position is named lives in fmt.positionLabel, shared with the
-// Dashboard. A position is opaque here: rows are rendered straight off the
-// engine's list and never keyed by securityId, so bd g7e.11 re-keying positions
-// by (accountId, securityId) turns one row into two without touching this file.
+// Dashboard — including the broker, so the two rows the same ETF held at two
+// brokers produces are told apart. A position is opaque here: rows are
+// rendered straight off the engine's list and never keyed by securityId, which
+// is why re-keying positions by (accountId, securityId) turned one row into
+// two without touching this file.
 const title = fmt.positionLabel;
 
 function openPriceModal(position) {
@@ -115,7 +117,14 @@ function openPositionModal(position) {
                 className: 'wg-gloss wg-gloss--sun wg-gloss--lg',
                 onClick: (close) => {
                     close();
-                    openTxModal(null, { type: 'buy', securityId: position.securityId });
+                    // The depot too, not just the security: buying more of the
+                    // position on screen means more of it at THAT broker, and
+                    // §4 needs the securities account named to key it there.
+                    openTxModal(null, {
+                        type: 'buy',
+                        securityId: position.securityId,
+                        portfolioId: position.accountId ?? '',
+                    });
                 },
             },
         ],

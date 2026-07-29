@@ -21,6 +21,11 @@ var ErrAccountExists = errors.New("store: account or credential already exists")
 // it straight back in the 409 without a second, racy read.
 var ErrVersionConflict = errors.New("store: state version conflict")
 
+// ErrRecoveryStale is returned by EnrollRecoveredCredential when the recovery
+// verifier it was authorised against is no longer the one on the account —
+// i.e. that code has already been redeemed to completion by someone else.
+var ErrRecoveryStale = errors.New("store: recovery code already redeemed")
+
 // Credential is one registered passkey.
 type Credential struct {
 	ID             []byte
@@ -252,6 +257,82 @@ func (d *DB) SetRecoveryMaterial(ctx context.Context, accountID string, env Enve
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit recovery material: %w", err)
+	}
+	return nil
+}
+
+// RecoveryVerifierHash returns the stored SHA-256(verifier) for accountID, or
+// nil when the account does not exist or has never uploaded recovery material.
+//
+// The two cases are deliberately indistinguishable to the caller: the
+// redemption endpoint must answer identically for a wrong code and an account
+// id that was never real, or it becomes an account-existence oracle.
+func (d *DB) RecoveryVerifierHash(ctx context.Context, accountID string) ([]byte, error) {
+	var hash []byte
+	err := d.QueryRowContext(ctx,
+		`SELECT recovery_verifier_hash FROM accounts WHERE id = ?`, accountID).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: read recovery verifier: %w", err)
+	}
+	return hash, nil
+}
+
+// EnrollRecoveredCredential is Path C's single transaction: the passkey enrolled
+// against a redeemed recovery code, that passkey's DEK envelope, the ROTATED
+// recovery envelope, and the hash of the new code's verifier all land together
+// or not at all.
+//
+// The atomicity is what makes rotation non-optional rather than a prompt. The
+// redeemed code has been typed into a machine, so it must stop opening the vault
+// at the exact moment its replacement passkey starts working — not one HTTP
+// request later, where a closed tab or a failed upload would leave a live code
+// the user has been told is dead. Overwriting recovery_verifier_hash here IS the
+// burn: the old verifier ceases to exist in the same commit.
+//
+// expectHash is the verifier hash the caller's authority was granted against,
+// and the UPDATE is a compare-and-swap on it. Without that compare the burn is
+// only as good as the FIRST redemption: nothing stops a code being redeemed
+// twice before either enrollment finishes, and the second grant would then
+// happily overwrite the recovery material the first one just rotated in —
+// re-arming an attacker who scraped the old code, minutes after the user was
+// told it was dead. The whole enrollment rolls back on a stale hash, so a loser
+// of that race gets no credential either.
+func (d *DB) EnrollRecoveredCredential(ctx context.Context, cred Credential, env, recEnv Envelope, expectHash, verifierHash []byte, now time.Time) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin recovery enrollment: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+
+	if err := insertCredential(ctx, tx, cred, now); err != nil {
+		return err
+	}
+	if err := upsertEnvelope(ctx, tx, env); err != nil {
+		return err
+	}
+	recEnv.AccountID = cred.AccountID
+	recEnv.CredentialRef = RecoveryRef
+	if err := upsertEnvelope(ctx, tx, recEnv); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE accounts SET recovery_verifier_hash = ? WHERE id = ? AND recovery_verifier_hash = ?`,
+		verifierHash, cred.AccountID, expectHash)
+	if err != nil {
+		return fmt.Errorf("store: rotate recovery verifier: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: rotate recovery verifier: %w", err)
+	}
+	if rows != 1 {
+		return ErrRecoveryStale
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit recovery enrollment: %w", err)
 	}
 	return nil
 }

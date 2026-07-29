@@ -170,7 +170,11 @@ async function evaluatePrf(credentialId) {
   return output ? new Uint8Array(output) : null;
 }
 
-function forgetCredential(credentialId) {
+// Exported because recovery enrolls a passkey too, and "a credential that
+// turned out to have no PRF is DELETED, never enrolled" (ARCHITECTURE.md 8) has
+// to be the same code on both paths — a mixed account with one PRF credential
+// and one without could never be unlocked by the second one.
+export function forgetCredential(credentialId) {
   if (typeof PublicKeyCredential?.signalUnknownCredential !== 'function') return Promise.resolve();
   return PublicKeyCredential.signalUnknownCredential({
     rpId: location.hostname,
@@ -203,23 +207,46 @@ export function renderUnsupportedAuthenticator(app) {
 // upload leaves the previous material untouched and the user is never shown a
 // code that would not work.
 export async function renderEmergencyKit(app, ctx) {
-  const { codeBytes, formatted } = await generateRecoveryCode();
-  const kekRec = await deriveKEKRec(codeBytes, ctx.accountId);
-  const verifier = await deriveVerifier(codeBytes, ctx.accountId);
-  const kMac = await deriveKMac(ctx.dek);
-  const envelopeRec = await wrapEnvelope({
-    kek: kekRec, dek: ctx.dek, kMac, accountId: ctx.accountId, credentialId: 'recovery',
-  });
+  const { formatted, material } = await mintRecoveryMaterial(ctx);
 
   const res = await fetch('/api/recovery-material', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ envelope: envelopeToWire(envelopeRec), verifier: toBase64(verifier) }),
+    body: JSON.stringify(material),
   });
   if (!res.ok) throw new Error('Could not save your recovery material. Please try again.');
 
+  renderKitScreen(app, { accountId: ctx.accountId, formatted, onContinue: () => enterApp(ctx) });
+}
+
+// Generates a recovery code and everything derived from it, WITHOUT deciding
+// how it reaches the server.
+//
+// That seam exists because the two paths upload it differently and must. Signup
+// PUTs it on its own; recovery has to hand it to the enrollment request so the
+// rotation and the new passkey commit in one server transaction — a redeemed
+// code must not survive as a second upload that might never happen.
+export async function mintRecoveryMaterial({ accountId, dek }) {
+  const { codeBytes, formatted } = await generateRecoveryCode();
+  const kekRec = await deriveKEKRec(codeBytes, accountId);
+  const verifier = await deriveVerifier(codeBytes, accountId);
+  const kMac = await deriveKMac(dek);
+  const envelopeRec = await wrapEnvelope({
+    kek: kekRec, dek, kMac, accountId, credentialId: 'recovery',
+  });
+  return {
+    formatted,
+    material: { envelope: envelopeToWire(envelopeRec), verifier: toBase64(verifier) },
+  };
+}
+
+// The Emergency Kit screen: show the code once, gate the exit on the user
+// actually producing a copy of it. Shared verbatim with the recovery path,
+// because the screen that decides whether an account stays recoverable is not a
+// thing to have two of.
+export function renderKitScreen(app, { accountId, formatted, onContinue }) {
   const kitUrl = location.origin;
-  const kitDoc = buildKitDocument({ kitUrl, accountId: ctx.accountId, formatted });
+  const kitDoc = buildKitDocument({ kitUrl, accountId, formatted });
 
   app.innerHTML = `
     <section class="ceremony kit">
@@ -248,7 +275,7 @@ export async function renderEmergencyKit(app, ctx) {
   // account id must not be able to become markup on the one page that holds
   // the DEK in memory.
   app.querySelector('#kit-url').textContent = kitUrl;
-  app.querySelector('#kit-account-id').textContent = ctx.accountId;
+  app.querySelector('#kit-account-id').textContent = accountId;
   app.querySelector('#kit-code').textContent = formatted;
 
   const checkbox = app.querySelector('#kit-saved');
@@ -277,7 +304,7 @@ export async function renderEmergencyKit(app, ctx) {
     // In-app browsers and some privacy modes refuse Blob downloads. Fall
     // through to print rather than leaving the user behind a gate that cannot
     // be opened.
-    if (!downloadKit(kitDoc, ctx.accountId)) printKit(kitDoc);
+    if (!downloadKit(kitDoc, accountId)) printKit(kitDoc);
     markProduced();
   });
   app.querySelector('#kit-print').addEventListener('click', () => {
@@ -287,7 +314,7 @@ export async function renderEmergencyKit(app, ctx) {
 
   button.addEventListener('click', () => {
     button.disabled = true;
-    enterApp(ctx).catch((err) => {
+    Promise.resolve(onContinue()).catch((err) => {
       button.disabled = false;
       showError(app, err.message || String(err));
     });
@@ -300,7 +327,7 @@ export async function renderEmergencyKit(app, ctx) {
 // after registration, a user who closed the tab on the Emergency Kit screen
 // would reload straight into an unlocked vault with no recovery code — holding
 // data they cannot recover and never having been told.
-async function enterApp(ctx) {
+export async function enterApp(ctx) {
   try {
     await establishLdkCache(ctx.dek, ctx.accountId);
   } catch {

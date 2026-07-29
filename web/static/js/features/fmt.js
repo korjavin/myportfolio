@@ -118,19 +118,26 @@ export function shareBasisPoints(part, total) {
  *
  * A POSITION IS OPAQUE. Screens render whatever identity the engine hands them
  * and must not reconstruct one: no keying a row, map or DOM id off
- * `securityId`. Today portfolio.js returns one position per security; bd
- * g7e.11 re-keys them by (accountId, securityId), so the same ETF at two
- * brokers becomes two positions. Every screen goes through this function, so
- * that change is one edit here — adding the account qualifier to the label —
- * rather than a hunt through three screens for a label built inline.
+ * `securityId`. portfolio.js keys positions by (accountId, securityId), so the
+ * same ETF at two brokers is two positions — and two rows on Holdings, two
+ * bars on the Dashboard allocation. Naming them by security alone made those
+ * pairs pixel-identical, which reads as a duplicate-rendering bug rather than
+ * as two real holdings, so the broker is part of the name.
  *
- * Not pre-built for that: reading a field the engine does not emit yet would
- * read as a bug today, and `filter(Boolean)` on `undefined` is scaffolding.
+ * Qualified whenever the engine supplies an `accountName`, not only when a
+ * security happens to be held twice: deciding that needs the whole position
+ * list, and comparing securityIds across it is precisely the reconstruction
+ * the opacity rule forbids. A label that is stable regardless of what else the
+ * portfolio contains is also the one that does not change under the user when
+ * they open a second depot. An unattributed position (§4: a trade that named
+ * no securities account) has no accountName and stays bare.
  */
 export function positionLabel(position) {
     if (!position) return UNKNOWN;
-    if (position.ticker && position.name) return `${position.ticker} · ${position.name}`;
-    return position.ticker || position.name || position.securityId || UNKNOWN;
+    const security = (position.ticker && position.name)
+        ? `${position.ticker} · ${position.name}`
+        : (position.ticker || position.name || position.securityId || UNKNOWN);
+    return position.accountName ? `${security} · ${position.accountName}` : security;
 }
 
 const TX_LABELS = {

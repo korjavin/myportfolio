@@ -1,0 +1,28 @@
+<!doctype html>
+<!--
+  The recovery page (A16, Path C): reached from the Emergency Kit, on a device
+  that has no passkey and no warm cache. Separate from vault.html for the same
+  reason vault.html is separate from index.html — the pages that handle key
+  material load none of the app's code.
+
+  No inline <script> or <style>: the origin's CSP is script-src 'self' /
+  style-src 'self' (internal/server/server.go), and this page ends up holding
+  the DEK in memory.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>myportfolio — recover</title>
+  </head>
+  <body>
+    <main id="app">
+      <section class="ceremony">
+        <h1>Recover your vault</h1>
+        <p>Loading&hellip;</p>
+      </section>
+    </main>
+    <script type="module" src="/js/core/recover.js"></script>
+  </body>
+</html>
