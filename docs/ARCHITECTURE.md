@@ -322,16 +322,19 @@ hold. Provider config and API keys live in the vault as `settings.quoteProviders
 - Crypto: CoinGecko (CORS-enabled, free tier works keyless).
 - Stocks/ETFs: a CORS-enabled provider the user brings a key for (Finnhub / Twelve Data /
   Alpha Vantage). Yahoo Finance is **not** usable browser-direct — it blocks CORS.
-- The document's CSP `connect-src` is a **static** allowlist of the quote hosts, **derived at startup
-  from `quotes.js`'s frozen `QUOTE_HOSTS`** rather than restated in Go — `internal/server` lifts them
-  out of the embedded `domain/quotes.js`, and a test fails if the two ever diverge. Two lists of
+- The document's CSP `connect-src` is a **static** allowlist of the outbound hosts, **derived at
+  startup from `quotes.js`'s frozen `QUOTE_HOSTS` and `fx.js`'s frozen `FX_HOSTS`** rather than
+  restated in Go — `internal/server` lifts them out of the embedded domain modules with one
+  parameterised parser, and a test fails if either map ever diverges from the served header. Two
+  lists of
   "which hosts may we contact" drift silently in both directions: an XSS uses the gap, or a
   legitimate provider simply never works.
 
   *This is deliberately **not** medtracker's per-account dynamic egress design*, which an earlier
   draft of this section promised. That design has a `PUT /api/egress-hosts` endpoint, per-account
-  state and a per-request CSP, because its users register arbitrary hostnames. `QUOTE_HOSTS` is a
-  frozen two-element map and Settings only offers providers drawn from it, so an endpoint plus
+  state and a per-request CSP, because its users register arbitrary hostnames. `QUOTE_HOSTS` and
+  `FX_HOSTS` are frozen constant maps and Settings only offers providers drawn from them, so an
+  endpoint plus
   storage to express a two-element constant is machinery for a problem we do not have.
 
   Hosts are scheme-qualified (`https://api.coingecko.com`, not the bare host) so a plaintext-http
@@ -344,8 +347,12 @@ hold. Provider config and API keys live in the vault as `settings.quoteProviders
   document is a bypass gadget for the whole origin. The guard tokenises every directive rather than
   substring-matching `"https:"`, which cannot tell a legitimate host source from the wildcard.
 
-  Residual, stated rather than implied: two hosts is the entire egress budget, and each one widens
-  what an on-origin XSS could reach. The CSP narrows that; it does not close it.
+  Residual, stated rather than implied: **three hosts is the entire egress budget** — two quote
+  providers plus the ECB rate feed — and each one widens what an on-origin XSS could reach. The CSP
+  narrows that; it does not close it. The three are not equally costly: a quote provider learns which
+  *instruments* you hold, while the ECB feed learns only which *currencies* — no ticker, no ISIN, no
+  amount. A fourth host reds `TestQuoteHostAllowlist` until a human types it, and that gate is the
+  point: adding egress must be a decision, never a side effect.
 
 **Opt-in proxy fallback**: `GET /api/quote?provider=&symbol=` for users with no key. It is gated
 behind an explicit consent screen stating plainly that *the server will see which symbols you hold*.
