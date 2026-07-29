@@ -38,6 +38,17 @@ const (
 	// must fail to open in the other rather than half-work (ARCHITECTURE.md §8.1).
 	frameAADLabel = "mp/v1/mcp"
 	nonceSize     = 12
+
+	// FrameOverheadBytes is what a frame costs on top of its payload: the
+	// 12-byte nonce plus AES-GCM's 16-byte tag.
+	//
+	// Exported because the relay's cap (bd myportfolio-ybp.2) is on the WHOLE
+	// frame — coder/websocket's SetReadLimit measures the message — so the
+	// largest payload that survives a 64 KiB cap is 65536-28 = 65508, not
+	// 65536. Both suites pin that arithmetic. Re-deriving it in each of C2,
+	// C3 and C4 is how one of the three ends up off by 28 bytes and drops
+	// exactly the largest answers, which reads as "big queries hang".
+	FrameOverheadBytes = nonceSize + 16
 )
 
 // encodeFields mirrors web/static/js/core/crypto.js's encodeFields: uint16-BE

@@ -373,6 +373,12 @@ export function isGzip(bytes) {
 // 9-byte label and pairingId), so the guard in encodeFields can be tripped
 // only by an absurd pairing id — and then it throws on both sides rather than
 // truncating mod 65536 into an AAD that silently disagrees with Go's.
+//
+// The relay's cap is on the FRAME, not the payload, so the largest payload
+// that survives it is 65536 - 28 (nonce ‖ tag). internal/mcpshim's
+// FrameOverheadBytes is the same 28 on the Go side; mcp-frame.test.mjs pins
+// the sealed length exactly, because a responder that budgets a full 64 KiB
+// payload drops precisely the largest answers and calls it a hang.
 const MCP_LABEL = 'mp/v1/mcp';
 
 export async function sealMCPFrame(pairingKey, pairingId, payload) {

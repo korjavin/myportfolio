@@ -129,15 +129,24 @@ describe('mp/v1/mcp frames — pinned cross-implementation vectors', () => {
     assert.notEqual(hex(a), hex(b), 'two seals of the same payload are identical — the nonce is not fresh');
   });
 
-  it('round-trips a 64 KiB payload — the relay cap, not encodeFields, is the limit', async () => {
+  it('round-trips a payload filling the relay cap — that cap, not encodeFields, is the limit', async () => {
     // encodeFields' uint16 prefix binds only the AAD's two fields (the 9-byte
     // label and pairingId); the payload is not a field, so a frame sitting at
     // the relay's 64 KiB cap never approaches 65535. Pin that, because "the
     // two limits meet near the cap" is the intuition this test refutes.
+    //
+    // The cap is on the FRAME (the relay sets a websocket read limit), so the
+    // largest payload that survives it is 65536 - 28, not 65536. Assert the
+    // sealed length exactly: internal/mcpshim's FrameOverheadBytes carries the
+    // same 28 for Go, and a responder that budgets a full 64 KiB payload would
+    // drop precisely the largest answers.
     const { sealMCPFrame, openMCPFrame } = await crypto_();
-    const big = new Uint8Array(64 * 1024).fill(0x70);
-    const got = await openMCPFrame(key, pairingId, await sealMCPFrame(key, pairingId, big));
-    assert.equal(got.length, big.length);
+    const RELAY_CAP = 64 * 1024;
+    const OVERHEAD = 12 + 16; // nonce ‖ AES-GCM tag
+    const big = new Uint8Array(RELAY_CAP - OVERHEAD).fill(0x70);
+    const frame = await sealMCPFrame(key, pairingId, big);
+    assert.equal(frame.length, RELAY_CAP);
+    assert.equal((await openMCPFrame(key, pairingId, frame)).length, big.length);
   });
 
   it('throws rather than truncating when a field exceeds the uint16 prefix', async () => {

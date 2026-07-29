@@ -219,16 +219,22 @@ func TestEncodeFieldsRejectsOversizedField(t *testing.T) {
 		t.Fatalf("a 65535-byte field must still be accepted: %v", err)
 	}
 	// A frame at the relay's 64 KiB cap is unaffected: the payload is not a
-	// field, so it never meets this limit.
+	// field, so it never meets this limit. Note the payload is the cap MINUS
+	// FrameOverheadBytes — the cap is on the frame, so a full 64 KiB payload
+	// would seal to 65564 bytes and the relay would reject it.
+	const relayCap = 64 << 10
 	v, key := loadVectors(t)
-	big := bytes.Repeat([]byte("p"), 64*1024)
+	big := bytes.Repeat([]byte("p"), relayCap-FrameOverheadBytes)
 	frame, err := SealFrame(key, v.PairingID, big)
 	if err != nil {
-		t.Fatalf("seal a 64 KiB payload: %v", err)
+		t.Fatalf("seal the largest payload that fits the cap: %v", err)
+	}
+	if len(frame) != relayCap {
+		t.Fatalf("frame is %d bytes, want exactly the %d-byte cap", len(frame), relayCap)
 	}
 	got, err := OpenFrame(key, v.PairingID, frame)
 	if err != nil || !bytes.Equal(got, big) {
-		t.Fatalf("64 KiB payload did not round-trip: %v", err)
+		t.Fatalf("payload at the cap did not round-trip: %v", err)
 	}
 }
 
