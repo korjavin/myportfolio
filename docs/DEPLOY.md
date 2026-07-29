@@ -9,23 +9,29 @@ Files: [`Dockerfile`](../Dockerfile), [`compose.yaml`](../compose.yaml),
 
 ---
 
-## 1. The setting you have to get right
+## 1. Optional tuning: `MYPORTFOLIO_TRUSTED_PROXIES`
 
 ```
 MYPORTFOLIO_TRUSTED_PROXIES=<the Traefik network's subnet>     # e.g. 172.20.0.0/16
 ```
 
-This names the reverse proxies whose `X-Forwarded-For` the ceremony rate limiter may believe. **It
-has no safe default for this topology, and both ways of getting it wrong fail silently** — nothing
-logs, nothing 500s, the app looks fine:
+This names the reverse proxies whose `X-Forwarded-For` the ceremony rate limiter may believe. It
+affects **exactly four endpoints** — the WebAuthn ceremonies, limited to 30/minute per client IP.
+Nothing else in the app reads it, and nothing about Traefik requires it.
 
-| Value | What silently happens |
+Leave it unset and the app trusts loopback only, so behind Traefik every request looks like it came
+from Traefik and **all callers share one bucket of 30 sign-in ceremonies per minute**. On a personal
+or family deployment nobody comes near that ceiling, which is why this is not a prerequisite. Set it
+once enough people use the deployment concurrently that one person's passkey retries could throttle
+another.
+
+| Value | Effect |
 |---|---|
-| **unset** (loopback-only default) | Every request arrives from Traefik, so **all users share one rate-limit bucket**. One person retrying a passkey throttles everybody. Correct for a directly-exposed binary; wrong here. |
-| **too wide** — `10.0.0.0/8`, `172.16.0.0/12`, "any private address" | Any caller that can reach the app forges a fresh `X-Forwarded-For` per request and **the ceremony limiter stops existing**. This bypass has already been found in this codebase once (90 ceremonies through a limit of 30) and is regression-tested in `internal/server/rate_limit_test.go`. |
-| **the Traefik network's subnet**, with no published container port | Correct. Each real client gets its own bucket; a forged header buys nothing. |
+| **unset** (loopback-only default) | Every request arrives from Traefik, so all users share one bucket of 30 ceremonies/minute. Fine for a personal or family deployment. |
+| **the Traefik network's subnet**, with no published container port | Each real client gets its own bucket; a forged header buys nothing. |
+| **too wide** — `10.0.0.0/8`, `172.16.0.0/12`, "any private address" | Don't. With a published container port, any caller forges a fresh `X-Forwarded-For` per request and **the ceremony limiter stops existing**. This bypass has already been found in this codebase once (90 ceremonies through a limit of 30) and is regression-tested in `internal/server/rate_limit_test.go`. |
 
-Read the value off the network Traefik actually runs on:
+If you do set it, read the value off the network Traefik actually runs on:
 
 ```bash
 docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' <your-traefik-network>
@@ -35,16 +41,7 @@ Tighter alternative if your Traefik has a pinned address: give it the single IP 
 subnet (`MYPORTFOLIO_TRUSTED_PROXIES=172.20.0.5`, a bare address is accepted and treated as a /32).
 That is strictly better, at the cost of breaking whenever Traefik's container is reassigned.
 
-`compose.yaml` declares this variable with `${...:?}`, so **a stack missing it refuses to deploy**
-rather than coming up quietly wrong:
-
-```
-error while interpolating services.myportfolio.environment.MYPORTFOLIO_TRUSTED_PROXIES:
-required variable MYPORTFOLIO_TRUSTED_PROXIES is missing a value: set to the Traefik network
-subnet (e.g. 172.20.0.0/16) or Traefik's container IP — never a blanket private range.
-```
-
-### Why "no published port" is part of the setting
+### Why "no published port" matters here
 
 `compose.yaml` deliberately has **no `ports:` section**. Trusting the Traefik network's subnet is
 only honest while the *only* things that can reach the app are containers on that network. Publish a
@@ -132,8 +129,8 @@ with the same table as comments:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `MYPORTFOLIO_TRUSTED_PROXIES` | **yes** | §1. Deploy fails without it. |
-| `MYPORTFOLIO_HOST` | **yes** | Public hostname, e.g. `portfolio.example.com`. Deploy fails without it. |
+| `MYPORTFOLIO_HOST` | **yes** | Public hostname, e.g. `portfolio.example.com`. The only variable the stack requires; deploy fails without it. |
+| `MYPORTFOLIO_TRUSTED_PROXIES` | no | §1. Unset means one shared bucket of 30 ceremonies/minute. |
 | `TRAEFIK_NETWORK` | no | Defaults to `traefik`. Must be the external network Traefik is on. |
 | `TRAEFIK_CERTRESOLVER` | no | Defaults to `letsencrypt`. Must match a resolver your Traefik defines. |
 
