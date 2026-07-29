@@ -898,6 +898,34 @@ test('an unpriceable currency leaves market value null rather than counting it a
   assert.equal(only(snap.securities).marketValue, null);
 });
 
+test('a fully-sold foreign holding needs no rate to be worth nothing', async () => {
+  // Found by codex review. The security still has a stored close, so the
+  // position is priced — but zero shares are worth zero in every currency, and
+  // demanding a close-date rate to convert that zero invents a gap over a
+  // number that was never in doubt. A closed holding is the most ordinary
+  // thing in a portfolio.
+  const f = fixture();
+  f.put('account', { name: 'Cash', kind: 'cash', currency: 'EUR' }, 'acct_1');
+  f.put('account', { name: 'Depot', kind: 'securities', currency: 'EUR' }, 'pf_1');
+  f.put('security', { name: 'VOO', currency: 'USD', assetClass: 'etf' }, 'sec_1');
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  f.put('fx', { pair: 'EURUSD', date: '2024-03-28', rate: 108110000 }, 'fx_1');
+  const leg = { accountId: 'acct_1', portfolioId: 'pf_1', securityId: 'sec_1', currency: 'USD' };
+  f.put('transaction', { ...leg, type: 'buy', date: '2024-03-28', shares: 200000000, amount: 100000 }, 'tx_buy');
+  f.put('transaction', { ...leg, type: 'sell', date: '2024-03-28', shares: 200000000, amount: 110000 }, 'tx_sell');
+  // A close well past the last stored rate — the case that used to gap.
+  f.put('price', { securityId: 'sec_1', year: 2025, closes: { '11-14': 55000000000 } });
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.deepEqual(snap.issues, []);
+  assert.equal(p.shares, 0);
+  assert.equal(p.marketValue, 0);
+  assert.equal(p.unrealized, 0);
+  assert.equal(snap.totals.marketValue, 0);
+});
+
 test('a CHF-reporting portfolio crosses two EUR pairs into a rate neither states', async () => {
   const f = fixture();
   f.put('account', { name: 'Cash', kind: 'cash', currency: 'CHF' }, 'acct_1');

@@ -461,7 +461,12 @@ export function createPortfolioDomain({ records }) {
 
       let value = marketValue(p.shares, quote.close);
       const secCcy = p.currency ? String(p.currency).toUpperCase() : null;
-      if (reportingCcy && secCcy && secCcy !== reportingCcy) {
+      // Zero is zero in every currency, so a closed position needs no rate.
+      // Found by codex review: without this, a fully-sold foreign holding whose
+      // security still has a stored close manufactures a `currency_not_converted`
+      // gap and a null market value over a number that was never in doubt —
+      // and a fully-sold holding is the most ordinary thing in a portfolio.
+      if (value !== 0 && reportingCcy && secCcy && secCcy !== reportingCcy) {
         // At the CLOSE's day, not the trade dates: this is what the holding is
         // worth as of the valuation, so it takes the rate as of the valuation.
         const applicable = fxRates.rate(secCcy, reportingCcy, quote.date);
