@@ -17,56 +17,246 @@ import {
 } from './store.js';
 import { syncState, describeSync, syncNow, subscribeSync } from './sync.js';
 
-// §7: browser-direct with the user's own key is the default, so the server
-// never learns which symbols you hold. CoinGecko's free tier is keyless; the
-// equity providers all need one. Yahoo is absent on purpose — it blocks CORS
-// and cannot be used browser-direct at all.
-const PROVIDERS = [
-    { value: '', label: 'None' },
-    { value: 'coingecko', label: 'CoinGecko (crypto, keyless)' },
-    { value: 'finnhub', label: 'Finnhub' },
-    { value: 'twelvedata', label: 'Twelve Data' },
-    { value: 'alphavantage', label: 'Alpha Vantage' },
-];
-
 function generalCard(rerender) {
     const currency = ui.input(reportingCurrency(), { placeholder: DEFAULT_CURRENCY });
-    const providers = state.settings.quoteProviders ?? {};
-    const active = Object.keys(providers)[0] ?? '';
-    const providerSel = ui.select(PROVIDERS, active);
-    const apiKey = ui.input(providers[active]?.apiKey ?? '', { type: 'password', placeholder: 'API key' });
-
-    // Repopulate the key when the provider changes. Without this the field keeps
-    // showing the previously selected provider's key, and Save then stores it
-    // under the NEW provider — so the next quote fetch sends your Finnhub
-    // credential to Alpha Vantage. Handing one provider's secret to another is
-    // the kind of bug a password field hides, since nobody can see it happen.
-    providerSel.addEventListener('change', () => {
-        apiKey.value = providers[providerSel.value]?.apiKey ?? '';
-    });
 
     const save = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Save', async () => {
-        const patch = { reportingCurrency: currency.value.trim().toUpperCase() || DEFAULT_CURRENCY };
-        patch.quoteProviders = providerSel.value
-            ? { [providerSel.value]: { apiKey: apiKey.value.trim() } }
-            : {};
-        await putSettings(patch);
+        await putSettings({ reportingCurrency: currency.value.trim().toUpperCase() || DEFAULT_CURRENCY });
         rerender();
     });
-
-    const actions = ui.el('div', 'flex-row flex-between gap-sm mt-md');
-    actions.appendChild(ui.el('span', 'flex-1'));
-    actions.appendChild(save);
 
     return ui.card(
         ui.sectionLabel('General'),
         ui.field('Reporting currency', currency),
-        ui.el('p', 'wg-muted text-sm m-0',
-            'Quote provider credentials stay on this device (and, once you sign up, inside the '
-            + 'vault). Quotes are fetched browser-direct so the server never learns your symbols.'),
-        ui.fieldRow(ui.field('Quote provider', providerSel), ui.field('API key', apiKey)),
-        actions
+        actionRow(save)
     );
+}
+
+// --- Quote providers -------------------------------------------------------
+
+// §7: browser-direct with the user's own key is the default, so the server
+// never learns which symbols you hold. `settings.quoteProviders` is a MAP and
+// every provider in it is live at once — CoinGecko prices crypto with no key
+// while Twelve Data prices stocks and ETFs with the user's own key, and a
+// portfolio holding both BTC and VWCE needs both configured simultaneously.
+// web/domain/quotes.js has always read it that way (it routes per security via
+// `security.quote.provider` and looks the config up by name); this card is what
+// had to catch up.
+//
+// Finnhub and Alpha Vantage are deliberately absent: quotes.js knows neither,
+// so choosing one used to price nothing at all and say nothing about it.
+// Offering a provider that silently does nothing is worse than not offering it.
+// Yahoo is absent for a different reason — it blocks CORS, so it cannot be used
+// browser-direct at all. features.settings.test.js pins this list against
+// quotes.js's exported QUOTE_HOSTS so the two cannot drift apart again.
+export const QUOTE_PROVIDERS = [
+    {
+        name: 'coingecko',
+        label: 'CoinGecko',
+        // The note deliberately does not promise that switching this off stops
+        // CoinGecko being used: quotes.js prices any security routed to
+        // `coingecko` whether or not the map lists it, because a provider that
+        // needs no key can never be skipped for `no_api_key`. Listing it is
+        // what the §7 CSP allowlist will be derived from (myportfolio-18h.9).
+        note: 'Crypto. The free tier needs no key, so nothing but the choice is stored.',
+        // Optional all the same: quotes.js sends a stored CoinGecko key as
+        // `x_cg_demo_api_key`, which raises the keyless rate limit. The field
+        // exists so that key is visible and editable rather than silently
+        // carried — see mergeQuoteProviders.
+        keyNote: 'Optional. A CoinGecko demo key only raises the free-tier rate limit.',
+        needsKey: false,
+    },
+    {
+        name: 'twelvedata',
+        label: 'Twelve Data',
+        note: 'Stocks and ETFs. Bring your own key — it never leaves this device. Blank turns it off.',
+        needsKey: true,
+    },
+];
+
+const KNOWN_PROVIDERS = new Set(QUOTE_PROVIDERS.map((p) => p.name));
+
+function configOf(map, name) {
+    const value = Object.hasOwn(map, name) ? map[name] : null;
+    return value && typeof value === 'object' ? value : null;
+}
+
+/**
+ * One row per provider this card renders, derived from the stored map. Pure, so
+ * the DOM builder and the tests work from the same thing rather than from two
+ * descriptions of it that can disagree.
+ *
+ * `keyField` says whether the row renders a credential input of its own. Only a
+ * row that does may write `apiKey`, and only under its own name — that is the
+ * structural half of the fix for 8cb4a3f, where one shared key field meant Save
+ * could file one provider's credential under another's.
+ *
+ * Providers that are stored but no longer supported still get a row: an install
+ * that configured Finnhub before it was dropped would otherwise be left with an
+ * inert credential it can neither see nor delete. They render no key field, so
+ * whatever they hold is carried through untouched until the row is switched off.
+ */
+export function quoteProviderRows(stored) {
+    const map = stored && typeof stored === 'object' ? stored : {};
+    const rows = QUOTE_PROVIDERS.map((provider) => {
+        const config = configOf(map, provider.name);
+        const apiKey = typeof config?.apiKey === 'string' ? config.apiKey : '';
+        return {
+            ...provider,
+            apiKey,
+            keyField: true,
+            // A provider that requires a key and has none is not configured —
+            // quotes.js would skip every one of its securities with
+            // `no_api_key`, so the key field is also its on switch. One that
+            // needs no key is configured by being in the map at all, and gets
+            // an explicit toggle instead.
+            enabled: provider.needsKey ? apiKey !== '' : Object.hasOwn(map, provider.name),
+        };
+    });
+
+    for (const name of Object.keys(map)) {
+        if (KNOWN_PROVIDERS.has(name)) continue;
+        rows.push({
+            name,
+            label: name,
+            note: 'Stored by an older version. quotes.js does not know it, so it prices nothing.',
+            needsKey: false,
+            keyField: false,
+            apiKey: '',
+            enabled: true,
+            unsupported: true,
+        });
+    }
+    return rows;
+}
+
+/**
+ * Merge this card's rows into the stored provider map — never replace it.
+ * Replacing is the bug: it made configuring an equity provider erase CoinGecko,
+ * silently, so a portfolio holding both stopped pricing half of itself.
+ *
+ * Three invariants, all load-bearing:
+ *
+ *  - `apiKey` is written only from a row that rendered its own key field, and
+ *    only under that row's own name. A row with no field of its own never
+ *    touches the stored key at all. Both halves matter: 8cb4a3f filed one
+ *    provider's credential under another's name, and quotes.js forwards a
+ *    stored CoinGecko key as `x_cg_demo_api_key` — so a crossed key is not
+ *    inert, it is handed to the wrong vendor on the next refresh.
+ *  - Nothing is destroyed that the user cannot see. Clearing a key field is how
+ *    a key is removed, which is why every provider that accepts one renders it
+ *    rather than being quietly rewritten behind a password mask.
+ *  - Anything else in a provider's config (`minIntervalMs`, whatever a later
+ *    version adds) survives, because this card does not own those fields.
+ *
+ * A name absent from `edits` is left exactly as stored.
+ */
+export function mergeQuoteProviders(stored, edits) {
+    const next = { ...(stored && typeof stored === 'object' ? stored : {}) };
+    for (const edit of edits ?? []) {
+        const name = edit?.name;
+        if (!name) continue;
+        if (!edit.enabled) {
+            delete next[name];
+            continue;
+        }
+        const config = { ...(configOf(next, name) ?? {}) };
+        if (edit.keyField) {
+            if (edit.apiKey) config.apiKey = edit.apiKey;
+            else delete config.apiKey;
+        }
+        next[name] = config;
+    }
+    return next;
+}
+
+// The .wg-toggle primitive as markup. js/components/wg-toggle.js has the same
+// ten lines, but it is a window-global IIFE that nothing loads — wiring a script
+// tag and a precache entry to reuse it costs more than it saves.
+function toggleControl(checked, ariaLabel) {
+    const node = ui.el('label', 'wg-toggle');
+    const input = ui.el('input', 'wg-toggle__input');
+    input.type = 'checkbox';
+    input.checked = checked;
+    input.setAttribute('aria-label', ariaLabel);
+    const track = ui.el('span', 'wg-toggle__track');
+    track.setAttribute('aria-hidden', 'true');
+    const knob = ui.el('span', 'wg-toggle__knob');
+    knob.setAttribute('aria-hidden', 'true');
+    node.append(input, track, knob);
+    return { node, input };
+}
+
+function settingsRow(title, note, control) {
+    const row = ui.el('div', 'wg-settings-row');
+    const content = ui.el('div', 'wg-settings-row__content');
+    content.appendChild(ui.el('p', 'wg-settings-row__title', title));
+    content.appendChild(ui.el('p', 'wg-settings-row__desc', note));
+    const slot = ui.el('div', 'wg-settings-row__control');
+    slot.appendChild(control);
+    row.append(content, slot);
+    return row;
+}
+
+function quotesCard(rerender) {
+    const rows = quoteProviderRows(state.settings?.quoteProviders);
+    const nodes = [];
+    const reads = [];
+
+    for (const row of rows) {
+        // A provider that requires a key needs no switch — the key is the
+        // switch. Everything else gets an explicit one, which is also the only
+        // way to delete a provider this build no longer supports.
+        const toggle = row.needsKey ? null : toggleControl(row.enabled, `Use ${row.label}`);
+        if (toggle) nodes.push(settingsRow(row.label, row.note, toggle.node));
+
+        // Rendered with the stored key in it, so saving an untouched form keeps
+        // it. A field that rendered blank for secrecy would read back as "no
+        // key" and delete the credential on the next Save.
+        const key = row.keyField
+            ? ui.input(row.apiKey, { type: 'password', placeholder: toggle ? 'Optional key' : 'API key' })
+            : null;
+        if (key) {
+            nodes.push(ui.field(toggle ? `${row.label} key` : `${row.label} API key`, key));
+            nodes.push(ui.el('p', 'wg-muted text-sm m-0', toggle ? row.keyNote : row.note));
+        }
+
+        reads.push(() => ({
+            name: row.name,
+            keyField: row.keyField,
+            // Only ever this row's own field, never another's.
+            apiKey: key ? key.value.trim() : '',
+            enabled: toggle ? toggle.input.checked : Boolean(key && key.value.trim()),
+        }));
+    }
+
+    const save = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Save providers', async () => {
+        // Merged against what is stored NOW, not the snapshot this card was
+        // rendered from: a sync landing while the form sat open must not be
+        // undone by pressing Save.
+        await putSettings({
+            quoteProviders: mergeQuoteProviders(state.settings?.quoteProviders, reads.map((read) => read())),
+        });
+        rerender();
+    });
+
+    return ui.card(
+        ui.sectionLabel('Quote providers'),
+        ui.el('p', 'wg-muted text-sm m-0',
+            'Configure every provider your portfolio needs — each security is priced by its own, so '
+            + 'crypto and equities do not compete for one slot. Credentials stay on this device (and, '
+            + 'once you sign up, inside the vault); quotes are fetched browser-direct so the server '
+            + 'never learns your symbols.'),
+        ...nodes,
+        actionRow(save)
+    );
+}
+
+function actionRow(button) {
+    const actions = ui.el('div', 'flex-row flex-between gap-sm mt-md');
+    actions.appendChild(ui.el('span', 'flex-1'));
+    actions.appendChild(button);
+    return actions;
 }
 
 // --- Sync ------------------------------------------------------------------
@@ -357,6 +547,7 @@ export function render(container) {
     container.replaceChildren(
         syncCard(rerender),
         generalCard(rerender),
+        quotesCard(rerender),
         recordsCard({
             label: 'Accounts',
             noun: 'account',
