@@ -24,6 +24,7 @@
 // hand.
 
 import { createVaultRecords } from '../core/vault-records.js';
+import { createLocalRecords } from '../core/records.js';
 import { tryWarmUnlock } from '../core/unlock.js';
 
 // Two events fire for one alt-tab (focus, then visibilitychange), and a user
@@ -121,7 +122,8 @@ async function pull(onRecords) {
  * Choose the port implementation — and, now, the database it reads — and hand
  * it to the store.
  *
- * `adopt` is only ever called with a vault that OPENED. A device that fails
+ * `adopt` is only ever called with a port that can serve the user's own rows,
+ * and only ever with a SYNCING one that has actually opened. A device that fails
  * state-sync's wrong-account backstop keeps serving its records from
  * localRecords — unsynced, intact, and loudly flagged — rather than uploading
  * them into somebody else's vault.
@@ -180,13 +182,16 @@ export async function startSync({
         return null;
     }
 
+    // Which database this account's rows are in, once openMirror has decided.
+    // Held outside the try because the failure path needs it: see below.
+    let mirror = db;
     try {
         // The account's own mirror, with anything typed before signup migrated
         // into it. Opening it can fail (private browsing, a blocked upgrade) and
         // that failure belongs in the same place as a vault that would not open:
         // the app keeps serving the pre-signup mirror rather than syncing rows
         // it cannot vouch for.
-        const mirror = await openMirror(ctx.accountId, db);
+        mirror = await openMirror(ctx.accountId, db);
         vault = await create({
             db: mirror,
             dek: ctx.dek,
@@ -203,6 +208,13 @@ export async function startSync({
         // use; it stays as the backstop for the case they do not cover, a mirror
         // this build did not name.
         fatal = err;
+        // The vault did not open, but the mirror did — and openMirror has
+        // already MOVED the pre-signup rows into it. Leaving the store on the
+        // pre-signup mirror would show this user an empty portfolio next to a
+        // sync error, which is indistinguishable from having lost it. So the
+        // port still swaps, to an unsynced localRecords over the database the
+        // rows are actually in: same records, no sync, loudly flagged.
+        if (mirror !== db) adopt(createLocalRecords({ db: mirror, now }));
         emit();
         await onRecords();
         return null;

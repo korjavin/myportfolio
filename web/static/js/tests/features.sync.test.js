@@ -267,6 +267,34 @@ describe('two accounts in one browser profile (bd myportfolio-18h.12)', () => {
         assert.equal(syncState().fatal.code, 'wrong-account');
     });
 
+    test('a vault that will not open still shows the rows the migration just moved', async () => {
+        // The migration runs before the vault opens, so between the two the
+        // user's portfolio lives in the account's mirror and nowhere else. If
+        // opening the vault then fails, serving the (now empty) pre-signup
+        // mirror would put an empty portfolio next to a sync error — which reads
+        // exactly like having lost it.
+        const device = fakeDevice();
+        const local = createLocalRecords({ db: device.db, now: () => BASE });
+        await local.put('transaction', 'tx_1', { type: 'deposit', date: '2024-01-02', amount: 1000000 });
+
+        const server = fakeServer({ serverNow: () => BASE });
+        const { vault, adopted } = await boot(server, {
+            db: device.db,
+            meta: null,
+            openMirror: device.openMirror,
+            openMeta: device.openMeta,
+            create: async () => { throw new Error('the vault would not open'); },
+        });
+
+        assert.equal(vault, null);
+        assert.equal(server.requests.length, 0, 'nothing may reach the wire');
+        assert.ok(adopted, 'the store must still be pointed at the database holding the rows');
+        assert.deepEqual((await adopted.list('transaction')).map((r) => r.recordId), ['tx_1']);
+        // Unsynced, and the failure is on screen.
+        assert.equal(typeof adopted.sync, 'undefined');
+        assert.equal(describeSync(syncState(), { online: true }).ambient, true);
+    });
+
     test('pre-signup rows go to the account that signs up, and to no other', async () => {
         // Typed on a plane with no account at all.
         const device = fakeDevice();
