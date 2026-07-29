@@ -122,7 +122,9 @@ export function openTxModal(record, defaults) {
         ui.fieldRow(ui.field('Type', typeSel), ui.field('Date', dateInput)),
         ...account.nodes,
         securityBlock,
-        ui.fieldRow(sharesField, ui.field(`Amount (${reportingCurrency()})`, amountInput)),
+        // Label with the transaction's own currency so a preserved foreign
+        // currency is visible rather than merely un-erased.
+        ui.fieldRow(sharesField, ui.field(`Amount (${values.currency || reportingCurrency()})`, amountInput)),
         ui.fieldRow(ui.field('Fees', feesInput), ui.field('Taxes', taxesInput)),
         ui.field('Note', noteInput),
     ];
@@ -189,7 +191,14 @@ export function openTxModal(record, defaults) {
             fees: feesInput.value,
             taxes: taxesInput.value,
             note: noteInput.value,
-            currency: reportingCurrency(),
+            // The transaction's OWN currency, never the current reporting
+            // currency. Overwriting it on edit would silence portfolio.js's
+            // `currency_not_converted` issue and make the engine add an
+            // imported USD amount straight into a EUR total — a silent
+            // misvaluation triggered by opening a form and pressing Save.
+            // Multi-currency conversion is B8; until then the engine's job is
+            // to warn, and this form's job is not to erase what it warns about.
+            currency: values.currency || reportingCurrency(),
         });
         if (errors.length > 0) return showErrors(errors);
 
