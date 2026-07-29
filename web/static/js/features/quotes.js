@@ -177,7 +177,7 @@ export function describeRefresh(report, securities = []) {
 
     const groups = new Map();
     const push = (kind, provider, securityId, message) => {
-        const key = `${kind} ${provider ?? ''}`;
+        const key = `${kind}\u0000${provider ?? ''}`;
         if (!groups.has(key)) groups.set(key, { kind, provider, names: [], message });
         groups.get(key).names.push(named.get(securityId) ?? securityId ?? 'an unnamed security');
     };

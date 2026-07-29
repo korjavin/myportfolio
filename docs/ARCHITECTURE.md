@@ -351,9 +351,12 @@ over near-verbatim. Four differences:
    signature and returns `{account_id, envelope}`; only then is
    `KEK = HKDF(prf, salt=account_id, info="mp/v1/kek" ‖ credential_id)` derived. PRF output never
    leaves the client, unchanged.
-3. **No push, no NK, no inbox keypair, no MCP relay.** A portfolio tracker has no background
-   notifications to decrypt, which deletes the single largest compromise in medtracker's design.
-   Do not port `push.js`, `inbox*`, `mcp*`.
+3. **No push, no NK, no inbox keypair.** A portfolio tracker has no background notifications to
+   decrypt, which deletes the single largest compromise in medtracker's design. Do not port
+   `push.js` or `inbox*`.
+   **The MCP relay is back in scope** — this clause used to say "no MCP relay, do not port `mcp*`",
+   and the owner reversed it: an AI connector is a headline goal for this product, not a nicety.
+   See §11. `sealMCPFrame`/`openMCPFrame` are therefore restored to `crypto.js` under `mp/v1/mcp`.
 4. **No oplog** — §6 replaces `sync.js`'s ops machinery with the state blob. Keep its
    `deriveKData`/`encryptSnapshot`-shaped primitives, drop `encryptRecord`/seq handling.
 
@@ -519,7 +522,78 @@ What *is* true and matters: **WebAuthn requires a secure context.** No ceremony 
 on a non-loopback host, so a proxy that fails to terminate TLS properly presents as *"passkeys don't
 work"* rather than as a TLS warning — a symptom that points nowhere near its cause.
 
-## 11. Tracks
+## 11. The AI connector — MCP over a blind relay
+
+**This is a headline goal for the product, not a side feature**: the point of holding a rigorous,
+complete portfolio locally is to be able to ask an AI about it. Ported from
+`../medicationtrackerbot`'s Tier 1 design (`docs/cloud-mode.md` §MCP), which solved the hard part.
+
+### The shape, and why it has to be this shape
+
+"MCP" and "a server that cannot read your data" genuinely conflict — **our server cannot answer a
+single query**, because it holds only ciphertext. So the server is a blind pipe and *the browser is
+the responder*:
+
+```
+Claude Desktop/Code ──stdio── mcpshim ──wss:// ciphertext ──► relay ──► your unlocked PWA tab
+                               (holds the pairing key)      (blind)    (decrypts, answers)
+```
+
+- **Frame format, both directions**: `nonce(12) ‖ AES-GCM(pairingKey, payload, aad)` where
+  `aad = encodeFields("mp/v1/mcp", pairingId)` and `payload` is one JSON-RPC MCP message.
+  The relay never holds the key and pipes opaque bytes. Binding `pairingId` into the AAD is what
+  stops a frame being replayed into a different pairing.
+- **The pairing key never touches the server.** Settings mints a `pairing_id` server-side, generates
+  32 random bytes client-side, and shows a one-time code carrying `{relay_url, pairing_id, key}`.
+  The key is stored as a vault record so any unlocked device can answer.
+- **Two tools only: `mcp_help` and `mcp_call`.** There is deliberately no `mcp_execute` — a
+  server-side script runner would have nothing to read, and giving it something to read is the one
+  property this whole design exists to prevent. Calling it returns an explicit error saying so,
+  rather than an opaque "unknown method" an agent will retry forever.
+
+### The constraint to state up front, not discover
+
+**Every call requires a live, unlocked browser tab.** There is no server-side fallback, by design.
+If no device is unlocked and online the call returns an actionable error rather than hanging. This
+is a real product limitation and belongs in the user-facing copy, not in a footnote.
+
+### v1 is read-only
+
+The ported catalog is **queries only** — holdings, valuation, performance, price history,
+transactions. An AI that can *advise* needs reads; an AI that can *write* to a portfolio is a
+materially different risk, and "the model misread the units and booked a sell" is not a failure mode
+worth shipping to be first. Write operations get their own bead, their own consent surface, and their
+own decision.
+
+### What the relay learns, stated honestly
+
+It cannot read frame contents. It does see **frame sizes, timing, and pairing ids** — so it learns
+that you asked something and roughly how big the answer was, but not what. That is a genuine
+metadata delta against the rest of §6's posture, where the server sees only an opaque blob on a
+debounced schedule. Say so in the security note.
+
+### Do not re-derive these — they are scar tissue
+
+- **Close codes are not interchangeable.** `4404` (no pairing at all) means stop *and purge* the
+  vault record; `4409` (a live pairing exists but this leg is not serving it) means stop and
+  **do not purge**, then release the election so the tab holding the current key takes over. The
+  pairing record is CRDT-synced, so a tab purging on `4409` deletes the pairing every other device
+  just adopted. A leg presenting no pairing id takes the `4409` path — it cannot prove which pairing
+  it holds.
+- **`4409` is sent from two places and both are needed**: rejecting a stale leg, and closing the leg
+  evicted when a newer one takes the device slot. Two *legitimate* devices take turns evicting each
+  other; an abrupt close reaches the browser as `1006`, which reads as a transient drop and gets
+  retried — re-evicting its replacement forever. Closing with `4409` makes the loser step aside.
+- One device leg per pairing is the standing limitation.
+
+### Where we diverge from the sibling
+
+Its catalog is **generated** from a 106-operation Go registry (`cmd/genmcpcatalog`). We have no such
+registry — our domain surface is six small modules in `web/domain/`. So our catalog is **hand-written
+and short**, and a drift test pins it against the domain modules' actual exports. Porting the
+generator would be building a machine to write ten lines.
+
+## 12. Tracks
 
 Two tracks, disjoint file ownership, meeting only at §3.
 
