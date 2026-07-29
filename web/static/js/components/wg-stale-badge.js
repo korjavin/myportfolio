@@ -4,9 +4,15 @@
 // PORT NOTE: the sibling's `mountFromKey(...)` is NOT here. It read the
 // `api_cache` Dexie table through `window.MedTrackerDB.ApiCache`, which is
 // that app's cache layer and does not exist in this one. `render` and
-// `formatLabel` below are pure and domain-neutral; whichever bead lands the
-// quote/price cache should add its own thin mount helper that resolves a
-// fetchedAt timestamp and calls `render`.
+// `formatLabel` below are pure and domain-neutral.
+//
+// The mount helper it asked for landed as `staleBadge()` in
+// js/features/quotes.js, and it lives there rather than here on purpose:
+// resolving "how old is the valuation" means reading portfolio.js's per-position
+// `priceDate` off the app's snapshot, which is this app's business. Note it is
+// NOT the last fetch time — that is null on every cold start, and a badge built
+// on it would reset to "never" on reload while the stored closes it is
+// describing are perfectly good.
 //
 // Tone selection is deterministic from {fetchedAt, isOffline, staleAfterMs}:
 //   • online + recent  → neutral tone (`Updated 5m ago`)

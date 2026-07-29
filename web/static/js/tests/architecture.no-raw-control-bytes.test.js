@@ -1,0 +1,69 @@
+// No shipped source file may contain a raw control byte.
+//
+// This has now happened twice, both times in a quotes file, and both times the
+// code was CORRECT — a NUL used as a map-key separator inside a template
+// literal, which JS parses happily and every test passes on.
+//
+// The damage is to tooling, not to the runtime. One raw NUL makes grep classify
+// the whole file as binary and print nothing, `git diff` render it as "Binary
+// files differ", and any review that greps for a symbol come back empty. During
+// review of g7e.17 that is exactly what happened: three greps for the bead's
+// load-bearing requirements returned nothing, and the honest reading of that
+// evidence was "the executor did not implement them". The feature was fully
+// implemented. A defect that makes correct code look absent is worse than one
+// that breaks it, because the reviewer's instinct is to reject rather than
+// investigate.
+//
+// The escape (backslash-u-0000) is identical at runtime and costs nothing, which is how
+// web/domain/quotes.js already writes the same separator.
+
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, dirname, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+
+// Tab, newline and carriage return are the legitimate control characters in
+// source. Everything else in the C0 range, plus DEL, is a mistake.
+const FORBIDDEN = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
+const SKIP_DIRS = new Set(['node_modules', 'fonts', 'vendor', 'icons', 'fixtures']);
+const TEXT = /\.(js|mjs|json|html|css|md|txt)$/;
+
+function walk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    if (e.isDirectory()) return SKIP_DIRS.has(e.name) ? [] : walk(join(dir, e.name));
+    return TEXT.test(e.name) ? [join(dir, e.name)] : [];
+  });
+}
+
+describe('Architecture – no raw control bytes in source', () => {
+  const files = walk(webRoot);
+
+  test('there are files to check', () => {
+    // Guards the guard: a bad glob here would make the assertion below vacuous,
+    // which is the failure mode this whole file exists to prevent.
+    assert.ok(files.length > 20, `only found ${files.length} source files under web/`);
+  });
+
+  test('every shipped source file is free of raw control bytes', () => {
+    const offenders = [];
+    for (const file of files) {
+      if (statSync(file).size === 0) continue;
+      const text = readFileSync(file, 'utf8');
+      const m = FORBIDDEN.exec(text);
+      if (!m) continue;
+      const line = text.slice(0, m.index).split('\n').length;
+      const code = m[0].charCodeAt(0).toString(16).padStart(4, '0');
+      offenders.push(`${relative(webRoot, file)}:${line} contains U+${code.toUpperCase()}`);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'write the escape instead — `\\u0000` is identical at runtime and keeps grep, '
+        + `git diff and code review working:\n  ${offenders.join('\n  ')}`,
+    );
+  });
+});
