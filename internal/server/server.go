@@ -132,7 +132,11 @@ type API struct {
 	// per-IP one below keys on clientIP() and its trusted-proxy handling is
 	// load-bearing (see rate_limit.go).
 	recoveryLimiter *rateLimiter
-	trustedProxies  []netip.Prefix
+	// relayLimiter throttles relayed MCP frames per PAIRING (mcp_relay.go).
+	// Third instance of the same limiter, still not a second implementation.
+	relayLimiter   *rateLimiter
+	pairings       *pairingTable
+	trustedProxies []netip.Prefix
 }
 
 // New builds the single-origin handler.
@@ -153,6 +157,8 @@ func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []ne
 		recoveryChallenges: newChallengeStore(),
 		limiter:            newRateLimiter(ceremonyRateLimitMax, ceremonyRateLimitWindow),
 		recoveryLimiter:    newRateLimiter(recoveryAttemptMax, recoveryAttemptWindow),
+		relayLimiter:       newRateLimiter(relayFrameMax, relayFrameWindow),
+		pairings:           newPairingTable(pairingTTL),
 		trustedProxies:     trustedProxies,
 	}
 
@@ -189,6 +195,29 @@ func (a *API) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /api/recovery-material", a.requireSession(http.HandlerFunc(a.putRecoveryMaterial)))
 	mux.Handle("GET /api/state", a.requireSession(http.HandlerFunc(a.getState)))
 	mux.Handle("PUT /api/state", a.requireSession(http.HandlerFunc(a.putState)))
+
+	// The AI connector (ARCHITECTURE.md §11, mcp_relay.go). The paths are
+	// pinned: the pairing code's relay_url is the ENDPOINT
+	// (wss://host/api/mcp/relay) and each leg appends only its own segment, so
+	// serving anything else 404s every real pairing while passing any test that
+	// mints its own code.
+	//
+	// Mint/revoke are session-authed AND per-IP throttled through the ceremony
+	// limiter — the same instance, so the trusted-proxy handling in clientIP is
+	// the one that applies. A second limiter keying on RemoteAddr would put
+	// every user behind a reverse proxy in one bucket, which is how a limit of
+	// 30 once let 90 ceremonies through.
+	mux.HandleFunc("POST /api/mcp/pairings",
+		limitByIP(a.limiter, a.trustedProxies, a.requireSession(http.HandlerFunc(a.createPairing)).ServeHTTP))
+	mux.HandleFunc("DELETE /api/mcp/pairings",
+		limitByIP(a.limiter, a.trustedProxies, a.requireSession(http.HandlerFunc(a.deletePairing)).ServeHTTP))
+
+	// The two relay legs. The device leg is session-authed like every other
+	// account-scoped route; the shim leg has no cookie jar (a local Go process,
+	// not a browser) and authenticates by possession of the pairing id — the
+	// pairing key, which the relay never sees, is the real secret.
+	mux.Handle("GET /api/mcp/relay/device", a.requireSession(http.HandlerFunc(a.deviceSocket)))
+	mux.HandleFunc("GET /api/mcp/relay/shim", a.shimSocket)
 }
 
 func securityHeaders(next http.Handler) http.Handler {
