@@ -13,6 +13,7 @@
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import { openTxModal } from './transactions.js';
+import { priceHistoryCard } from './pricechart.js';
 import { state, putPrice, reportingCurrency } from './store.js';
 import { parseFixed, DECIMALS } from '../../../domain/money.js';
 import { todayLocal } from './forms.js';
@@ -100,7 +101,9 @@ function openPositionModal(position) {
 
     ui.modal({
         title: title(position),
-        body: [facts, priceLine],
+        // The close history of the security this position holds — the app has
+        // stored years of it since the first import and had no way to show it.
+        body: [facts, priceLine, priceHistoryCard(position.securityId)],
         actions: [
             {
                 label: 'Set price',

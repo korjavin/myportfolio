@@ -14,6 +14,7 @@
 import { localRecords } from '../core/localdb.js';
 import { createPortfolioDomain } from '../../../domain/portfolio.js';
 import { createPerformanceDomain } from '../../../domain/perf.js';
+import { createPricesDomain } from '../../../domain/prices.js';
 import { RECORD, SETTINGS_ID, newRecordId } from '../../../domain/schema.js';
 import { buildPriceChunk } from './forms.js';
 
@@ -58,6 +59,14 @@ export function isVaultBacked() {
 
 const portfolio = createPortfolioDomain({ records });
 const performance = createPerformanceDomain({ records });
+const prices = createPricesDomain({ records });
+
+/**
+ * One security's stored closes, oldest first, as §5 integers. Not on `state`:
+ * it is read on demand by whoever opens a chart and would otherwise be a second
+ * copy of the price records sitting in memory for every screen.
+ */
+export const priceSeries = (securityId, range) => prices.series(securityId, range);
 
 /** Used when a user has not chosen one yet. Only ever a default, never implied. */
 export const DEFAULT_CURRENCY = 'EUR';
