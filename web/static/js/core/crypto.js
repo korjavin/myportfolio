@@ -13,8 +13,11 @@
 //   2. No oplog. encryptRecord/decryptRecord and encryptSnapshot/
 //      decryptSnapshot are replaced by the single encryptState/decryptState
 //      pair below, bound to the server's compare-and-swap `version`.
-//   3. No push payload and no MCP frame crypto — a portfolio tracker has no
-//      background notifications to decrypt.
+//   3. No push payload — a portfolio tracker has no background notifications
+//      to decrypt. The MCP frame crypto, dropped alongside it in the original
+//      port, is BACK: 8.3 used to say "no MCP relay" and the owner reversed
+//      it, because an AI connector that cannot read your data is a headline
+//      goal for this product (11). See sealMCPFrame/openMCPFrame below.
 //   4. No X25519 sealed inbox — nothing relays events to us.
 
 // SUITE_VERSION is the CRYPTO SUITE version stamped into an envelope's `v`
@@ -339,4 +342,75 @@ export function gunzip(bytes) {
 
 export function isGzip(bytes) {
   return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+}
+
+// --- The AI connector: MCP frames over a blind relay (mp/v1/mcp) -----------
+//
+// ARCHITECTURE.md 11. The server holds only ciphertext and so cannot answer a
+// single MCP query; it is a blind pipe and THIS TAB is the responder. Both
+// directions between the Go shim (internal/mcpshim/frame.go) and here:
+//
+//   frame   = nonce(12) ‖ AES-GCM(pairingKey, payload, aad)
+//   aad     = encodeFields("mp/v1/mcp", pairingId)
+//   payload = one JSON-RPC MCP message, utf8-encoded
+//
+// pairingKey is the 32 bytes from the one-time pairing code. It is generated
+// in the browser and never sent anywhere: the server mints only pairing_id,
+// and the relay pipes opaque bytes. Binding pairingId into the AAD is what
+// stops a frame minted for one pairing being replayed into another pairing's
+// leg — that is a security property, not an edge case, and both suites test
+// it.
+//
+// internal/mcpshim/testdata/mcp_frame_vectors.json pins this format and BOTH
+// suites decrypt it. The Go shim and this responder are written at different
+// times; a disagreement between them surfaces as "the connector silently
+// drops every frame", which is close to unattributable from either side
+// alone. The pinned vectors are what make it attributable.
+//
+// Frame size vs encodeFields' uint16 cap: the payload is NOT an encodeFields
+// field, so a large MCP message only ever meets the relay's 64 KiB frame cap,
+// never this one. The uint16 length prefix binds only the two AAD fields (the
+// 9-byte label and pairingId), so the guard in encodeFields can be tripped
+// only by an absurd pairing id — and then it throws on both sides rather than
+// truncating mod 65536 into an AAD that silently disagrees with Go's.
+const MCP_LABEL = 'mp/v1/mcp';
+
+export async function sealMCPFrame(pairingKey, pairingId, payload) {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await aesGcmEncrypt(pairingKey, nonce, payload, encodeFields(MCP_LABEL, pairingId));
+  const packed = new Uint8Array(nonce.length + ct.length);
+  packed.set(nonce, 0);
+  packed.set(ct, nonce.length);
+  return packed;
+}
+
+// Throws (AEAD failure) on a tampered nonce/ciphertext/aad, the wrong pairing
+// key, or a pairingId mismatch (cross-pairing replay).
+export async function openMCPFrame(pairingKey, pairingId, frame) {
+  return aesGcmDecrypt(pairingKey, frame.slice(0, 12), frame.slice(12), encodeFields(MCP_LABEL, pairingId));
+}
+
+// The one-time pairing code Settings shows and the user pastes into the shim:
+//
+//   "mpmcp1." ‖ base64url_unpadded(JSON({relay_url, pairing_id, key}))
+//
+// Parsed by internal/mcpshim's ParsePairingCode; the key field is standard
+// padded base64, matching Go's encoding/json []byte marshaling, and the three
+// JSON keys must stay in this order for the two encoders to agree byte for
+// byte (the pinned vector asserts exactly that).
+//
+// Our own prefix, not medtracker's "mtmcp1.": a code pasted into the wrong
+// app's shim must be rejected at the prefix rather than parse cleanly into a
+// pairing that can never answer.
+//
+// There is deliberately no parse counterpart here. The browser mints codes and
+// reads its pairing back from the vault record, never from a typed code, so a
+// JS parser would be an unused attack surface for the one secret in the whole
+// design that must never round-trip through anything but the user's clipboard.
+export const PAIRING_CODE_PREFIX = 'mpmcp1.';
+
+export function formatPairingCode({ relayUrl, pairingId, key }) {
+  if (key.length !== 32) throw new RangeError(`pairing key must be 32 bytes, got ${key.length}`);
+  const wire = { relay_url: relayUrl, pairing_id: pairingId, key: toBase64(key) };
+  return PAIRING_CODE_PREFIX + toBase64Url(utf8(JSON.stringify(wire)));
 }
