@@ -22,15 +22,22 @@ function fixture() {
   };
 }
 
-// The common opening: one cash account, one security.
+// The common opening: one cash account, one securities account, one security.
+// §4: `accountId` is the cash leg for every type, and a buy/sell also names
+// `portfolioId` — the securities account the shares land in, which together with
+// the security is what keys a position.
 function basics(f, { currency = 'EUR' } = {}) {
   f.put('account', { name: 'Cash', kind: 'cash', currency }, 'acct_1');
+  f.put('account', { name: 'Depot', kind: 'securities', currency }, 'pf_1');
   f.put('security', { name: 'Acme', ticker: 'ACME', currency, assetClass: 'stock' }, 'sec_1');
 }
 
-const tx = (body) => ({ accountId: 'acct_1', currency: 'EUR', ...body });
+const tx = (body) => ({ accountId: 'acct_1', portfolioId: 'pf_1', currency: 'EUR', ...body });
 const only = (list) => { assert.equal(list.length, 1); return list[0]; };
 const codes = (snap) => snap.issues.map((i) => i.code);
+// The cash account's balance. A securities account holds no cash, so this is
+// the number every "what moved" assertion below means.
+const cash = (snap) => snap.accounts.find((a) => a.accountId === 'acct_1').balance;
 
 test('buy then full sell, with fees on both legs', async () => {
   const f = fixture();
@@ -55,7 +62,7 @@ test('buy then full sell, with fees on both legs', async () => {
   assert.equal(p.realized, 8020);
   assert.equal(p.fees, 1980);
   assert.equal(p.taxes, 0);
-  assert.equal(only(snap.accounts).balance, 8020);
+  assert.equal(cash(snap), 8020);
   assert.deepEqual(snap.issues, []);
 });
 
@@ -99,7 +106,7 @@ test('fees are capitalised into the basis, taxes are not — both leave cash', a
   const p = only(snap.positions);
 
   assert.equal(p.cost, 101000, 'basis is gross + fees, excluding tax');
-  assert.equal(only(snap.accounts).balance, -103000, 'cash moves by the full amount');
+  assert.equal(cash(snap), -103000, 'cash moves by the full amount');
   assert.equal(p.fees, 1000);
   assert.equal(p.taxes, 2000);
 });
@@ -125,7 +132,7 @@ test('selling: the tax comes out of cash but not out of the gain', async () => {
   assert.equal(p.realized, 19000);
   assert.equal(p.taxes, 3000);
   // Cash still sees every cent: -1000.00 + 1160.00.
-  assert.equal(only(snap.accounts).balance, 16000);
+  assert.equal(cash(snap), 16000);
 });
 
 test('a dividend moves cash and income, never the cost basis', async () => {
@@ -147,24 +154,101 @@ test('a dividend moves cash and income, never the cost basis', async () => {
   assert.equal(p.shares, 1000000000, 'unchanged by the dividend');
   assert.equal(p.dividends, 3700);
   assert.equal(p.taxes, 3300); // 2000 on the buy + 1300 withheld
-  assert.equal(only(snap.accounts).balance, -99300); // -103000 + 3700
+  assert.equal(cash(snap), -99300); // -103000 + 3700
 });
 
-test('a multi-lot position sells at the moving-average basis', async () => {
+// The same two lots, sold the same way, under each §4 cost-basis method. The
+// two numbers below are hand-computed and deliberately different: that
+// difference is the whole reason the method is a setting.
+function multiLot(method) {
   const f = fixture();
   basics(f);
+  if (method) f.put('settings', { costBasisMethod: method }, 'settings');
+  // Lot 1: 10 shares for €1000.00. Lot 2, a month later: 10 for €2000.00.
   f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000 }));
   f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-02-10', shares: 1000000000, amount: 200000 }));
-  // 20 shares costing €3000.00 -> €150.00 each. Sell 5 @ €250.00.
+  // Sell 5 @ €250.00 = €1250.00.
   f.put('transaction', tx({ type: 'sell', securityId: 'sec_1', date: '2024-03-10', shares: 500000000, amount: 125000 }));
+  return f;
+}
 
-  const snap = await f.snapshot();
+test('FIFO is the default, and sells the oldest lot first', async () => {
+  const snap = await multiLot().snapshot();
   const p = only(snap.positions);
 
+  assert.equal(snap.costBasisMethod, 'fifo');
   assert.equal(p.shares, 1500000000);
-  assert.equal(p.cost, 225000);
-  assert.equal(p.realized, 50000); // 5 x (250.00 - 150.00)
-  assert.equal(only(snap.accounts).balance, -175000);
+  // The 5 sold shares come out of the €100.00-a-share lot: basis €500.00.
+  assert.equal(p.realized, 125000 - 50000);
+  assert.equal(p.cost, 300000 - 50000);
+  // Half of lot 1 is left, then all of lot 2 — oldest first, and no lot is
+  // touched before the one in front of it is empty.
+  assert.deepEqual(p.lots, [
+    { date: '2024-01-10', shares: 500000000, cost: 50000 },
+    { date: '2024-02-10', shares: 1000000000, cost: 200000 },
+  ]);
+  assert.equal(cash(snap), -175000);
+});
+
+test('moving_average reports the same sale against the blended basis', async () => {
+  const snap = await multiLot('moving_average').snapshot();
+  const p = only(snap.positions);
+
+  assert.equal(snap.costBasisMethod, 'moving_average');
+  assert.equal(p.shares, 1500000000);
+  // 20 shares costing €3000.00 -> €150.00 each, so €750.00 leaves with the 5.
+  assert.equal(p.realized, 125000 - 75000);
+  assert.equal(p.cost, 300000 - 75000);
+  // Lots are still tracked — that is what makes the two views agree, and it is
+  // not recoverable after the fact from a moving-average fold.
+  assert.deepEqual(p.lots, [
+    { date: '2024-01-10', shares: 500000000, cost: 50000 },
+    { date: '2024-02-10', shares: 1000000000, cost: 200000 },
+  ]);
+  assert.equal(cash(snap), -175000);
+});
+
+test('the two methods disagree on realized gain, and only on that', async () => {
+  const [fifo, avg] = await Promise.all([multiLot().snapshot(), multiLot('moving_average').snapshot()]);
+
+  assert.notEqual(only(fifo.positions).realized, only(avg.positions).realized);
+  assert.equal(only(fifo.positions).shares, only(avg.positions).shares);
+  assert.equal(cash(fifo), cash(avg));
+  // Both methods split the same €3000.00 paid and €1250.00 received between
+  // "basis still held" and "gain already taken", so basis less gain is the same
+  // money either way — only the line between them moves.
+  assert.equal(only(fifo.positions).cost - only(fifo.positions).realized, 300000 - 125000);
+  assert.equal(only(avg.positions).cost - only(avg.positions).realized, 300000 - 125000);
+});
+
+test('a cost basis method the engine does not know is surfaced, not read as the default', async () => {
+  const f = multiLot('lifo');
+  const snap = await f.snapshot();
+
+  assert.ok(codes(snap).includes('unknown_cost_basis_method'));
+  assert.equal(snap.costBasisMethod, 'fifo');
+});
+
+test('closing a position leaves zero basis dust under both methods', async () => {
+  for (const method of ['fifo', 'moving_average']) {
+    const f = fixture();
+    basics(f);
+    f.put('settings', { costBasisMethod: method }, 'settings');
+    // Share counts and prices chosen so neither method divides evenly.
+    f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 33333333, amount: 1237 }));
+    f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-02-10', shares: 66666667, amount: 4919 }));
+    // Out in two bites, the first of which splits a lot.
+    f.put('transaction', tx({ type: 'sell', securityId: 'sec_1', date: '2024-03-10', shares: 7000000, amount: 999 }));
+    f.put('transaction', tx({ type: 'sell', securityId: 'sec_1', date: '2024-04-10', shares: 93000000, amount: 9001 }));
+
+    const p = only((await f.snapshot()).positions);
+
+    assert.equal(p.shares, 0, method);
+    assert.equal(p.cost, 0, `${method}: not one cent of basis left behind a closed position`);
+    assert.deepEqual(p.lots, [], `${method}: every lot consumed`);
+    // Whichever route the basis took, the gain is proceeds less what was paid.
+    assert.equal(p.realized, (999 + 9001) - (1237 + 4919), method);
+  }
 });
 
 test('selling more than is held is surfaced, not clamped', async () => {
@@ -193,7 +277,7 @@ test('selling with nothing held at all is surfaced', async () => {
   assert.ok(codes(snap).includes('oversell'));
   assert.equal(p.shares, -1000000000);
   assert.equal(p.realized, 110000);
-  assert.equal(only(snap.accounts).balance, 110000, 'the cash still arrived');
+  assert.equal(cash(snap), 110000, 'the cash still arrived');
 });
 
 test('a trade with non-positive shares does not corrupt the position', async () => {
@@ -214,7 +298,7 @@ test('a trade with non-positive shares does not corrupt the position', async () 
     assert.equal(p.cost, 0, `shares=${shares}`);
     assert.equal(p.realized, 0, `shares=${shares}`);
     // The cash leg still stands — that money really did leave the account.
-    assert.equal(only(snap.accounts).balance, -100000, `shares=${shares}`);
+    assert.equal(cash(snap), -100000, `shares=${shares}`);
   }
 });
 
@@ -251,7 +335,7 @@ test('every §4 transaction type moves cash the documented way', async () => {
     basics(f);
     f.put('transaction', tx({ type, date: '2024-01-10', amount: 10000, ...extra }));
     const snap = await f.snapshot();
-    assert.equal(only(snap.accounts).balance, sign * 10000, `${type} should move cash ${sign > 0 ? '+' : '-'}`);
+    assert.equal(cash(snap), sign * 10000, `${type} should move cash ${sign > 0 ? '+' : '-'}`);
   }
 });
 
@@ -268,7 +352,7 @@ test('standalone fee and tax records are expenses, never basis', async () => {
   assert.equal(p.cost, 100000, 'a custody fee does not raise what the shares cost');
   assert.equal(p.fees, 250);
   assert.equal(p.taxes, 400);
-  assert.equal(only(snap.accounts).balance, -100650);
+  assert.equal(cash(snap), -100650);
 });
 
 test('transfers are one record per leg; the counter account is not double-booked', async () => {
@@ -298,7 +382,7 @@ test('a securities transfer is refused rather than mis-booked as cash', async ()
   const snap = await f.snapshot();
 
   assert.deepEqual(codes(snap), ['security_transfer_unsupported']);
-  assert.equal(only(snap.accounts).balance, 0, 'no cash invented for a share movement');
+  assert.equal(cash(snap), 0, 'no cash invented for a share movement');
   assert.deepEqual(snap.positions, []);
 });
 
@@ -356,7 +440,7 @@ test('asOf rewinds both the transaction fold and the price lookup', async () => 
   assert.equal(p.cost, 100000);
   assert.equal(p.price, 10000000000, 'the March close has not happened yet');
   assert.equal(p.marketValue, 100000);
-  assert.equal(only(snap.accounts).balance, -100000);
+  assert.equal(cash(snap), -100000);
 });
 
 test('transactions fold in date order however they come back from the port', async () => {
@@ -469,7 +553,7 @@ test('a thousand transactions leave no rounding drift', async () => {
   assert.equal(held.shares, 100000000000);
   assert.equal(held.cost, 3340000, 'exact to the cent after 1000 buys');
   assert.equal(held.fees, 7000);
-  assert.equal(only(mid.accounts).balance, -3340000);
+  assert.equal(cash(mid), -3340000);
 
   // Now exit the whole position at €40.00.
   f.put('transaction', tx({
@@ -483,5 +567,184 @@ test('a thousand transactions leave no rounding drift', async () => {
   assert.equal(p.shares, 0);
   assert.equal(p.cost, 0, 'not one cent of dust after 1001 transactions');
   assert.equal(p.realized, 660000);
-  assert.equal(only(snap.accounts).balance, 660000);
+  assert.equal(cash(snap), 660000);
+});
+
+// --- (accountId, securityId) keying ----------------------------------------
+
+test('the same security at two brokers is two positions and one aggregate', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('account', { name: 'Depot B', kind: 'securities', currency: 'EUR' }, 'pf_2');
+  // 10 shares at one broker, 5 at another, bought at different prices.
+  f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000 }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-02-10', portfolioId: 'pf_2',
+    shares: 500000000, amount: 60000,
+  }));
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '03-01': 12000000000 } });
+
+  const snap = await f.snapshot();
+
+  assert.equal(snap.positions.length, 2, 'the securities account is modelled, so this is two holdings');
+  const [a, b] = snap.positions;
+  assert.equal(a.accountId, 'pf_1');
+  assert.equal(a.accountName, 'Depot');
+  assert.equal(a.shares, 1000000000);
+  assert.equal(a.cost, 100000);
+  assert.equal(a.marketValue, 120000);
+  assert.equal(b.accountId, 'pf_2');
+  assert.equal(b.shares, 500000000);
+  assert.equal(b.cost, 60000);
+  assert.equal(b.marketValue, 60000);
+
+  // …and one portfolio-wide view of the security on top of them.
+  const agg = only(snap.securities);
+  assert.equal(agg.securityId, 'sec_1');
+  assert.deepEqual(agg.accountIds, ['pf_1', 'pf_2']);
+  assert.equal(agg.shares, 1500000000);
+  assert.equal(agg.cost, 160000);
+  assert.equal(agg.marketValue, 180000);
+  assert.equal(agg.unrealized, 20000);
+  assert.deepEqual(snap.issues, [], 'holding one security at two brokers is not an error');
+
+  // The totals count each position once, not the aggregate as well.
+  assert.equal(snap.totals.marketValue, 180000);
+  assert.equal(snap.totals.cost, 160000);
+});
+
+test('two brokers keep their own lots, so a sale at one cannot eat the other’s basis', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('account', { name: 'Depot B', kind: 'securities', currency: 'EUR' }, 'pf_2');
+  f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000 }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-02-10', portfolioId: 'pf_2',
+    shares: 1000000000, amount: 300000,
+  }));
+  // Sell the whole holding at the SECOND broker. Under a security-keyed fold
+  // this would have consumed the older, cheaper lot at the first one.
+  f.put('transaction', tx({
+    type: 'sell', securityId: 'sec_1', date: '2024-03-10', portfolioId: 'pf_2',
+    shares: 1000000000, amount: 330000,
+  }));
+
+  const snap = await f.snapshot();
+  const [a, b] = snap.positions;
+
+  assert.equal(a.accountId, 'pf_1');
+  assert.equal(a.shares, 1000000000);
+  assert.equal(a.cost, 100000, 'untouched by the other broker’s sale');
+  assert.equal(a.realized, 0);
+  assert.equal(b.shares, 0);
+  assert.equal(b.cost, 0);
+  assert.equal(b.realized, 30000, '€3300.00 out against the €3000.00 that lot cost');
+  // The two holdings share one security, so the missing close is said once.
+  assert.deepEqual(codes(snap), ['no_price']);
+});
+
+test('a trade naming only the cash account is surfaced, never guessed onto a broker', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('transaction', {
+    type: 'buy', accountId: 'acct_1', currency: 'EUR', securityId: 'sec_1',
+    date: '2024-01-10', shares: 1000000000, amount: 100000,
+  });
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.ok(codes(snap).includes('missing_portfolio'));
+  assert.equal(p.accountId, null, 'held unattributed rather than assigned to the only depot there is');
+  assert.equal(p.shares, 1000000000);
+  assert.equal(p.cost, 100000);
+  // The cash leg is not in doubt, so it still stands.
+  assert.equal(cash(snap), -100000);
+});
+
+test('a dividend lands on the holding it can only have come from', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000 }));
+  // §4 gives a dividend a cash account and a security, and PP's own model has no
+  // depot on one either. One position holds the security, so there is nothing to
+  // choose between.
+  f.put('transaction', {
+    type: 'dividend', accountId: 'acct_1', currency: 'EUR', securityId: 'sec_1',
+    date: '2024-03-01', amount: 3700,
+  });
+
+  const snap = await f.snapshot();
+  const p = only(snap.positions);
+
+  assert.equal(p.accountId, 'pf_1');
+  assert.equal(p.dividends, 3700);
+  assert.equal(snap.totals.dividends, 3700);
+});
+
+test('a dividend on a security held at two brokers is not split by a rule nobody chose', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('account', { name: 'Depot B', kind: 'securities', currency: 'EUR' }, 'pf_2');
+  f.put('transaction', tx({ type: 'buy', securityId: 'sec_1', date: '2024-01-10', shares: 1000000000, amount: 100000 }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-11', portfolioId: 'pf_2',
+    shares: 1000000000, amount: 100000,
+  }));
+  f.put('transaction', {
+    type: 'dividend', accountId: 'acct_1', currency: 'EUR', securityId: 'sec_1',
+    date: '2024-03-01', amount: 3700,
+  });
+
+  const snap = await f.snapshot();
+
+  assert.equal(snap.positions.length, 3, 'the two holdings, plus where the unattributable income sits');
+  const unattributed = snap.positions.find((p) => p.accountId === null);
+  assert.equal(unattributed.dividends, 3700);
+  assert.equal(unattributed.shares, 0, 'income never invents a holding');
+  // It is still the security's income, so the portfolio-wide view has all of it.
+  assert.equal(only(snap.securities).dividends, 3700);
+  assert.equal(snap.totals.dividends, 3700);
+});
+
+// --- dates -----------------------------------------------------------------
+
+test('an undated transaction is surfaced and folded nowhere at all', async () => {
+  for (const date of [undefined, '', 'yesterday', '2024-1-5', '2024-02-30', '2024-13-01']) {
+    const f = fixture();
+    basics(f);
+    f.put('transaction', tx({
+      type: 'buy', securityId: 'sec_1', date, shares: 1000000000, amount: 100000,
+    }));
+
+    const snap = await f.snapshot();
+
+    assert.ok(codes(snap).includes('undated_transaction'), `date=${date}`);
+    assert.deepEqual(snap.positions, [], `date=${date}: no position`);
+    assert.equal(cash(snap), 0, `date=${date}: no cash moved`);
+    assert.equal(snap.totals.total, 0, `date=${date}`);
+  }
+});
+
+test('an undated transaction does not contaminate the opening valuation', async () => {
+  const f = fixture();
+  basics(f);
+  // The failure this pins: an undated record used to slice to '', which sorts
+  // before every real date, so it landed in EVERY snapshot — including the
+  // opening one, the day before the portfolio existed.
+  f.put('transaction', tx({ type: 'deposit', date: undefined, amount: 5000000 }));
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-02', amount: 1000000 }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-02', shares: 1000000000, amount: 100000,
+  }));
+  f.put('price', { securityId: 'sec_1', year: 2024, closes: { '01-02': 10000000000 } });
+
+  const opening = await f.snapshot({ asOf: '2024-01-01' });
+  assert.equal(opening.totals.total, 0, 'the portfolio was empty the day before it opened');
+  assert.deepEqual(opening.positions, []);
+  assert.ok(codes(opening).includes('undated_transaction'), 'and the bad record is still reported');
+
+  const after = await f.snapshot({ asOf: '2024-01-02' });
+  assert.equal(after.totals.cash, 1000000 - 100000, 'the €50,000 that has no date is in neither snapshot');
+  assert.equal(after.totals.total, (1000000 - 100000) + 100000);
 });

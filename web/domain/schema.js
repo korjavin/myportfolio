@@ -8,11 +8,19 @@
 export const RECORD = {
   account: 'account',       // { name, kind: "cash"|"securities", currency, closed }
   security: 'security',     // { name, isin?, ticker?, currency, assetClass, quote: { provider, symbol } }
-  transaction: 'transaction', // { type, accountId, securityId?, date, shares?, amount, fees?, taxes?, currency, fx?, note?, counterAccountId? }
+  // accountId is the CASH leg for every type; a buy/sell also names portfolioId,
+  // the securities account the shares land in — that is what keys a position.
+  transaction: 'transaction', // { type, accountId, portfolioId?, securityId?, date, shares?, amount, fees?, taxes?, currency, fx?, note?, counterAccountId? }
   price: 'price',           // { securityId, year, closes: { "MM-DD": close } }  — chunked per security-year
   fx: 'fx',                 // { pair: "EURUSD", date, rate }
-  settings: 'settings',     // singleton — { reportingCurrency, quoteProviders, ... }
+  settings: 'settings',     // singleton — { reportingCurrency, quoteProviders, costBasisMethod, ... }
 };
+
+// §4: how realized gain is REPORTED. Lots are tracked either way — the method
+// does not change what is stored, only which basis a sale is measured against.
+// FIFO leads because most EU tax authorities require it for declaring capital
+// gains, so it is the default.
+export const COST_BASIS_METHODS = ['fifo', 'moving_average'];
 
 // The closed set from §4. Deliberately not a free-text kind: this exact set is
 // what makes PP import possible and TTWROR/IRR computable.
