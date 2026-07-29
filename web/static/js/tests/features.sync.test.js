@@ -340,6 +340,28 @@ describe('pull on open and on focus', () => {
         assert.equal(syncState().status.pending, false);
     });
 
+    test('a flush with nothing to send must not claim a fresh sync', async () => {
+        // vaultRecords emits syncing true/false for a flush even when there is
+        // nothing dirty, and that flush never touches the network. Dating a
+        // sync from it would print "Synced just now" over a server that has
+        // been unreachable for a week — the exact lie this affordance exists
+        // to prevent.
+        const server = fakeServer({ serverNow: () => BASE });
+        let clock = BASE;
+        const { vault } = await boot(server, { now: () => clock });
+        assert.equal(syncState().lastSyncedAt, BASE);
+
+        clock = BASE + 3 * 86_400_000;
+        await vault.flush();
+        assert.equal(syncState().lastSyncedAt, BASE, 'a no-op flush is not a sync');
+        assert.match(describeSync(syncState(), { online: true, now: () => clock }).headline, /3 days ago/);
+
+        // A flush that DOES carry a write is a sync, and dates itself.
+        await vault.put('transaction', 'tx_1', { type: 'deposit', date: '2024-01-02', amount: 1 });
+        await until(() => server.blob !== null);
+        assert.equal(syncState().lastSyncedAt, clock);
+    });
+
     test('no timer is armed: an idle app with a vault makes no requests', async () => {
         const server = fakeServer({ serverNow: () => BASE });
         await boot(server);

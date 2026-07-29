@@ -73,10 +73,19 @@ function onStatus(next) {
         if (!previous || previous.lastError !== next.lastError) failures += 1;
     } else {
         failures = 0;
-        // An operation that just COMPLETED, rather than any old emit with no
-        // error on it — schedule() emits `pending` with lastError still null,
-        // and treating that as a success would date-stamp a sync that never ran.
-        if (previous && previous.syncing && !next.syncing) lastSyncedAt = clockNow();
+        // An upload that just COMPLETED, and had something to upload.
+        //
+        // Both halves matter. schedule() emits `pending` with lastError still
+        // null, so "no error" alone would date a sync that never ran — and
+        // flush() with nothing dirty still emits syncing true then false
+        // WITHOUT touching the network, so a bare syncing-transition would let
+        // backgrounding the tab print "Synced just now" over a server that has
+        // been unreachable for a week. That is the lying indicator this whole
+        // bead is about. Pulls date themselves in pull(), where reaching the
+        // wire is not in doubt.
+        if (previous && previous.syncing && !next.syncing && previous.pending) {
+            lastSyncedAt = clockNow();
+        }
     }
     status = next;
     emit();
@@ -95,6 +104,10 @@ async function pull(onRecords) {
     if (!vault) return null;
     try {
         await vault.sync();
+        // A pull always reaches the server, so this is the one place a sync can
+        // be dated outright rather than inferred from a status transition.
+        lastSyncedAt = clockNow();
+        emit();
     } catch {
         // Deliberately empty: see above. status.lastError carries it.
     }
@@ -215,7 +228,10 @@ export function watchFocus({
     const onVisibility = () => {
         if (!vault) return;
         if (doc && doc.visibilityState === 'hidden') {
-            vault.flush().catch(() => {});
+            // Only when there is something to send. A flush with nothing dirty
+            // does no work and reaches no server, so asking for one on every
+            // tab switch is pure noise in the status stream.
+            if (vault.status().pending) vault.flush().catch(() => {});
             return;
         }
         onFocus();
