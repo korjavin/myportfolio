@@ -600,6 +600,39 @@ that you asked something and roughly how big the answer was, but not what. That 
 metadata delta against the rest of §6's posture, where the server sees only an opaque blob on a
 debounced schedule. Say so in the security note.
 
+### `relay_url` is the endpoint, not the origin — pinned, and it already bit once
+
+The pairing code's `relay_url` carries the **full relay path**:
+
+```
+wss://portfolio.example/api/mcp/relay
+```
+
+So the shim appends only `/shim`, and the browser responder appends only `/device`. **This diverges
+from the sibling**, whose `relay_url` is a bare origin and whose shim therefore appends the whole
+`/api/mcp/relay/shim`. Porting that line verbatim dials
+`…/api/mcp/relay/api/mcp/relay/shim` — a 404 against every real pairing, while passing every test
+that mints its own code from a bare listener address. It did exactly that in C3 before codex caught
+it.
+
+Consequences, and both halves are binding:
+
+- **C2** must serve `/api/mcp/relay/shim` and `/api/mcp/relay/device`.
+- **C5's Settings** must mint `relay_url` with `/api/mcp/relay` already on it.
+
+`TestShimLegURLMatchesThePinnedRelayURL` pins the shim half against
+`internal/mcpshim/testdata/mcp_frame_vectors.json`, the same file the cross-language frame vectors
+live in, so the two cannot drift silently. The pairing id is query-escaped on both legs — the browser
+chose it, and an id containing `&`, `/` or `#` would otherwise rewrite the URL.
+
+### Confirm the CSP admits the device WebSocket *before* debugging anything
+
+§7's `connect-src` is a static allowlist with no `wss:` token. C4's device leg is same-origin, so
+`'self'` is expected to cover it — but **verify it against a running binary rather than assuming**,
+because the failure mode is the worst one this design has: a CSP-blocked WebSocket surfaces as a bare
+`onclose`, which is indistinguishable from *"no device online"* — the same unattributable symptom the
+pairing-code checksum was added to eliminate. Ten minutes of checking beats a day of chasing it.
+
 ### Do not re-derive these — they are scar tissue
 
 - **Close codes are not interchangeable.** `4404` (no pairing at all) means stop *and purge* the
