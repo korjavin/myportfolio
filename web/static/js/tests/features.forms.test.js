@@ -288,4 +288,47 @@ describe('forms — the render boundary stays one-way', () => {
             `web/static/js/features must render money through formatFixed, never toFloat: ${offenders.join(', ')}`
         );
     });
+
+    test('a transaction body preserves its own currency, never the reporting one', () => {
+        // A transaction carries the currency the money actually moved in. The
+        // reporting currency is a *display* preference, and overwriting a
+        // record with it silences portfolio.js's `currency_not_converted`
+        // issue — the engine then adds an imported USD amount straight into a
+        // EUR total. A silent misvaluation, triggered by opening a form and
+        // pressing Save with nothing changed.
+        //
+        // A source guard rather than a behavioural test on purpose: the bug
+        // lives in a DOM-bound save() handler, and with no jsdom the only other
+        // option is to restate the fix in a fixture and assert the restatement
+        // — which passes whether or not the shipped code is correct. That is
+        // what the first attempt at covering this did, and it stayed green with
+        // the fix reverted.
+        //
+        // Scoped to the buildTxBody call rather than banning the token
+        // outright: a NEW account or security legitimately defaults to the
+        // reporting currency, because there is no prior value to erase and
+        // nothing better to guess. Only the transaction path is the bug.
+        // Revisit when B8 lands real conversion.
+        const dir = path.join(REPO_ROOT, 'web/static/js/features');
+        const offenders = [];
+        for (const name of fs.readdirSync(dir)) {
+            if (!name.endsWith('.js')) continue;
+            const source = fs.readFileSync(path.join(dir, name), 'utf8')
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/^\s*\/\/[^\n]*$/gm, '');
+            // `buildTxBody({` is a call site; forms.js's own
+            // `export function buildTxBody(values)` declaration is not.
+            if (!/\bbuildTxBody\s*\(\s*\{/.test(source)) continue;
+            // The body handed to buildTxBody must carry the transaction's own
+            // currency. `values.currency || reportingCurrency()` is fine — the
+            // fallback only applies when there is nothing to preserve.
+            if (!/\bcurrency\s*:\s*values\.currency\b/.test(source)) offenders.push(name);
+        }
+        assert.deepEqual(
+            offenders,
+            [],
+            'a transaction body must pass its own currency to buildTxBody, not the '
+            + `reporting currency: ${offenders.join(', ')}`
+        );
+    });
 });
