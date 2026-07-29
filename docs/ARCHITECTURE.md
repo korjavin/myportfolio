@@ -143,8 +143,11 @@ against them):
   Portfolio Performance does, and matching it is what lets a PP import round-trip.
   Because `accountId` is the cash leg, a `buy`/`sell` names **both** accounts: `accountId` (cash out /
   in) and `portfolioId` (where the shares land / leave). Import and the UI must write both.
-  <!-- Was security-keyed through B1/B2; g7e.11 restructures the fold. Anything reading a position
-       must treat its identity as opaque rather than reconstructing it from securityId. -->
+  **Anything reading a position must treat its identity as opaque** and never reconstruct it from
+  `securityId` — that is what let the screens render two rows with no UI change at all. A trade that
+  names only the cash account raises `missing_portfolio` and folds into an *unattributed* position
+  rather than being guessed onto whichever depot happens to exist; a wrong attribution is worse than
+  a visible gap, because it looks like knowledge.
 - **Cost basis method is selectable per portfolio**, `settings.costBasisMethod ∈ "fifo" |
   "moving_average"`, defaulting to `fifo`. Lots are tracked **always** — each buy opens a lot, each
   sell consumes them oldest-first — and the method chooses only how realized gain is *reported*.
@@ -172,6 +175,15 @@ against them):
   in v1** — there is no way to express carried-over cost basis, and inventing one silently would
   corrupt every downstream gain number. The engine refuses them with an explicit issue rather than
   guessing. Tracked as a real gap for a PP competitor.
+
+  **Depot-keyed positions made this gap visible rather than merely present.** Two of Portfolio
+  Performance's own fixtures now report an `oversell`, and the tests assert it *with that reason* —
+  those files only balance because they move shares between depots. The importer always refused
+  those legs; security-keyed positions hid the consequence by pooling every depot into one position,
+  so the shares appeared to still be there. Now that a position belongs to a depot, the hole shows
+  up where it actually is. Once lots exist a security transfer is no longer a modelling problem — it
+  moves lots, each already carrying its own cost and acquisition date — so the fix is cheaper than
+  it looked and the reason to do it is stronger.
 
 ### Settled while building the importer
 
