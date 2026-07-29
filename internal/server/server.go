@@ -216,6 +216,19 @@ func (a *API) registerRoutes(mux *http.ServeMux) {
 	// account-scoped route; the shim leg has no cookie jar (a local Go process,
 	// not a browser) and authenticates by possession of the pairing id — the
 	// pairing key, which the relay never sees, is the real secret.
+	//
+	// The CSP admits this socket, and that was MEASURED rather than assumed
+	// (§11 asks for exactly that, because a CSP-blocked WebSocket surfaces as a
+	// bare onclose — indistinguishable from "no device online"). Against this
+	// binary, headless Chrome 151 opening ws://<origin>/api/mcp/relay/device
+	// from a page carrying `connect-src 'self' https://api.coingecko.com …`
+	// reached the handler and failed with the handshake's own 401, while a
+	// cross-origin ws:// on the same page was refused with "violates the
+	// following Content Security Policy directive" — so the CSP was live and
+	// 'self' covered the same-origin socket. That is also what CSP3's 'self'
+	// rule says: same host and port match when url's scheme is https/wss or the
+	// document's scheme is http. Do NOT add a ws:/wss: token here to be safe;
+	// connect-src is a deliberately gated three-host budget.
 	mux.Handle("GET /api/mcp/relay/device", a.requireSession(http.HandlerFunc(a.deviceSocket)))
 	mux.HandleFunc("GET /api/mcp/relay/shim", a.shimSocket)
 }
