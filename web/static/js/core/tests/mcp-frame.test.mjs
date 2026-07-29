@@ -216,7 +216,23 @@ describe('pairing code', () => {
     // still parse the code but Go's own re-format assertion goes red — and
     // this one goes red here first.
     const { formatPairingCode } = await crypto_();
-    assert.equal(formatPairingCode({ relayUrl: V.relay_url, pairingId, key }), V.pairing_code);
+    assert.equal(await formatPairingCode({ relayUrl: V.relay_url, pairingId, key }), V.pairing_code);
+  });
+
+  it('appends a checksum group that node:crypto agrees with', async () => {
+    // The checksum is what stops a mistyped code from being accepted with a
+    // subtly wrong key — measured, not assumed: without it, 46% of
+    // single-character substitutions in this body parsed cleanly and a third
+    // of those returned the wrong key, which reaches the user as the
+    // indistinguishable "no device online". internal/mcpshim sweeps every
+    // single-character edit of this exact code; here, pin the derivation.
+    const [, body, checksum] = V.pairing_code.split('.');
+    const raw = Buffer.from(body, 'base64url');
+    const want = nodeCrypto.createHash('sha256').update(raw).digest().subarray(0, 4);
+    assert.equal(checksum, want.toString('base64url'));
+    // And it really is over the body: a different body means a different group.
+    const other = nodeCrypto.createHash('sha256').update(Buffer.concat([raw, Buffer.from('x')])).digest().subarray(0, 4);
+    assert.notEqual(checksum, other.toString('base64url'));
   });
 
   it('uses our prefix, not medtracker’s', async () => {
@@ -232,15 +248,15 @@ describe('pairing code', () => {
     // here would be a field that could carry it somewhere else, so pin the
     // shape rather than trusting review to notice.
     const { formatPairingCode } = await crypto_();
-    const body = formatPairingCode({ relayUrl: V.relay_url, pairingId, key }).slice('mpmcp1.'.length);
-    const wire = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    const code = await formatPairingCode({ relayUrl: V.relay_url, pairingId, key });
+    const wire = JSON.parse(Buffer.from(code.split('.')[1], 'base64url').toString('utf8'));
     assert.deepEqual(Object.keys(wire), ['relay_url', 'pairing_id', 'key']);
     assert.equal(wire.key, Buffer.from(key).toString('base64'));
   });
 
   it('refuses a key that is not 32 bytes', async () => {
     const { formatPairingCode } = await crypto_();
-    assert.throws(
+    await assert.rejects(
       () => formatPairingCode({ relayUrl: V.relay_url, pairingId, key: new Uint8Array(16) }),
       RangeError
     );

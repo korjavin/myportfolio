@@ -322,9 +322,30 @@ hold. Provider config and API keys live in the vault as `settings.quoteProviders
 - Crypto: CoinGecko (CORS-enabled, free tier works keyless).
 - Stocks/ETFs: a CORS-enabled provider the user brings a key for (Finnhub / Twelve Data /
   Alpha Vantage). Yahoo Finance is **not** usable browser-direct — it blocks CORS.
-- The document's CSP `connect-src` is an allowlist derived from the configured provider hostnames,
-  per medtracker's per-account egress design — no bare `https:` wildcard anywhere, ever, because
-  that is exactly the token that lets an XSS exfiltrate a decrypted portfolio.
+- The document's CSP `connect-src` is a **static** allowlist of the quote hosts, **derived at startup
+  from `quotes.js`'s frozen `QUOTE_HOSTS`** rather than restated in Go — `internal/server` lifts them
+  out of the embedded `domain/quotes.js`, and a test fails if the two ever diverge. Two lists of
+  "which hosts may we contact" drift silently in both directions: an XSS uses the gap, or a
+  legitimate provider simply never works.
+
+  *This is deliberately **not** medtracker's per-account dynamic egress design*, which an earlier
+  draft of this section promised. That design has a `PUT /api/egress-hosts` endpoint, per-account
+  state and a per-request CSP, because its users register arbitrary hostnames. `QUOTE_HOSTS` is a
+  frozen two-element map and Settings only offers providers drawn from it, so an endpoint plus
+  storage to express a two-element constant is machinery for a problem we do not have.
+
+  Hosts are scheme-qualified (`https://api.coingecko.com`, not the bare host) so a plaintext-http
+  document on this origin cannot be talked into fetching quotes over http. Parsing failures **panic
+  at startup** rather than falling back — the file is embedded, so a failure means the binary was
+  built wrong, and a silent fallback to `'self'` would reproduce exactly the bug this exists to fix.
+
+  **No bare `https:` or `wss:` wildcard anywhere, ever** — that is the token that lets an XSS
+  exfiltrate a decrypted portfolio, and a same-origin child frame inherits the CSP, so one relaxed
+  document is a bypass gadget for the whole origin. The guard tokenises every directive rather than
+  substring-matching `"https:"`, which cannot tell a legitimate host source from the wildcard.
+
+  Residual, stated rather than implied: two hosts is the entire egress budget, and each one widens
+  what an on-origin XSS could reach. The CSP narrows that; it does not close it.
 
 **Opt-in proxy fallback**: `GET /api/quote?provider=&symbol=` for users with no key. It is gated
 behind an explicit consent screen stating plainly that *the server will see which symbols you hold*.

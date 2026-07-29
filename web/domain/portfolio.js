@@ -7,7 +7,8 @@
 // prices 1e8). Nothing here returns a currency amount as a fractional number.
 
 import { RECORD, SETTINGS_ID, COST_BASIS_METHODS } from './schema.js';
-import { marketValue, proportion } from './money.js';
+import { marketValue, proportion, convert } from './money.js';
+import { createFxRates, isCalendarDay } from './fx.js';
 
 // --- Semantics -------------------------------------------------------------
 //
@@ -41,6 +42,32 @@ import { marketValue, proportion } from './money.js';
 // rebuild a position key from a securityId, because a securityId no longer
 // identifies one position.
 //
+// MULTI-CURRENCY. Every money field on a position, an account and the totals is
+// in `settings.reportingCurrency`. Two different rates get it there, and mixing
+// them up is the classic bug in this feature:
+//
+//   transaction amounts (cost, realized, dividends, fees, taxes, cash) convert
+//     at the rate for THE TRANSACTION'S OWN DAY. A 2019 purchase cost what it
+//     cost; converting it at today's rate rewrites the portfolio's history
+//     every time the market moves, and does it invisibly.
+//   market value converts at the rate for the CLOSE'S day, because that is the
+//     valuation date — what the holding is worth now, at the rate now.
+//
+// So `unrealized` is market value at the valuation rate less basis at the
+// historical rates: it includes the currency effect, which is what a
+// reporting-currency gain means and what Portfolio Performance reports.
+//
+// `position.price` and `position.currency` stay in the SECURITY's own currency:
+// a price is a market fact about the security, not a portfolio amount, and the
+// price a user types into the holdings screen is the one their broker shows.
+//
+// A missing rate is an explicit gap, never a guess. The transaction is left out
+// of the fold entirely and `currency_not_converted` names the pair and day —
+// the same treatment as an undated record, and for the same reason: an amount
+// in a currency with no known rate has no reporting-currency value, and neither
+// zero nor the unconverted number is that value. See fx.js for what a rate is
+// applicable to (weekends and holidays included).
+//
 // LOTS ARE TRACKED ALWAYS. Each buy opens a lot (shares, cost, acquisition day)
 // and each sell consumes them oldest-first, whatever `settings.costBasisMethod`
 // says — the method (`fifo` | `moving_average`, default `fifo`) chooses only how
@@ -69,23 +96,15 @@ export const CASH_SIGN = {
 
 const dayOf = (date) => String(date ?? '').slice(0, 10);
 
-const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-// The same rule perf.js's dayMs() enforces, and deliberately not a second one:
-// a string that is not a real UTC calendar day is rejected, never rolled
-// forward. Date.UTC(2024, 1, 30) quietly becomes March 1, so round-tripping the
-// string is what catches it. An undated record used to slice to '' — sorting
-// before every real date and landing in EVERY snapshot including the opening
-// valuation — which made the portfolio wrong everywhere at once with nothing
-// looking broken.
-// ponytail: duplicated from perf.js rather than shared, because perf.js imports
-// portfolio.js and the shared home would be a third module. Fold them together
-// when a third caller needs it.
-function isCalendarDay(day) {
-  if (!DAY_RE.test(day)) return false;
-  const ms = Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)));
-  return new Date(ms).toISOString().slice(0, 10) === day;
-}
+// `isCalendarDay` is imported from fx.js — the third caller the old ponytail
+// note here said to fold on. Same rule perf.js's dayMs() enforces: a string
+// that is not a real UTC calendar day is rejected, never rolled forward.
+// Date.UTC(2024, 1, 30) quietly becomes March 1, so round-tripping the string is
+// what catches it. An undated record used to slice to '' — sorting before every
+// real date and landing in EVERY snapshot including the opening valuation —
+// which made the portfolio wrong everywhere at once with nothing looking broken.
+// ponytail: perf.js still carries its own copy; fold it onto fx.js's next time
+// that file is open.
 
 // Consume `shares` oldest-first out of `lots`, returning the cost that left with
 // them. Partial consumption uses proportion(), which rounds once, so what leaves
@@ -124,11 +143,12 @@ export function createPortfolioDomain({ records }) {
   //   asOf — optional "YYYY-MM-DD"; transactions after it and prices after it
   //          are ignored, so the same call serves historical valuation.
   async function snapshot({ asOf } = {}) {
-    const [accountRecs, securityRecs, txRecs, priceRecs, settingsRecs] = await Promise.all([
+    const [accountRecs, securityRecs, txRecs, priceRecs, fxRecs, settingsRecs] = await Promise.all([
       records.list(RECORD.account),
       records.list(RECORD.security),
       records.list(RECORD.transaction),
       records.list(RECORD.price),
+      records.list(RECORD.fx),
       records.list(RECORD.settings),
     ]);
 
@@ -137,6 +157,24 @@ export function createPortfolioDomain({ records }) {
 
     const settings = settingsRecs.find((r) => r.recordId === SETTINGS_ID) || {};
     const reportingCurrency = settings.reportingCurrency || null;
+    // Compared case-insensitively: "eur" and "EUR" are the same currency, and
+    // treating them as two is a mixed-currency portfolio that is not one. The
+    // value returned to the caller stays exactly as the user stored it.
+    const reportingCcy = reportingCurrency ? String(reportingCurrency).toUpperCase() : null;
+
+    const fxRates = createFxRates(fxRecs, issue);
+    // A gap is reported once per pair, not once per transaction: an unfetched
+    // currency misses hundreds of days at once and the user's fix is the same
+    // single action for all of them. The named day is the first one that hit it.
+    const missingRates = new Set();
+    const fxGap = (from, day, recordId) => {
+      const pair = `${from}${reportingCcy}`;
+      if (missingRates.has(pair)) return;
+      missingRates.add(pair);
+      issue('currency_not_converted', recordId,
+        `no ${pair} rate applicable to ${day}; ${from} amounts are left out of the `
+        + `${reportingCurrency} totals until one is stored`);
+    };
 
     // §4: the method chooses only how realized gain is reported. An unknown one
     // is surfaced rather than silently read as the default, because the two
@@ -231,8 +269,6 @@ export function createPortfolioDomain({ records }) {
       return v;
     };
 
-    const mixedCurrencies = new Set();
-
     for (const tx of txRecs.slice().sort(byDateThenId)) {
       const day = dayOf(tx.date);
       // Nothing without a real calendar day is folded at all — not into cash,
@@ -252,19 +288,33 @@ export function createPortfolioDomain({ records }) {
         continue;
       }
 
-      // Multi-currency conversion is B8. Until then a portfolio whose records are
-      // not all in the reporting currency would be summing unlike units, so say
-      // so instead of quietly adding dollars to euros. One issue per currency.
-      if (reportingCurrency && tx.currency && tx.currency !== reportingCurrency
-          && !mixedCurrencies.has(tx.currency)) {
-        mixedCurrencies.add(tx.currency);
-        issue('currency_not_converted', tx.recordId,
-          `${tx.currency} amounts are summed as ${reportingCurrency} until FX conversion lands`);
+      // THE RATE IS THE ONE FOR `day`, THE TRANSACTION'S OWN DATE. Not the
+      // newest stored rate, not today's: see the header. Looked up once per
+      // record because all three amounts moved together, in one currency, on
+      // one day.
+      const txCcy = tx.currency ? String(tx.currency).toUpperCase() : null;
+      let rate = null;
+      if (reportingCcy && txCcy && txCcy !== reportingCcy) {
+        const applicable = fxRates.rate(txCcy, reportingCcy, day);
+        if (!applicable) {
+          // No rate, so no reporting-currency value — not zero, unknown. The
+          // record is left out of cash, position and totals alike rather than
+          // folded at a number that would look like knowledge.
+          fxGap(txCcy, day, tx.recordId);
+          continue;
+        }
+        rate = applicable.rate;
       }
+      // Each amount converts on its own, so what is stored rounds once at 1e2
+      // rather than compounding through a subtotal.
+      const money = (field) => {
+        const raw = units(tx, field);
+        return rate === null ? raw : convert(raw, rate);
+      };
 
-      const amount = units(tx, 'amount');
-      const fees = units(tx, 'fees');
-      const taxes = units(tx, 'taxes');
+      const amount = money('amount');
+      const fees = money('fees');
+      const taxes = money('taxes');
 
       // §4 gives transfer_in/transfer_out a cash body (accountId + counterAccountId).
       // A security leg would need a carried-over cost basis that the record shape
@@ -403,10 +453,36 @@ export function createPortfolioDomain({ records }) {
         p.unrealized = null;
         continue;
       }
+      // `price` stays in the security's own currency (`p.currency`) — it is a
+      // market fact about the security, and the holdings screen labels it with
+      // that currency. Only the VALUE crosses into the reporting currency.
       p.price = quote.close;
       p.priceDate = quote.date;
-      p.marketValue = marketValue(p.shares, quote.close);
-      p.unrealized = p.marketValue - p.cost;
+
+      let value = marketValue(p.shares, quote.close);
+      const secCcy = p.currency ? String(p.currency).toUpperCase() : null;
+      // Zero is zero in every currency, so a closed position needs no rate.
+      // Found by codex review: without this, a fully-sold foreign holding whose
+      // security still has a stored close manufactures a `currency_not_converted`
+      // gap and a null market value over a number that was never in doubt —
+      // and a fully-sold holding is the most ordinary thing in a portfolio.
+      if (value !== 0 && reportingCcy && secCcy && secCcy !== reportingCcy) {
+        // At the CLOSE's day, not the trade dates: this is what the holding is
+        // worth as of the valuation, so it takes the rate as of the valuation.
+        const applicable = fxRates.rate(secCcy, reportingCcy, quote.date);
+        if (!applicable) {
+          // Same treatment as no_price, and for the same reason: a value that
+          // cannot be computed is null, so the totals leave it out instead of
+          // counting it as zero.
+          fxGap(secCcy, quote.date, p.securityId);
+          p.marketValue = null;
+          p.unrealized = null;
+          continue;
+        }
+        value = convert(value, applicable.rate);
+      }
+      p.marketValue = value;
+      p.unrealized = value - p.cost;
     }
 
     const label = (p) => String(p.name ?? p.securityId);

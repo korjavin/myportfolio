@@ -98,6 +98,7 @@ const PRECACHE = [
     // missing, which is worse than not painting at all.
     '/domain/schema.js',
     '/domain/money.js',
+    '/domain/fx.js',
     '/domain/portfolio.js',
     '/domain/perf.js',
     '/domain/prices.js',

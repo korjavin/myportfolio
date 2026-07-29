@@ -10,5 +10,5 @@
   "js_payload": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"AAPL 12 shares\"}]}}",
   "frame_sealed_by_js_b64": "jdpDN2Y87lw+z5jK6ipHoL2nKyv+MEWGXlvzRTqBqAXElgkCngOSfJSKM/ArcJrNzBEE62wFFRpaclp4l7EGNMziUJScnSj3EMU6dAZwQgfUWSJdxYFtUnmNiMMQy3POi8DntghLrs7kjovNvNAilbk55g==",
   "relay_url": "wss://portfolio.example/api/mcp/relay",
-  "pairing_code": "mpmcp1.eyJyZWxheV91cmwiOiJ3c3M6Ly9wb3J0Zm9saW8uZXhhbXBsZS9hcGkvbWNwL3JlbGF5IiwicGFpcmluZ19pZCI6InByZy03ZjNjMWI5ZTQyZDA1YTY4Iiwia2V5Ijoib0tHaW82U2xwcWVvcWFxcnJLMnVyN0N4c3JPMHRiYTN1TG02dTd5OXZyOD0ifQ"
+  "pairing_code": "mpmcp1.eyJyZWxheV91cmwiOiJ3c3M6Ly9wb3J0Zm9saW8uZXhhbXBsZS9hcGkvbWNwL3JlbGF5IiwicGFpcmluZ19pZCI6InByZy03ZjNjMWI5ZTQyZDA1YTY4Iiwia2V5Ijoib0tHaW82U2xwcWVvcWFxcnJLMnVyN0N4c3JPMHRiYTN1TG02dTd5OXZyOD0ifQ.9BWtEA"
 }

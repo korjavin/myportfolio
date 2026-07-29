@@ -16,8 +16,10 @@ import (
 	"io/fs"
 	"net/http"
 	"net/netip"
+	"regexp"
 
 	"github.com/korjavin/myportfolio/internal/store"
+	"github.com/korjavin/myportfolio/web"
 )
 
 // contentSecurityPolicy hardens the E2EE origin. The threat model
@@ -25,19 +27,86 @@ import (
 // in-memory DEK and drive the non-extractable LDK — and names a strict CSP with
 // zero third-party script as the real defense.
 //
-// connect-src is 'self' for now. A9 replaces it with an allowlist derived from
-// the account's configured quote-provider hostnames. It must never become a
-// bare `https:`: that single token is exactly what lets an XSS POST a decrypted
-// portfolio to any origin it likes (ARCHITECTURE.md 7).
-const contentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self'; " +
-	"style-src 'self'; " +
-	"img-src 'self'; " +
-	"connect-src 'self'; " +
-	"object-src 'none'; " +
-	"base-uri 'none'; " +
-	"frame-ancestors 'none'; " +
-	"form-action 'none'"
+// connect-src is 'self' plus the quote providers, because §7 quotes go
+// browser-direct — with 'self' alone the browser blocks every provider fetch
+// and the whole quotes feature is inert. The hostnames are NOT written here:
+// they are lifted from quotes.js's exported QUOTE_HOSTS (below), so there is
+// one list of "who may we contact", not two that drift silently in a direction
+// nobody notices until either an XSS uses the gap or a legitimate fetch is
+// blocked and a user just sees a provider that never works.
+//
+// Never a bare `https:`/`wss:`/`*` token, on any document this origin serves: a
+// same-origin child frame inherits the CSP, so one relaxed document is a bypass
+// gadget for the whole origin (ARCHITECTURE.md 7).
+//
+// Stated honestly, since §8's posture is to name what we have NOT solved: each
+// host here widens where an on-origin XSS can post a decrypted portfolio. The
+// CSP narrows the exfiltration target set from "anywhere" to these two hosts —
+// it does not close the hole. Two hosts is the entire budget; a third needs a
+// reason, and adding one fails TestQuoteHostAllowlist until a human agrees.
+var contentSecurityPolicy = buildCSP(quoteHosts(web.StaticFS))
+
+// quoteHostsBlock and hostLiteral lift the values out of quotes.js's frozen
+// QUOTE_HOSTS map:
+//
+//	export const QUOTE_HOSTS = Object.freeze({
+//	  coingecko: 'api.coingecko.com',
+//	  ...
+//	});
+//
+// A regex over the served asset, rather than a Go code generator or a
+// hand-copied list: quotes.js is already embedded and already served from this
+// binary (web/embed.go lists it explicitly), so reading it costs one ReadFile
+// and no build step, and there is no generated file to forget to regenerate. If
+// the map is ever reformatted past what this matches, the derivation loses a
+// host and TestQuoteHostAllowlist fails — a reformat cannot silently narrow or
+// widen egress.
+var (
+	quoteHostsBlock = regexp.MustCompile(`QUOTE_HOSTS\s*=\s*Object\.freeze\(\{([^}]*)\}`)
+	hostLiteral     = regexp.MustCompile(`'([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})'`)
+)
+
+// quoteHosts panics rather than degrading to 'self': the input is a file
+// compiled into this binary, so a failure here means the binary was built
+// wrong, and every test in this package runs the same code path. Falling back
+// silently would reproduce exactly the bug this function exists to fix.
+func quoteHosts(fsys fs.FS) []string {
+	src, err := fs.ReadFile(fsys, "domain/quotes.js")
+	if err != nil {
+		panic("server: read domain/quotes.js for the CSP connect-src allowlist: " + err.Error())
+	}
+	block := quoteHostsBlock.FindSubmatch(src)
+	if block == nil {
+		panic("server: no QUOTE_HOSTS = Object.freeze({...}) in domain/quotes.js")
+	}
+	var hosts []string
+	for _, m := range hostLiteral.FindAllSubmatch(block[1], -1) {
+		hosts = append(hosts, string(m[1]))
+	}
+	if len(hosts) == 0 {
+		panic("server: QUOTE_HOSTS in domain/quotes.js has no hostnames")
+	}
+	return hosts
+}
+
+// buildCSP scheme-qualifies each host (`https://api.example.com`, not the bare
+// hostname) so a plaintext-http document on this origin cannot be talked into
+// fetching quotes over http.
+func buildCSP(quoteHosts []string) string {
+	connect := "'self'"
+	for _, h := range quoteHosts {
+		connect += " https://" + h
+	}
+	return "default-src 'self'; " +
+		"script-src 'self'; " +
+		"style-src 'self'; " +
+		"img-src 'self'; " +
+		"connect-src " + connect + "; " +
+		"object-src 'none'; " +
+		"base-uri 'none'; " +
+		"frame-ancestors 'none'; " +
+		"form-action 'none'"
+}
 
 // API holds the vault's stateful handler dependencies: the database, the
 // session-cookie signing key, the in-flight WebAuthn challenges, and the
