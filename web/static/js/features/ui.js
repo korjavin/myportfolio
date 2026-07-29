@@ -116,6 +116,27 @@ export function emptyState(message) {
     return el('p', 'empty-state-msg m-0', message);
 }
 
+/**
+ * The one thing a visitor with no records of their own can click (bd
+ * myportfolio-cnd.2). Same primitive as the demo banner's "Exit demo" link, so
+ * it needs no CSS of its own.
+ *
+ * `./?demo=1` and not `/?demo=1`: "/" is a directory rather than a file, and
+ * architecture.asset-paths.test.js resolves every rooted reference against the
+ * embedded tree. The relative form carries the query and resolves against the
+ * document, which is always served from the root.
+ *
+ * It is not conditional on demo mode: with a fixture loaded there ARE records,
+ * so no first-run empty state renders in the first place.
+ */
+export function demoLink() {
+    const wrap = el('div', 'flex-center');
+    const link = el('a', 'wg-toolbar-btn wg-toolbar-btn--secondary', 'See a demo portfolio');
+    link.href = './?demo=1';
+    wrap.appendChild(link);
+    return wrap;
+}
+
 export function card(...children) {
     const node = el('div', 'wg-card');
     for (const child of children) if (child) node.appendChild(child);
