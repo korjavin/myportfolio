@@ -35,6 +35,15 @@ function generalCard(rerender) {
     const providerSel = ui.select(PROVIDERS, active);
     const apiKey = ui.input(providers[active]?.apiKey ?? '', { type: 'password', placeholder: 'API key' });
 
+    // Repopulate the key when the provider changes. Without this the field keeps
+    // showing the previously selected provider's key, and Save then stores it
+    // under the NEW provider — so the next quote fetch sends your Finnhub
+    // credential to Alpha Vantage. Handing one provider's secret to another is
+    // the kind of bug a password field hides, since nobody can see it happen.
+    providerSel.addEventListener('change', () => {
+        apiKey.value = providers[providerSel.value]?.apiKey ?? '';
+    });
+
     const save = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Save', async () => {
         const patch = { reportingCurrency: currency.value.trim().toUpperCase() || DEFAULT_CURRENCY };
         patch.quoteProviders = providerSel.value
@@ -188,10 +197,19 @@ function recordsCard({ label, noun, plural, items, describe, onOpen, type, reren
 
 // --- Import / export -------------------------------------------------------
 
+// A successful import must survive the re-render it causes. importRecords()
+// calls refresh(), which re-renders this screen and detaches resultSlot, so a
+// report written to the slot afterwards is never seen — the user imports, sees
+// nothing, and imports again. Parking it here means the rebuilt card renders
+// it. (Re-importing is harmless — ids are derived from the file — but "did that
+// work?" is exactly the question the report exists to answer.)
+let lastImport = null;
+
 function importCard(rerender) {
     const file = ui.input('', { type: 'file' });
     file.accept = '.xml,.csv,text/csv,text/xml';
     const resultSlot = ui.el('div', 'wg-error-slot');
+    if (lastImport) resultSlot.replaceChildren(ui.messages(lastImport.lines, lastImport.tone));
 
     file.addEventListener('change', async () => {
         const chosen = file.files && file.files[0];
@@ -227,13 +245,16 @@ function importCard(rerender) {
             return;
         }
 
-        resultSlot.replaceChildren(ui.messages([
-            `Wrote ${written} records.`,
-            ...lines,
-            // The report is the contract for anything the parser reinterpreted
-            // — §4 says a reinterpretation must never be silent.
-            ...report.entries.slice(0, 8).map((e) => `${e.severity} ${e.code}: ${e.message}`),
-        ], report.ok ? 'normal' : 'alert'));
+        lastImport = {
+            lines: [
+                `Wrote ${written} records.`,
+                ...lines,
+                // The report is the contract for anything the parser reinterpreted
+                // — §4 says a reinterpretation must never be silent.
+                ...report.entries.slice(0, 8).map((e) => `${e.severity} ${e.code}: ${e.message}`),
+            ],
+            tone: report.ok ? 'normal' : 'alert',
+        };
         file.value = '';
         rerender();
     });
