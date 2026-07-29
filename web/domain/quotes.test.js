@@ -409,6 +409,16 @@ test('a response with nothing usable in it is an error, not a silent success', a
   assert.deepEqual(f.all('price'), []);
   assert.deepEqual(report.updated, []);
   assert.equal(report.errors[0].code, 'no_closes');
+  // A refresh where nothing landed must not tell the staleness badge that
+  // prices are fresh.
+  assert.equal(report.fetchedAt, null);
+});
+
+test('fetchedAt is stamped when something lands, for the staleness badge', async () => {
+  const f = setup({ securities: { sec_btc: BTC } });
+  const http = transport(() => json(COINGECKO_MARKET_CHART));
+  const report = await createQuotesDomain({ records: f.records, http, now: () => 1700000000000 }).refresh({ days: 3 });
+  assert.equal(report.fetchedAt, 1700000000000);
 });
 
 test('securityIds narrows the refresh to one security', async () => {

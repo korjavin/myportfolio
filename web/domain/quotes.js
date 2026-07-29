@@ -194,6 +194,7 @@ export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 
   //
   //   skipped[].reason  no_quote_config | unknown_provider | no_api_key
   //   errors[].code     bad_api_key | rate_limited | fetch_failed | no_closes
+  //   fetchedAt         ms, or null when nothing landed
   async function refresh({ securityIds = null, days = 1 } = {}) {
     const updated = [];
     const skipped = [];
@@ -305,7 +306,12 @@ export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 
       }
     }
 
-    return { updated, skipped, errors };
+    // `fetchedAt` is what wg-stale-badge's `render({ fetchedAt })` wants, and it
+    // is stamped only when something actually landed — a refresh where every
+    // provider failed must not reset the badge to "just updated". Persisting it
+    // across reloads is the screen's call, not this module's; the durable
+    // fallback is portfolio.js's per-position `priceDate`.
+    return { updated, skipped, errors, fetchedAt: updated.length ? now() : null };
   }
 
   // Merge closes into the §4 per-security-year chunks. Merge, not replace: the
