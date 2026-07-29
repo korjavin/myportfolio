@@ -47,8 +47,14 @@ type API struct {
 	sessionSecret      string
 	registerChallenges *challengeStore
 	loginChallenges    *challengeStore
+	recoveryChallenges *challengeStore
 	limiter            *rateLimiter
-	trustedProxies     []netip.Prefix
+	// recoveryLimiter throttles recovery-code redemption per ACCOUNT. It is a
+	// second instance of the same limiter, never a second implementation: the
+	// per-IP one below keys on clientIP() and its trusted-proxy handling is
+	// load-bearing (see rate_limit.go).
+	recoveryLimiter *rateLimiter
+	trustedProxies  []netip.Prefix
 }
 
 // New builds the single-origin handler.
@@ -66,7 +72,9 @@ func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []ne
 		sessionSecret:      sessionSecret,
 		registerChallenges: newChallengeStore(),
 		loginChallenges:    newChallengeStore(),
+		recoveryChallenges: newChallengeStore(),
 		limiter:            newRateLimiter(ceremonyRateLimitMax, ceremonyRateLimitWindow),
+		recoveryLimiter:    newRateLimiter(recoveryAttemptMax, recoveryAttemptWindow),
 		trustedProxies:     trustedProxies,
 	}
 
@@ -89,6 +97,14 @@ func (a *API) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/webauthn/register/finish", limitByIP(a.limiter, a.trustedProxies, a.registerFinish))
 	mux.HandleFunc("POST /api/webauthn/login/begin", limitByIP(a.limiter, a.trustedProxies, a.loginBegin))
 	mux.HandleFunc("POST /api/webauthn/login/finish", limitByIP(a.limiter, a.trustedProxies, a.loginFinish))
+
+	// Recovery (Path C) is unauthenticated for the same reason: it is how
+	// someone with no working passkey gets one. Redemption carries a SECOND,
+	// per-account throttle inside the handler — the per-IP bucket here cannot
+	// see one account being sprayed from many addresses.
+	mux.HandleFunc("POST /api/recover", limitByIP(a.limiter, a.trustedProxies, a.redeemRecoveryCode))
+	mux.HandleFunc("POST /api/recovery/enroll/begin", limitByIP(a.limiter, a.trustedProxies, a.recoveryEnrollBegin))
+	mux.HandleFunc("POST /api/recovery/enroll/finish", limitByIP(a.limiter, a.trustedProxies, a.recoveryEnrollFinish))
 
 	// Everything else is behind a session, which also re-checks that the
 	// session's credential has not been revoked.
