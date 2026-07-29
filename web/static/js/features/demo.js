@@ -19,11 +19,13 @@
 // an abandoned product within a year; evergreen costs one date helper.
 //
 // MONEY IS §5 FIXED-POINT, with no exceptions for fixture data: amounts/fees/
-// taxes 1e2, shares 1e8, prices 1e8. A euro amount written as 1234.56 is wrong
-// by 100x on every screen at once, so features.demo.test.js asserts that every
-// number in every returned record is an integer.
+// taxes 1e2, shares 1e8, prices 1e8, FX rates 1e8. A euro amount written as
+// 1234.56 is wrong by 100x on every screen at once, so features.demo.test.js
+// asserts that every number in every returned record is an integer.
 
 import { RECORD, SETTINGS_ID } from '../../../domain/schema.js';
+import { proportion } from '../../../domain/money.js';
+import { FX_ONE } from '../../../domain/fx.js';
 
 // --- Accounts --------------------------------------------------------------
 //
@@ -44,16 +46,18 @@ const ACCOUNTS = [
 
 // --- Securities ------------------------------------------------------------
 //
-// Five, all EUR: multi-currency in the demo is a separate bead blocked on B8,
-// and summing unlike units would raise `currency_not_converted` today.
+// Six: five EUR and one USD (bd myportfolio-cnd.3). The USD one is the whole
+// reason B8 exists — a portfolio holding a single currency demonstrates none of
+// the reporting-currency conversion — and `currency` defaults to EUR so the
+// original five read exactly as before.
 //
-// `waypoints` are hand-picked euro prices at year offsets 0..5 from the start of
-// the range — the chart's story (a drawdown in year 2, a recovery, a crypto
-// spike and crash). Daily closes are interpolated between them and jittered by a
-// seeded LCG; see priceSeries(). A committed table of ~9k numbers would say the
-// same thing in 300 KB.
+// `waypoints` are hand-picked prices IN THE SECURITY'S OWN CURRENCY at year
+// offsets 0..5 from the start of the range — the chart's story (a drawdown in
+// year 2, a recovery, a crypto spike and crash). Daily closes are interpolated
+// between them and jittered by a seeded LCG; see priceSeries(). A committed
+// table of ~9k numbers would say the same thing in 300 KB.
 //
-// `assetClass` is set on all five because it is genuinely known for all five.
+// `assetClass` is set on all six because it is genuinely known for all six.
 // §4: absent means unclassified and the UI says so, so a blank here would be a
 // claim about the data, not caution.
 
@@ -107,7 +111,29 @@ const SECURITIES = [
         waypoints: [22000, 38000, 16000, 42000, 61000, 88000],
         noise: 0.05,
     },
+    // THE USD HOLDING. Waypoints are DOLLARS, and portfolio.js keeps
+    // `position.price` and `position.currency` in the security's own currency —
+    // a price is a market fact about the security, not a portfolio amount — so
+    // only its VALUE crosses into the reporting currency. Tesla pays no
+    // dividend, which is why it and not a US dividend payer: a foreign dividend
+    // is a second modelling decision (which currency the cash lands in) that
+    // this bead does not need in order to demonstrate conversion.
+    {
+        id: 'security_demo_tsla',
+        name: 'Tesla, Inc.',
+        isin: 'US88160R1014',
+        ticker: 'TSLA',
+        currency: 'USD',
+        assetClass: 'stock',
+        quote: { provider: 'twelvedata', symbol: 'TSLA' },
+        waypoints: [180, 300, 130, 250, 360, 420],
+        noise: 0.05,
+    },
 ];
+
+// The security's own currency, defaulting to EUR — read when a trade's cash leg
+// has to be converted and when the §4 `fx` field is written.
+const CURRENCY_OF = new Map(SECURITIES.map((s) => [s.id, s.currency ?? 'EUR']));
 
 // --- Calendar --------------------------------------------------------------
 
@@ -201,6 +227,33 @@ function priceSeries(security, start, today) {
     return closes;
 }
 
+// --- FX (§4 `fx` records) --------------------------------------------------
+//
+// One EURUSD fixing per calendar day over exactly the span the price chunks
+// cover. Full coverage rather than the ECB's business days: perf.js values at
+// every sub-period boundary in the log, and covering every day is what makes
+// "the demo never shows a `currency_not_converted` gap" true by construction
+// instead of by luck. fx.js's carry-forward window exists for the real
+// provider's weekends; a fixture is not a provider replay.
+//
+// A rate is a §5 1e8 integer — the SAME scale as a price — so this is the same
+// seeded walk between hand-picked waypoints that generates the price series,
+// reusing priceSeries() rather than growing a second copy of it. The waypoints
+// are dollars per euro at year offsets 0..5.
+//
+// §5 is explicit that FX is the one quantity where a Portfolio Performance
+// round-trip is NOT lossless: PP stores `<exchangeRate>` as an arbitrary-
+// precision BigDecimal and quantising to 1e8 genuinely rounds. So nothing here
+// or in features.demo.test.js asserts an exact decimal rate back.
+const EURUSD = {
+    id: 'fx_demo_eurusd',
+    pair: 'EURUSD',
+    waypoints: [1.12, 1.06, 1.09, 1.02, 1.10, 1.16],
+    // Far tighter than any equity: a 5% daily jitter on an exchange rate would
+    // read as a currency crisis rather than as a demo.
+    noise: 0.004,
+};
+
 // --- The trade plan --------------------------------------------------------
 //
 // Offsets are months/days from `start` (= today - 5 years). What this has to
@@ -217,7 +270,10 @@ function priceSeries(security, start, today) {
 //     basis and taxes do not, and a fixture full of zeros stops testing the one
 //     arithmetic rule most likely to regress;
 //   • DEPOSITS SPREAD OVER TIME, which is the entire reason a money-weighted
-//     (IRR) and a time-weighted (TTWROR) return differ at all.
+//     (IRR) and a time-weighted (TTWROR) return differ at all;
+//   • A USD HOLDING BOUGHT WITH EUR CASH, still open, so the reporting-currency
+//     total is genuinely not the sum of the native values — B8's whole feature,
+//     and invisible in a portfolio that holds one currency.
 
 const FEE_TR = EUR(1);
 const FEE_IB = EUR(3.5);
@@ -240,12 +296,23 @@ const BUYS = [
     { id: 'tx_demo_buy_aggh_2', at: { months: 48, days: 5 }, security: 'security_demo_aggh', depot: DEPOT_TR, shares: SHARES(30), fees: FEE_TR, taxes: 0 },
     { id: 'tx_demo_buy_btc_2', at: { months: 54, days: 3 }, security: 'security_demo_btc', depot: DEPOT_TR, shares: SHARES(0.05), fees: FEE_TR, taxes: 0 },
     { id: 'tx_demo_buy_vwce_4', at: { months: 57 }, security: 'security_demo_vwce', depot: DEPOT_IB, shares: SHARES(10), fees: FEE_IB, taxes: 0 },
+    // The USD leg. Dollar-priced shares, euro cash: what leaves the account is
+    // the gross converted at THAT DAY's rate, and `fx` records the rate that did
+    // it — see the buy loop.
+    { id: 'tx_demo_buy_tsla_1', at: { months: 18, days: 8 }, security: 'security_demo_tsla', depot: DEPOT_IB, shares: SHARES(20), fees: FEE_IB, taxes: 0 },
+    { id: 'tx_demo_buy_tsla_2', at: { months: 42, days: 12 }, security: 'security_demo_tsla', depot: DEPOT_IB, shares: SHARES(10), fees: FEE_IB, taxes: 0 },
 ];
 
 const SELLS = [
     // The full exit: 40 SAP bought around €90 leave around €150.
     { id: 'tx_demo_sell_sap_1', at: { months: 36 }, security: 'security_demo_sap', depot: DEPOT_IB, shares: SHARES(40), fees: FEE_IB, taxes: EUR(620) },
     { id: 'tx_demo_sell_vwce_1', at: { months: 51 }, security: 'security_demo_vwce', depot: DEPOT_TR, shares: SHARES(10), fees: FEE_TR, taxes: EUR(120) },
+    // A PARTIAL exit from the USD holding, so the position stays open and keeps
+    // a live dollar price while a realized gain has already been booked in euros
+    // at the rate of its own day. Deliberately not a full exit: a closed-out
+    // foreign position is worth zero in every currency and portfolio.js
+    // short-circuits the rate lookup entirely, which would demonstrate nothing.
+    { id: 'tx_demo_sell_tsla_1', at: { months: 51 }, security: 'security_demo_tsla', depot: DEPOT_IB, shares: SHARES(12), fees: FEE_IB, taxes: EUR(180) },
 ];
 
 // `amount` is what actually lands in the account, i.e. net of withholding tax;
@@ -296,6 +363,20 @@ export function demoRecords({ today }) {
         return close;
     };
 
+    // Same generator, same span, same 1e8 scale — see the FX section.
+    const fxSeries = priceSeries(EURUSD, start, today);
+    const rateOn = (d) => {
+        const rate = fxSeries.get(d);
+        if (rate === undefined) throw new RangeError(`demo: no generated ${EURUSD.pair} rate on ${d}`);
+        return rate;
+    };
+    // The rate that turned a foreign gross into the euros that actually left the
+    // account, or null for a security already in the reporting currency. `pair`
+    // reads BASE then QUOTE, so EURUSD is dollars per euro and euros are dollars
+    // DIVIDED by it — proportion() does that exactly, in BigInt, rounding once.
+    const fxOn = (securityId, d) => (CURRENCY_OF.get(securityId) === 'EUR' ? null : rateOn(d));
+    const cashLeg = (nativeUnits, fx) => (fx === null ? nativeUnits : proportion(nativeUnits, FX_ONE, fx));
+
     const bodies = [];
     const add = (recordType, recordId, body) => bodies.push({ recordType, recordId, body });
 
@@ -307,7 +388,7 @@ export function demoRecords({ today }) {
 
     for (const s of SECURITIES) {
         add(RECORD.security, s.id, {
-            name: s.name, isin: s.isin, ticker: s.ticker, currency: 'EUR',
+            name: s.name, isin: s.isin, ticker: s.ticker, currency: CURRENCY_OF.get(s.id),
             assetClass: s.assetClass, quote: s.quote,
         });
     }
@@ -318,23 +399,36 @@ export function demoRecords({ today }) {
         });
     });
 
+    // A trade in a dollar-priced security still moves EUROS out of the euro cash
+    // account — the broker converts at the day's rate — so `currency` is EUR and
+    // `amount` is what really left, converted at the transaction's OWN day. That
+    // matches Portfolio Performance, where a transaction's amount is in its
+    // account's currency and `<exchangeRate>` rides along; §4's `fx` field is
+    // that rate, so it is written here for the same reason ppimport.js writes it.
+    // Keeping the cash leg in the reporting currency is also what keeps perf.js
+    // honest: it reads `tx.amount` raw for flows and does no conversion of its
+    // own, so a dollar amount there would be netted against euro valuations.
     for (const b of BUYS) {
         const d = day(b.at);
+        const fx = fxOn(b.security, d);
         // §4: `amount` is the cash that moved — gross + fees + taxes on a buy.
-        const amount = gross(b.shares, closeOn(b.security, d)) + b.fees + b.taxes;
+        const amount = cashLeg(gross(b.shares, closeOn(b.security, d)), fx) + b.fees + b.taxes;
         add(RECORD.transaction, b.id, {
             type: 'buy', accountId: CASH, portfolioId: b.depot, securityId: b.security,
             date: d, shares: b.shares, amount, fees: b.fees, taxes: b.taxes, currency: 'EUR',
+            ...(fx === null ? {} : { fx }),
         });
     }
 
     for (const s of SELLS) {
         const d = day(s.at);
+        const fx = fxOn(s.security, d);
         // …and gross - fees - taxes on a sell, which is what arrived.
-        const amount = gross(s.shares, closeOn(s.security, d)) - s.fees - s.taxes;
+        const amount = cashLeg(gross(s.shares, closeOn(s.security, d)), fx) - s.fees - s.taxes;
         add(RECORD.transaction, s.id, {
             type: 'sell', accountId: CASH, portfolioId: s.depot, securityId: s.security,
             date: d, shares: s.shares, amount, fees: s.fees, taxes: s.taxes, currency: 'EUR',
+            ...(fx === null ? {} : { fx }),
         });
     }
 
@@ -359,6 +453,17 @@ export function demoRecords({ today }) {
         for (const [year, closes] of byYear) {
             add(RECORD.price, `price_${s.id}_${year}`, { securityId: s.id, year, closes });
         }
+    }
+
+    // §4 pins one `fx` record per pair-day — unlike prices, these are not
+    // chunked — so this is ~1830 small records for a five-year span. The dashes
+    // are stripped out of the id because the seed's ids are asserted to be
+    // stable literals matching /^[a-z0-9_]+$/; §4 forbids parsing an id anyway,
+    // so the date in it is a reader's convenience and nothing reads it back.
+    for (const [d, rate] of fxSeries) {
+        add(RECORD.fx, `fx_${EURUSD.pair.toLowerCase()}_${d.replace(/-/g, '')}`, {
+            pair: EURUSD.pair, date: d, rate,
+        });
     }
 
     // clientTs is an index, not a clock: §3 treats it purely as a merge token
