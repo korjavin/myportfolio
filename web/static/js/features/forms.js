@@ -133,6 +133,16 @@ function parseInto(target, values, key, decimals, label, errors, { required = fa
  * Returns `{ body, errors }`. `body` is only meaningful when `errors` is empty.
  * The port owns recordId/recordType/clientTs/deleted (§3), so none of them
  * appear here.
+ *
+ * NOT WRITTEN YET, and this is the one function that will need to: §4 now says
+ * a buy/sell names both accounts — `accountId` (the cash leg) and
+ * `portfolioId` (where the shares land). Today `portfolioId` is a sentence in
+ * ARCHITECTURE.md and nothing else: it is absent from schema.js, from
+ * portfolio.js and from ppimport.js, and bd g7e.11 is what introduces it.
+ * Adding a required securities-account picker to quick-add — the primary
+ * interaction — for a field no engine reads would be a guess at a name and a
+ * tax on every transaction for zero effect. When the field is real, it is a
+ * second `entityPicker` in transactions.js and one line below.
  */
 export function buildTxBody(values) {
     const errors = [];

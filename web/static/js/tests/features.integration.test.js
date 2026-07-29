@@ -155,6 +155,35 @@ describe('screens → engine: editing a transaction', () => {
         assert.equal(after.positions[0].shares, before.positions[0].shares);
     });
 
+    test('an imported foreign-currency transaction keeps its currency through an edit', async () => {
+        // Found by codex review. Rewriting `currency` to the reporting currency
+        // on save silences portfolio.js's `currency_not_converted` issue, and
+        // the engine then adds the USD amount straight into the EUR total —
+        // a silent misvaluation caused by opening a form and pressing Save.
+        // Multi-currency conversion is B8; until then the engine warns, and the
+        // form must not erase what it warns about.
+        const { records, portfolio } = await fixture();
+        await records.put(RECORD.settings, 'settings', { reportingCurrency: 'EUR' });
+        await records.put(RECORD.transaction, 'tx_usd', {
+            type: 'deposit', date: '2024-02-01', accountId: 'acct_cash',
+            amount: 50000, currency: 'USD',
+        });
+        assert.ok((await portfolio.snapshot()).issues.some((i) => i.code === 'currency_not_converted'));
+
+        const stored = (await records.list(RECORD.transaction)).find((r) => r.recordId === 'tx_usd');
+        const form = txToForm(stored);
+        assert.equal(form.currency, 'USD');
+        // What transactions.js save() now passes through.
+        const { body } = buildTxBody({ ...form, currency: form.currency || 'EUR' });
+        assert.equal(body.currency, 'USD');
+        await records.put(RECORD.transaction, 'tx_usd', body);
+
+        assert.ok(
+            (await portfolio.snapshot()).issues.some((i) => i.code === 'currency_not_converted'),
+            'the mixed-currency warning disappeared after a no-op edit'
+        );
+    });
+
     test('editing the amount is reflected in cash and basis immediately', async () => {
         const { records, portfolio } = await fixture();
         await records.put(RECORD.transaction, 'tx_1', buildTxBody(DEPOSIT_FORM).body);
