@@ -1,7 +1,6 @@
 # myportfolio behind Traefik, deployed by Portainer from the `deploy` branch.
-# Full operator guide, including how to derive MYPORTFOLIO_TRUSTED_PROXIES:
-# docs/DEPLOY.md. Read that before your first deploy — one setting here fails
-# silently in both directions.
+# Full operator guide: docs/DEPLOY.md. The only variable a stack must set is
+# MYPORTFOLIO_HOST.
 #
 # On master the image tag is `latest` as a placeholder. The release workflow
 # rewrites it to the commit SHA on the `deploy` branch, which is the branch
@@ -18,7 +17,7 @@ services:
     # Publishing a port would make the container reachable from outside the
     # Docker network, and every such request arrives at the app from the bridge
     # gateway's address — an address inside the same private range that
-    # MYPORTFOLIO_TRUSTED_PROXIES has to trust. Any caller could then set
+    # MYPORTFOLIO_TRUSTED_PROXIES would name. Any caller could then set
     # X-Forwarded-For to a fresh value per request and get a fresh rate-limit
     # bucket. That exact bypass has already been found and fixed in this
     # codebase (90 ceremonies through a limit of 30) and is regression-tested in
@@ -26,20 +25,20 @@ services:
     # is what keeps the trusted-proxy range honest.
 
     environment:
-      # THE SETTING THAT MUST BE RIGHT. It has no safe default, which is why
-      # this is `:?` — the stack refuses to deploy rather than come up wrong,
-      # because both wrong values fail silently:
+      # Optional tuning, not a prerequisite. It affects exactly four endpoints:
+      # the WebAuthn ceremonies, rate-limited to 30/minute per client IP.
       #
-      #   unset  -> the app trusts loopback only, so behind a proxy every user
-      #             shares Traefik's single bucket and one client's retries
-      #             throttle everybody.
-      #   too wide (10.0.0.0/8, 172.16.0.0/12, "any private address")
-      #          -> anything that can reach the app forges a fresh bucket per
-      #             request and the ceremony limiter stops existing.
+      #   unset (the default) -> the app trusts loopback only, so behind Traefik
+      #             every request looks like it came from Traefik and all
+      #             callers share ONE bucket of 30 ceremonies per minute. On a
+      #             personal or family deployment nobody comes near that.
+      #   set    -> each real client gets its own bucket. Worth doing once you
+      #             have enough concurrent users that one person's sign-in
+      #             retries could throttle another.
       #
-      # Correct value: the subnet of the Traefik network this container is on,
-      # nothing broader. docs/DEPLOY.md has the one-line command to read it.
-      MYPORTFOLIO_TRUSTED_PROXIES: ${MYPORTFOLIO_TRUSTED_PROXIES:?set to the Traefik network subnet (e.g. 172.20.0.0/16) or Traefik's container IP — never a blanket private range. See docs/DEPLOY.md}
+      # If you set it, use the subnet of the Traefik network this container is
+      # on (or Traefik's container IP), nothing broader — see docs/DEPLOY.md.
+      MYPORTFOLIO_TRUSTED_PROXIES: ${MYPORTFOLIO_TRUSTED_PROXIES:-}
       MYPORTFOLIO_ADDR: ":8080"
       MYPORTFOLIO_DB: /data/myportfolio.db
 
