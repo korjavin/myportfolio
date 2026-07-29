@@ -14,19 +14,14 @@
 // one (persistent-storage, notifications), it belongs behind an explicit
 // in-app control on an installed client, never on boot.
 
-import { localRecords } from '../core/localdb.js';
 import { renderScreen, resolveScreenId, screenTitle } from './screens.js';
-
-// Record types whose counts the dashboard reports. Kept to the three the
-// skeleton shows; g7e.7 replaces this with a real valuation read.
-const COUNTED_TYPES = ['account', 'security', 'transaction'];
+import { refresh, subscribe } from './store.js';
 
 const screenEl = document.getElementById('screen');
 const navMountEl = document.getElementById('nav-mount');
 const promptEl = document.getElementById('update-prompt');
 
 let nav = null;
-let counts = null;
 
 function currentScreenId() {
     // Hash routing, not History API: it needs no server-side rewrite, so an
@@ -35,12 +30,15 @@ function currentScreenId() {
 }
 
 function render(focus) {
-    const id = renderScreen(screenEl, currentScreenId(), counts);
+    const id = currentScreenId();
     document.title = `${screenTitle(id)} · myportfolio`;
     if (nav) nav.setActive(id);
     // Move focus on navigation only: doing it on first paint would steal focus
     // from the address bar before the user has done anything.
     if (focus) screenEl.focus({ preventScroll: true });
+    // Screens paint synchronously and only the domain-backed tail is awaited,
+    // so a rejection here is a bug in a screen, not a slow database.
+    renderScreen(screenEl, id).catch((err) => console.error('boot: screen render failed', err));
 }
 
 function mountNav() {
@@ -55,19 +53,10 @@ function mountNav() {
     });
 }
 
-async function loadCounts() {
-    // Wrapped: IndexedDB is unavailable in some private-browsing modes, and a
-    // shell that throws there is a shell that shows a blank screen.
-    try {
-        const pairs = await Promise.all(
-            COUNTED_TYPES.map(async (t) => [t, (await localRecords.list(t)).length])
-        );
-        counts = Object.fromEntries(pairs);
-        render(false);
-    } catch (err) {
-        console.warn('boot: local store unavailable, rendering without counts', err);
-    }
-}
+// Every write goes through store.refresh(), which emits when the derived state
+// is settled — so a screen re-renders off completed writes only, never an
+// optimistic guess that a failed put would leave on screen.
+subscribe(() => render(false));
 
 // ---------------------------------------------------------------------------
 // Service worker
@@ -152,6 +141,7 @@ render(false);
 window.addEventListener('hashchange', () => render(true));
 
 // Both are deliberately after the first paint: the shell must be on screen
-// before either the database or the network is touched.
-loadCounts();
+// before either the database or the network is touched. refresh() cannot
+// reject — it records the failure on state.error and the screens render it.
+refresh();
 registerServiceWorker();

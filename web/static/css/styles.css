@@ -1647,3 +1647,217 @@ textarea.wg-input {
     min-width: 0;
     font-size: var(--font-size-sm);
 }
+
+/* =============================================
+   SCREENS — the five nav destinations
+   (bd myportfolio-g7e.7).
+
+   Screen-level layout only. Every colour, radius
+   and spacing value resolves through an existing
+   token: this block introduces no --wg-* token of
+   its own, so the design-token registry does not
+   move. Still no section-header banner — the
+   active bottom-nav pill remains the sole screen
+   indicator (ARCHITECTURE.md §9).
+   ============================================= */
+
+/* Cards, toolbars and lists stack down the stage with one rhythm. */
+.wg-screen-stage > * + * {
+    margin-top: var(--space-md);
+}
+
+/* The toolbar row: segmented strip left, primary action pill right. */
+.wg-toolbar {
+    min-height: var(--wg-toolbar-btn-height);
+}
+
+/* The inset track the range/filter buttons sit in. Referenced by design.html
+   since the port; defined here now that live screens use it. */
+.wg-range-strip {
+    padding: var(--space-xs);
+    border-radius: var(--wg-radius-gloss);
+    min-width: 0;
+    overflow-x: auto;
+}
+
+/* ---------- List rows ---------- */
+
+.wg-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.wg-row {
+    display: flex;
+    align-items: stretch;
+    gap: var(--space-sm);
+    background: var(--wg-bg-card);
+    border: 1px solid var(--wg-border-hairline);
+    border-radius: var(--wg-radius-card);
+    padding: var(--space-sm) var(--space-md);
+}
+
+/* The whole row is the tap target — a 44px minimum so a thumb on a 360px
+   screen hits it, which is the width this app is designed for first. */
+.wg-row__tap {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.wg-row__tap:disabled {
+    cursor: default;
+}
+
+.wg-row__main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.wg-row__title {
+    font-family: var(--wg-font-mono);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--wg-fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wg-row__sub {
+    font-size: var(--font-size-xs);
+    color: var(--wg-fg-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wg-row__end {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.wg-row__value {
+    font-family: var(--wg-font-mono);
+    font-size: var(--font-size-sm);
+    color: var(--wg-fg-1);
+}
+
+.wg-row__action {
+    align-self: center;
+    flex-shrink: 0;
+}
+
+/* ---------- Allocation breakdown ---------- */
+
+/* Bars rather than a donut: the ported palette has no categorical hue set, and
+   a dozen arcs at 360px are unreadable. One neutral accent, ranked by size. */
+.wg-alloc-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.wg-alloc__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xs);
+}
+
+.wg-alloc__label {
+    font-family: var(--wg-font-mono);
+    font-size: var(--font-size-sm);
+    color: var(--wg-fg-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wg-alloc__value {
+    font-size: var(--font-size-xs);
+    color: var(--wg-fg-3);
+    flex-shrink: 0;
+}
+
+.wg-alloc__track {
+    height: 7px;
+    border-radius: var(--radius-pill);
+    background: var(--wg-bg-card-inset);
+    overflow: hidden;
+}
+
+/* --fill-pct is a neutral custom property written by ui.js — a structural
+   percentage, not a --wg-* token and not a colour. */
+.wg-alloc__fill {
+    height: 100%;
+    width: var(--fill-pct, 0%);
+    border-radius: var(--radius-pill);
+    background: var(--wg-mint-soft);
+}
+
+/* ---------- Modal backdrop ---------- */
+
+/* Below --z-modal so the modal it dims stays on top; above everything else so
+   nothing behind it stays clickable. */
+.wg-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-overlay);
+    background: var(--color-overlay);
+}
+
+/* ---------- Inline messages ---------- */
+
+/* Form validation, engine issues and import reports. Never a toast: these are
+   things the user has to read before the number in front of them means what
+   they think it means. */
+.wg-messages {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.wg-message {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+}
+
+.wg-message__text {
+    font-size: var(--font-size-sm);
+    color: var(--wg-fg-2);
+    line-height: 1.45;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.wg-error-slot:empty {
+    display: none;
+}
+
+/* A dependent group of fields (the "+ New security" pair) that shows and hides
+   as a unit with .hidden. */
+.wg-field-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}

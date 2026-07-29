@@ -46,14 +46,24 @@ const SW_PATH = path.join(STATIC_DIR, 'sw.js');
 const FONTS_CSS_PATH = path.join(STATIC_DIR, 'css/fonts.css');
 
 /**
- * Map a served URL path onto the file that answers it. web/embed.go roots the
- * embedded FS at web/static, so "/css/styles.css" is web/static/css/styles.css
- * and "/" is web/static/index.html.
+ * Map a served URL path onto the file that answers it. web/embed.go serves the
+ * web/static tree at the root, so "/css/styles.css" is web/static/css/styles.css
+ * and "/" is web/static/index.html — with ONE exception, which embed.go's
+ * splitFS makes explicit: "/domain/..." is web/domain, not web/static/domain.
+ *
+ * The exception exists because ARCHITECTURE.md §2 puts the pure domain modules
+ * outside web/static while §10 has the feature screens import them. This
+ * function has to mirror the server's routing exactly or the guard measures a
+ * different app than the one that ships.
  */
+const WEB_DIR = path.join(REPO_ROOT, 'web');
+
 function fileFor(urlPath) {
-    return urlPath === '/'
-        ? INDEX_PATH
-        : path.join(STATIC_DIR, urlPath.replace(/^\//, ''));
+    if (urlPath === '/') return INDEX_PATH;
+    const rel = urlPath.replace(/^\//, '');
+    return rel.startsWith('domain/')
+        ? path.join(WEB_DIR, rel)
+        : path.join(STATIC_DIR, rel);
 }
 
 /**

@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -67,9 +67,26 @@ const PRECACHE = [
     '/js/components/wg-bottom-nav.js',
     '/js/features/boot.js',
     '/js/features/screens.js',
+    '/js/features/store.js',
+    '/js/features/ui.js',
+    '/js/features/fmt.js',
+    '/js/features/forms.js',
+    '/js/features/dashboard.js',
+    '/js/features/holdings.js',
+    '/js/features/transactions.js',
+    '/js/features/performance.js',
+    '/js/features/settings.js',
     '/js/core/localdb.js',
     '/js/core/records.js',
     '/vendor/dexie.min.js',
+    // web/domain/, served at /domain/ by web/embed.go. These are the pure
+    // engines — without them offline the shell paints and then every number is
+    // missing, which is worse than not painting at all.
+    '/domain/schema.js',
+    '/domain/money.js',
+    '/domain/portfolio.js',
+    '/domain/perf.js',
+    '/domain/ppimport.js',
 ];
 
 self.addEventListener('install', (event) => {
