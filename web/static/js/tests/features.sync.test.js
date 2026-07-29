@@ -457,7 +457,12 @@ describe('a sync that is not working must be visible', () => {
         // Actionable copy, not a raw error string.
         assert.doesNotMatch(desc.headline, /^sync:/);
         assert.doesNotMatch(desc.detail, /Refusing/);
-        assert.match(desc.detail, /browser profile/);
+        // Not "use a separate browser profile" any more — the mirror is
+        // namespaced per account (bd 18h.12), so that advice would be wrong for
+        // the only thing this path can still mean: this device's sync metadata
+        // is stamped for a different vault. What must survive is that the copy
+        // names a real remedy and does not imply the local data is gone.
+        assert.match(desc.detail, /Clearing this site's data/);
         assert.match(desc.detail, /still saved on this device/);
     });
 });
