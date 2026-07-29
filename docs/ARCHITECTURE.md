@@ -102,12 +102,25 @@ keeps its own side, a merge that changes nothing locally never schedules a push,
 permanently divergent data with nothing to detect it. `state-sync.js` compares canonical forms, which
 costs nothing and is stable across devices.
 
-**One vault per browser profile, for now.** `localdb.js` opens one un-scoped Dexie database per
-origin, so a second account would land on the first account's records. `state-sync.js` stamps its
-metadata with the owning `accountId` and refuses a mismatch *before touching the wire*, claiming the
-mirror on open rather than on first successful sync — a vault used entirely offline never reaches the
-network, so a guard that waits for a response is absent exactly when it is needed. That turns a
-silent cross-vault upload into a loud stop; namespacing the mirror per account is the real fix.
+**The mirror is namespaced per account.** `localdb.js` opens `myportfolio_<accountId>`, and the sync
+metadata follows the mirror — shared metadata under per-account mirrors is the same bug one layer
+down. Two accounts can be used in one browser profile without either seeing the other's records.
+
+- **Signing up is a move, not a copy.** Pre-signup rows are claimed into the new account's namespace
+  and dropped from the shared one, so the *next* account does not inherit them. Idempotent: on a
+  collision the higher `clientTs` wins, the same rule §6 uses.
+- **A device upgrading from the un-namespaced layout must not claim blindly.** On such a device the
+  shared `myportfolio` database is usually a signed-in account's real portfolio — and this change is
+  precisely what lets a *second* account unlock, so "B unlocks first" is a likely order, not an edge
+  case. Claiming unconditionally would move A's trades into B's namespace and upload them. The
+  legacy stamp is consulted first.
+- **Switching accounts retains, it does not wipe.** A wipe would destroy writes an offline device has
+  not synced yet, making account switching a data-loss operation. The honest cost: A's plaintext
+  mirror stays on disk after the switch, removable by clearing site data or deleting the account.
+
+`state-sync.js`'s `wrong-account` refusal stays as a backstop — unreachable in normal use now, but it
+is the guard that would catch a namespacing mistake, and it must never be the thing that was removed
+because it stopped firing.
 
 ## 4. Record types
 

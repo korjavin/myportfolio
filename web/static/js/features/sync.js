@@ -349,10 +349,15 @@ export function describeSync(snapshot, { online = true, now = Date.now } = {}) {
                 tone: 'error',
                 ambient: true,
                 headline: 'Sync is off — this browser already holds a different vault',
-                detail: 'myportfolio can keep one vault per browser profile for now. Everything you enter here '
-                    + 'is still saved on this device, but it is not being backed up and will not reach your '
-                    + 'other devices. Use a separate browser profile for this account, or clear this site\'s '
-                    + 'data if you want to start fresh here.',
+                // Unreachable in normal use since the mirror is namespaced per
+                // account (bd 18h.12) — kept as a backstop, so the copy has to
+                // stay true if it ever does fire. It no longer means "one vault
+                // per profile"; it means this device's sync metadata is stamped
+                // for a different vault than the one that just unlocked.
+                detail: 'This device\'s backup state belongs to a different vault, so syncing has stopped '
+                    + 'rather than risk uploading one account\'s records into another. Everything you enter '
+                    + 'here is still saved on this device, but it is not being backed up and will not reach '
+                    + 'your other devices. Clearing this site\'s data will reset it.',
                 action: null,
             };
         }
