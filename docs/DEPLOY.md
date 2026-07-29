@@ -127,7 +127,8 @@ nothing was redeployed.
 - Compose path: `compose.yaml`
 - Enable the webhook.
 
-**Portainer environment variables:**
+**Portainer environment variables** — [`.env.example`](../.env.example) is the copy-paste version,
+with the same table as comments:
 
 | Variable | Required | Notes |
 |---|---|---|
