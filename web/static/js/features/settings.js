@@ -12,9 +12,10 @@ import * as fmt from './fmt.js';
 import { parsePP } from '../../../domain/ppimport.js';
 import { RECORD, ASSET_CLASSES } from '../../../domain/schema.js';
 import {
-    state, putSettings, putAccount, putSecurity, remove,
+    state, putSettings, putAccount, putSecurity, remove, refresh,
     importRecords, exportAll, reportingCurrency, DEFAULT_CURRENCY,
 } from './store.js';
+import { syncState, describeSync, syncNow, subscribeSync } from './sync.js';
 
 // §7: browser-direct with the user's own key is the default, so the server
 // never learns which symbols you hold. CoinGecko's free tier is keyless; the
@@ -66,6 +67,52 @@ function generalCard(rerender) {
         ui.fieldRow(ui.field('Quote provider', providerSel), ui.field('API key', apiKey)),
         actions
     );
+}
+
+// --- Sync ------------------------------------------------------------------
+
+// The full picture, including the states the ambient strip stays quiet about:
+// offline, a write still waiting on the debounce, and — the one that actually
+// catches a sync that quietly stopped — when this device last got through.
+//
+// This card repaints ITSELF on every sync change rather than waiting for the
+// screen to be re-rendered. The vault attaches asynchronously a moment after
+// first paint, so a card rendered once at boot sits there saying "this device
+// only" while the app is in fact syncing — a stale sync indicator, which is the
+// one thing this bead exists to prevent. Repainting only this subtree also
+// means a flush landing three seconds after a keystroke does not rebuild the
+// form the user is typing into.
+function syncCard(rerender) {
+    const card = ui.card(ui.sectionLabel('Sync'));
+    const body = ui.el('div');
+    card.appendChild(body);
+
+    const paint = () => {
+        const snapshot = syncState();
+        const desc = describeSync(snapshot, { online: navigator.onLine });
+        const actions = snapshot.connected
+            ? [{ label: 'Sync now', onClick: async () => { await syncNow(refresh); rerender(); } }]
+            : [];
+        // syncNotice returns its own card; unwrap it rather than nesting two.
+        const children = [...ui.syncNotice(desc, actions).childNodes];
+        if (snapshot.connected) {
+            children.push(ui.el(
+                'p',
+                'wg-muted text-sm m-0 mt-md',
+                `Vault ${snapshot.accountId} · state version ${snapshot.status?.version ?? 0}`
+            ));
+        }
+        body.replaceChildren(...children);
+    };
+
+    const off = subscribeSync(() => {
+        // The screen has moved on; drop the subscription with it rather than
+        // repainting a detached node forever.
+        if (!card.isConnected) off();
+        else paint();
+    });
+    paint();
+    return card;
 }
 
 // --- Accounts --------------------------------------------------------------
@@ -308,6 +355,7 @@ export function render(container) {
     const accountBalances = new Map((state.snapshot?.accounts ?? []).map((a) => [a.accountId, a.balance]));
 
     container.replaceChildren(
+        syncCard(rerender),
         generalCard(rerender),
         recordsCard({
             label: 'Accounts',

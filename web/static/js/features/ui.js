@@ -293,6 +293,43 @@ export function confirm({ title, message, confirmLabel = 'Delete', onConfirm }) 
     });
 }
 
+/**
+ * A sync state, as a card. One helper for both places it is shown — the ambient
+ * strip the shell prepends to every screen, and the Settings card — so a state
+ * cannot be worded one way in one of them and another way in the other.
+ *
+ * `desc` comes from sync.describeSync, which owns every word of it; this only
+ * decides which existing classes carry them. Extra actions are for callers that
+ * can do something in-page (Settings' "Sync now"); `desc.action` is the one the
+ * state itself implies, and is always a navigation.
+ */
+export function syncNotice(desc, actions = []) {
+    if (!desc) return null;
+    const calm = desc.tone === 'ok' || desc.tone === 'offline'
+        || desc.tone === 'busy' || desc.tone === 'pending' || desc.tone === 'local';
+    // One tag on the headline, and the explanation as ordinary muted copy. Two
+    // ISSUE badges stacked reads as two problems.
+    const node = card(
+        messages([desc.headline], calm ? 'normal' : 'alert'),
+        desc.detail ? el('p', 'wg-muted text-sm m-0 mt-md', desc.detail) : null
+    );
+
+    const all = [...(desc.action ? [desc.action] : []), ...actions];
+    if (all.length > 0) {
+        const row = el('div', 'flex-row flex-between gap-sm mt-md');
+        row.appendChild(el('span', 'flex-1'));
+        for (const action of all) {
+            row.appendChild(button(
+                'wg-toolbar-btn wg-toolbar-btn--primary',
+                action.label,
+                action.onClick ?? (() => { window.location.href = action.href; })
+            ));
+        }
+        node.appendChild(row);
+    }
+    return node;
+}
+
 /** A non-blocking inline error list, for form validation and import reports. */
 export function messages(items, variant = 'alert') {
     if (!items || items.length === 0) return null;
