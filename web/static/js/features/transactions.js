@@ -96,13 +96,24 @@ export function openTxModal(record, defaults) {
             .map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
         value: values.accountId,
     });
+    const depotOptions = depots.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId }));
+    // A stored portfolioId the list does not contain — its account was deleted,
+    // or its kind was changed to cash after the trade was booked — would be
+    // dropped by ui.select's fall back to the first option, and dropped
+    // SILENTLY: the field is not required on a dividend, so a no-op save would
+    // un-attribute an imported record with no error to notice. Carrying it as
+    // its own option means an edit preserves it and re-attributing stays a
+    // deliberate act.
+    if (values.portfolioId && !depots.some((a) => a.recordId === values.portfolioId)) {
+        const stored = state.accounts.find((a) => a.recordId === values.portfolioId);
+        depotOptions.push({ value: values.portfolioId, label: stored?.name ?? values.portfolioId });
+    }
     const portfolio = entityPicker({
         label: 'Securities account (shares land here)',
         noun: 'depot',
-        options: depots.map((a) => ({ value: a.recordId, label: a.name ?? a.recordId })),
-        // A stored portfolioId always wins, so an edit cannot silently
-        // re-attribute an imported trade. Otherwise one depot is not a guess —
-        // it is the only place the shares can be — while two would be.
+        options: depotOptions,
+        // A stored portfolioId always wins over the default. One depot is not a
+        // guess — it is the only place the shares can be — while two would be.
         value: values.portfolioId || (depots.length === 1 ? depots[0].recordId : ''),
     });
     const security = entityPicker({
