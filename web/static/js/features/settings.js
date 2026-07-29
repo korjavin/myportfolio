@@ -366,6 +366,15 @@ function securityModal(record, rerender) {
         { value: '', label: 'Unclassified' },
         ...ASSET_CLASSES.map((c) => ({ value: c, label: c })),
     ], record?.assetClass ?? '');
+    // §4's `quote: { provider, symbol }`. BOTH halves, because quotes.js needs
+    // both to fetch anything — it routes every security through its own
+    // `quote.provider` and skips a security with either missing as
+    // `no_quote_config`. This form collected only the symbol, so every security
+    // created in the app was unfetchable and Refresh could never price one.
+    const quoteProvider = ui.select([
+        { value: '', label: 'None — price by hand' },
+        ...QUOTE_PROVIDERS.map((p) => ({ value: p.name, label: p.label })),
+    ], record?.quote?.provider ?? '');
     const quoteSymbol = ui.input(record?.quote?.symbol ?? '', { placeholder: 'Provider symbol' });
     const errorSlot = ui.el('div', 'wg-error-slot');
 
@@ -376,7 +385,12 @@ function securityModal(record, rerender) {
             ui.field('Name', name),
             ui.fieldRow(ui.field('Ticker', ticker), ui.field('Currency', currency)),
             ui.fieldRow(ui.field('ISIN', isin), ui.field('WKN', wkn)),
-            ui.fieldRow(ui.field('Asset class', assetClass), ui.field('Quote symbol', quoteSymbol)),
+            ui.fieldRow(ui.field('Asset class', assetClass), ui.field('Quote provider', quoteProvider)),
+            ui.field('Quote symbol', quoteSymbol),
+            ui.el('p', 'wg-muted text-sm m-0',
+                'The symbol is the provider\'s own, not the exchange ticker: CoinGecko wants a coin id '
+                + '(bitcoin), Twelve Data wants a ticker (AAPL). A wrong one comes back as "no close" '
+                + 'rather than a wrong price.'),
         ],
         actions: [
             { label: 'Cancel', className: 'wg-gloss wg-gloss--lg', onClick: (close) => close() },
@@ -388,10 +402,16 @@ function securityModal(record, rerender) {
                         errorSlot.replaceChildren(ui.messages(['Name the security.']));
                         return;
                     }
+                    // Anything else already on `quote` survives; the provider
+                    // key is removed rather than stored empty, so "None" reads
+                    // back as unset instead of as a provider named "".
+                    const quote = { ...(record?.quote ?? {}), symbol: quoteSymbol.value.trim() };
+                    if (quoteProvider.value) quote.provider = quoteProvider.value;
+                    else delete quote.provider;
                     const body = {
                         name: name.value.trim(),
                         currency: currency.value.trim().toUpperCase() || reportingCurrency(),
-                        quote: { ...(record?.quote ?? {}), symbol: quoteSymbol.value.trim() },
+                        quote,
                     };
                     for (const [key, control] of [['ticker', ticker], ['isin', isin], ['wkn', wkn]]) {
                         const v = control.value.trim();
@@ -569,8 +589,13 @@ export function render(container) {
             items: state.securities,
             type: RECORD.security,
             rerender,
-            describe: (s) => [s.ticker, s.isin, s.currency, s.assetClass ?? 'unclassified']
-                .filter(Boolean).join(' · '),
+            // The quote route is part of a security's identity now that
+            // Holdings can fetch: "which of these will Refresh actually price"
+            // has to be answerable without opening every row.
+            describe: (s) => [
+                s.ticker, s.isin, s.currency, s.assetClass ?? 'unclassified',
+                s.quote?.provider && s.quote?.symbol ? `${s.quote.provider}:${s.quote.symbol}` : 'no quote',
+            ].filter(Boolean).join(' · '),
             onOpen: (record) => securityModal(record, rerender),
         }),
         importCard(rerender),

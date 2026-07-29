@@ -26,7 +26,7 @@ import (
 // a /domain/ path the shell precaches is missing from this list.
 //
 //go:embed static
-//go:embed domain/money.js domain/schema.js domain/portfolio.js domain/perf.js domain/prices.js domain/ppimport.js
+//go:embed domain/money.js domain/schema.js domain/portfolio.js domain/perf.js domain/prices.js domain/ppimport.js domain/quotes.js
 var webRoot embed.FS
 
 // StaticFS answers the URLs the browser asks for: everything is the web/static

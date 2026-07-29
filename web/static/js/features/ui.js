@@ -74,9 +74,12 @@ export function toolbar({ options = [], active, onSelect, primary } = {}) {
         strip.appendChild(btn);
     }
     if (options.length > 0) row.appendChild(strip);
-    if (primary) {
-        row.appendChild(button('wg-toolbar-btn wg-toolbar-btn--primary', primary.label, primary.onClick, {
-            iconName: primary.icon,
+    // One action or several — Holdings carries both "Refresh" and "Buy". Still
+    // pills in the toolbar row: a second action is not a reason to invent a
+    // dock for it.
+    for (const action of [].concat(primary ?? [])) {
+        row.appendChild(button('wg-toolbar-btn wg-toolbar-btn--primary', action.label, action.onClick, {
+            iconName: action.icon,
         }));
     }
     return row;
