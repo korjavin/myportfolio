@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -66,6 +66,7 @@ const PRECACHE = [
     '/js/components/wg-icons.js',
     '/js/components/wg-bottom-nav.js',
     '/js/components/wg-sparkline.js',
+    '/js/components/wg-stale-badge.js',
     '/js/features/boot.js',
     '/js/features/screens.js',
     '/js/features/store.js',
@@ -75,6 +76,7 @@ const PRECACHE = [
     '/js/features/dashboard.js',
     '/js/features/holdings.js',
     '/js/features/pricechart.js',
+    '/js/features/quotes.js',
     '/js/features/transactions.js',
     '/js/features/performance.js',
     '/js/features/settings.js',
@@ -100,6 +102,11 @@ const PRECACHE = [
     '/domain/perf.js',
     '/domain/prices.js',
     '/domain/ppimport.js',
+    // Precached even though it is the one module that needs the network to do
+    // anything: without it offline, Holdings fails to resolve its import graph
+    // and the whole screen is gone. A refresh button that reports being offline
+    // is strictly better than no Holdings screen at all.
+    '/domain/quotes.js',
 ];
 
 self.addEventListener('install', (event) => {

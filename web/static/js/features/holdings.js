@@ -3,17 +3,23 @@
 // market value and unrealized gain all arrive as §5 integers and are only
 // formatted.
 //
-// The screen also owns the manual price entry, and that is not a nicety. Until
-// the quote fetchers land (ARCHITECTURE.md §7), a position with no `price`
-// record has `marketValue: null` and portfolio.js raises `no_price` — so
-// without a way to type a close in, every value in the app reads "—". The
+// The screen also owns the manual price entry, and that is not a nicety even
+// now that Refresh fetches quotes (ARCHITECTURE.md §7): a position with no
+// `price` record has `marketValue: null` and portfolio.js raises `no_price`,
+// and plenty of holdings have no provider symbol at all — an unlisted fund, a
+// private holding, a security whose provider this build does not support. The
 // close is written through store.putPrice, which owns the §4 per-security-year
 // chunk shape.
+//
+// Fetching lives in features/quotes.js: the toolbar's Refresh pill and the
+// staleness badge on the summary card. Both are wired here, and nothing about
+// how a quote is fetched is decided in this file.
 
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import { openTxModal } from './transactions.js';
 import { priceHistoryCard } from './pricechart.js';
+import { refreshAction, refreshReport, staleBadge, valuationAsOf } from './quotes.js';
 import { state, putPrice, reportingCurrency } from './store.js';
 import { parseFixed, DECIMALS } from '../../../domain/money.js';
 import { todayLocal } from './forms.js';
@@ -47,8 +53,8 @@ function openPriceModal(position) {
             errorSlot,
             ui.el('p', 'wg-muted text-sm m-0',
                 'A close belongs to the security, so it values every position holding it. '
-                + 'Valuation reads stored closes only — this is the price the app uses '
-                + 'offline and until you change it, because there is no live quote yet.'),
+                + 'Valuation reads stored closes only — this is the price the app uses offline '
+                + 'and until it is replaced, by you or by the next Refresh.'),
             ui.fieldRow(ui.field('Date', dateInput), ui.field(`Close (${position.currency || reportingCurrency()})`, priceInput)),
         ],
         actions: [
@@ -139,11 +145,20 @@ export function render(container) {
         options: FILTERS,
         active: filter,
         onSelect: (id) => { filter = id; render(container); },
-        primary: { label: 'Buy', icon: 'plus', onClick: () => openTxModal(null, { type: 'buy' }) },
+        // Both inline pills in the toolbar row (§9). Refresh leads because it
+        // is the action that changes what every number below says.
+        primary: [
+            refreshAction(),
+            { label: 'Buy', icon: 'plus', onClick: () => openTxModal(null, { type: 'buy' }) },
+        ],
     });
 
+    // Rebuilt on every render and repainted from the last outcome — a report
+    // written into a node this render is about to replace is never seen.
+    const report = refreshReport();
+
     if (positions.length === 0) {
-        container.replaceChildren(head, ui.card(ui.emptyState(
+        container.replaceChildren(head, report, ui.card(ui.emptyState(
             (snapshot?.positions ?? []).length === 0
                 ? 'No open positions. A buy transaction opens one.'
                 : 'No open positions — switch to All to see closed ones.'
@@ -152,17 +167,24 @@ export function render(container) {
     }
 
     const totals = snapshot.totals;
-    const summary = ui.card(
-        (() => {
-            const stats = ui.el('div', 'flex-row flex-wrap gap-xl');
-            stats.appendChild(ui.stat('Invested', fmt.money(totals.marketValue)));
-            stats.appendChild(ui.stat('Cost', fmt.money(totals.cost)));
-            stats.appendChild(ui.stat('Unrealized', ui.delta(
-                fmt.deltaClass(totals.unrealized), fmt.signedMoney(totals.unrealized), { bare: true }
-            )));
-            return stats;
-        })()
-    );
+    const stats = ui.el('div', 'flex-row flex-wrap gap-xl');
+    stats.appendChild(ui.stat('Invested', fmt.money(totals.marketValue)));
+    stats.appendChild(ui.stat('Cost', fmt.money(totals.cost)));
+    stats.appendChild(ui.stat('Unrealized', ui.delta(
+        fmt.deltaClass(totals.unrealized), fmt.signedMoney(totals.unrealized), { bare: true }
+    )));
+
+    // How old the number above actually is. Read off the engine's `priceDate`,
+    // not off the last fetch: a badge that resets to "just updated" on every
+    // reload is a lie about when the data was last good.
+    const asOf = valuationAsOf(snapshot);
+    const freshness = ui.el('div', 'flex-row flex-wrap gap-sm mt-md');
+    freshness.appendChild(staleBadge(snapshot));
+    freshness.appendChild(ui.el('span', 'wg-muted text-sm', asOf
+        ? `Oldest close in this total · ${asOf}`
+        : 'No stored closes yet — Refresh fetches them, or "Set price" records one by hand.'));
+
+    const summary = ui.card(stats, freshness);
 
     const rows = ui.list(positions.map((p) => {
         const sub = [`${fmt.shares(p.shares)} sh`];
@@ -182,5 +204,5 @@ export function render(container) {
         });
     }));
 
-    container.replaceChildren(head, summary, rows);
+    container.replaceChildren(head, report, summary, rows);
 }
