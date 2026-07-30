@@ -778,6 +778,39 @@ fact that makes persistence *thinkable* if this ever becomes intolerable: **the 
 the table**, so persisting a routing id would add no secret to the server. It would still be a
 schema, and the `4404` machinery exists precisely so its loss is survivable, so it has not been built.
 
+What a call *says* after a restart is settled, and it is not what an earlier draft of this section
+implied. A hosted connector survives the restart in the database, so its token still resolves, but the
+pairing it dials is gone — and the relay answers that dial with **401**, which `DialPairing` maps to
+`ErrPairingGone`, i.e. *"re-pair from Settings"*. Deliberately **not** the "no unlocked device"
+message: unlocking a tab cannot fix it, because that tab's own device leg is being closed with `4404`
+at the same moment. The three shim errors stay distinguishable exactly so this case can say the useful
+thing, and before the mapping existed it said `gave up reconnecting after 3 attempts: … 401` — another
+instance of the looks-alive-and-fails symptom this section keeps stamping out.
+
+### Tier 2's front door: `/mcp/<token>`
+
+The URL the user pastes into Claude or ChatGPT is `https://<origin>/mcp/<token>`, served by
+`internal/server/mcp_endpoint.go` over the SDK's streamable-HTTP transport on **POST, GET and DELETE**
+(messages, the server-to-client SSE stream, and session teardown). It is **the only route this server
+answers without a session cookie**, and the token in the path is its entire credential.
+
+Three things about it are load-bearing rather than incidental:
+
+- **The tools are defined once, in `mcpshim.NewToolServer`**, and both tiers build their server from
+  it. The only thing either tier varies is the honesty suffix on the two descriptions — which is the
+  one place they genuinely must differ, because Tier 1's says the server is blind and Tier 2's has to
+  say the opposite. `connect-src` needs no entry: this is server-to-server HTTP.
+- **Every failure comes back as a tool result, never as a protocol error.** The SDK re-emits a
+  `*jsonrpc.Error` as a top-level failure that a client renders as *"the connector is broken"* and the
+  model never reads — so returning the offline message that way would silently drop the one sentence
+  telling the user to unlock their tab.
+- **`enable` takes the request**, and refuses any pairing code whose `relay_url` is not this server's
+  own relay endpoint (`relayURLIsSelf`). It is the server that dials that URL, so an unchecked one is
+  an SSRF an authenticated user triggers by hitting their own connector URL. The check lives in
+  `enable` rather than in the handler — the sibling's placement — so no future caller can be the one
+  that forgets it. The port is pinned to what a real browser origin produces, because a port taken
+  from the caller's own `Host` would still reach every service on this machine.
+
 ### Where we diverge from the sibling
 
 Its catalog is **generated** from a 106-operation Go registry (`cmd/genmcpcatalog`). We have no such

@@ -137,12 +137,16 @@ type API struct {
 	// Third instance of the same limiter, still not a second implementation.
 	relayLimiter *rateLimiter
 	pairings     *pairingTable
-	// mcpRemote is the hosted connector's registry (§11 Tier 2, mcp_remote.go).
-	// Built and restored here so a restart does not silently revoke a connector
-	// the user configured in Claude, but NOT routed: the streamable-HTTP endpoint
-	// that authenticates against it and the Settings routes that enable and
-	// revoke it are separate beads. Nothing on the internet reaches it yet.
-	mcpRemote      *mcpRemoteRegistry
+	// mcpRemote is the hosted connector's registry (§11 Tier 2, mcp_remote.go),
+	// restored at boot so a restart does not silently revoke a connector the user
+	// configured in Claude. /mcp/{token} (mcp_endpoint.go) authenticates against
+	// it; the Settings routes that enable and revoke it are a separate bead.
+	mcpRemote *mcpRemoteRegistry
+	// mcpCallLimiter throttles authenticated hosted MCP calls per TOKEN and
+	// mcpFailLimiter failed token lookups per IP (mcp_endpoint.go). Fourth and
+	// fifth instances of the same limiter, still not a second implementation.
+	mcpCallLimiter *rateLimiter
+	mcpFailLimiter *rateLimiter
 	trustedProxies []netip.Prefix
 }
 
@@ -156,6 +160,13 @@ type API struct {
 //     ceremony rate limiter may believe (see ParseTrustedProxies). Pass nil to
 //     trust none, which keys every caller on its real TCP peer.
 func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []netip.Prefix) http.Handler {
+	return newAPI(db, sessionSecret, trustedProxies).handler(staticFS)
+}
+
+// newAPI builds the dependencies and restores persisted state. Split from New so
+// a test can hold the *API — the hosted connector has no enable route yet (H3),
+// so its tests reach the registry the served handler actually uses.
+func newAPI(db *store.DB, sessionSecret string, trustedProxies []netip.Prefix) *API {
 	api := &API{
 		db:                 db,
 		sessionSecret:      sessionSecret,
@@ -167,16 +178,21 @@ func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []ne
 		relayLimiter:       newRateLimiter(relayFrameMax, relayFrameWindow),
 		pairings:           newPairingTable(pairingTTL),
 		mcpRemote:          newMCPRemoteRegistry(db, sessionSecret),
+		mcpCallLimiter:     newRateLimiter(hostedCallMax, hostedCallWindow),
+		mcpFailLimiter:     newRateLimiter(hostedFailMax, hostedFailWindow),
 		trustedProxies:     trustedProxies,
 	}
 	// Rebuild the hosted connectors from the database. context.Background rather
 	// than a request context because this is boot, not a request; a row that
 	// cannot be opened is logged and skipped, so this never blocks startup.
 	api.mcpRemote.restore(context.Background())
+	return api
+}
 
+func (api *API) handler(staticFS fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
-	mux.HandleFunc("GET /readyz", readyz(db))
+	mux.HandleFunc("GET /readyz", readyz(api.db))
 	api.registerRoutes(mux)
 	// Go 1.22 pattern: "GET /" matches every path no more specific route
 	// claimed, and leaves r.URL.Path untouched, so the file server sees the
@@ -250,6 +266,25 @@ func (a *API) registerRoutes(mux *http.ServeMux) {
 	// connect-src is a deliberately gated three-host budget.
 	mux.Handle("GET /api/mcp/relay/device", a.requireSession(http.HandlerFunc(a.deviceSocket)))
 	mux.HandleFunc("GET /api/mcp/relay/shim", a.shimSocket)
+
+	// The hosted connector (§11 Tier 2, mcp_endpoint.go): the URL the user pastes
+	// into Claude or ChatGPT, and THE ONLY ROUTE HERE THAT ANSWERS WITHOUT A
+	// SESSION COOKIE. The token in the path is its entire credential; the
+	// handler's own comment carries the rules that follow from that.
+	//
+	// All three methods streamable HTTP uses, on the same URL and the same
+	// handler: POST carries messages, GET opens the server-to-client SSE stream,
+	// DELETE ends a session. Naming one and omitting the others would leave the
+	// rest falling through to the static file server as 404s, which reads to a
+	// hosted client as a connector that half works.
+	//
+	// They are spelled out rather than registered method-lessly because a bare
+	// "/mcp/{token}" is ambiguous against "GET /" by ServeMux's precedence rules
+	// (more methods, more general path) and panics at registration.
+	hosted := a.mcpEndpoint()
+	mux.Handle("POST /mcp/{token}", hosted)
+	mux.Handle("GET /mcp/{token}", hosted)
+	mux.Handle("DELETE /mcp/{token}", hosted)
 }
 
 func securityHeaders(next http.Handler) http.Handler {

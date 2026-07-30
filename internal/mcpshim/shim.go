@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -155,8 +156,26 @@ func shimLegURL(pc *PairingCode) string {
 // the seam a test uses to point every dial at an httptest.Server's real
 // listener while the pairing still carries its production relay URL.
 func DialPairing(ctx context.Context, pc *PairingCode, opts *websocket.DialOptions) (*ShimCore, error) {
-	conn, _, err := websocket.Dial(ctx, shimLegURL(pc), opts)
+	conn, resp, err := websocket.Dial(ctx, shimLegURL(pc), opts)
 	if err != nil {
+		// A 401 on the shim leg has exactly one cause: the relay has no live
+		// pairing with this id (internal/server.shimSocket rejects at the
+		// handshake and nowhere else). That is the same fact close code 4404
+		// carries, so report the same terminal error rather than a transport
+		// fault, and stop dialing.
+		//
+		// This is the path a RESTART takes, and it is the common one — the
+		// relay's pairing table is in-memory by design (§11 "Restarts remain
+		// unhandled, deliberately"), so every redeploy leaves a configured
+		// connector dialing a pairing the relay has forgotten. Without this the
+		// user gets "gave up reconnecting after 3 attempts: … 401" — a transport
+		// error, i.e. the looks-alive-and-fails symptom §11 keeps having to
+		// stamp out — instead of the sentence that tells them to re-pair. It is
+		// deliberately NOT ErrDeviceOffline: unlocking a tab cannot fix this,
+		// because the tab's own device leg is being closed with 4404 too.
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return nil, ErrPairingGone
+		}
 		return nil, fmt.Errorf("mcpshim: dial relay: %w", err)
 	}
 	conn.SetReadLimit(maxFrameBytes)

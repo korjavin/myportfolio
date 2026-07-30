@@ -26,7 +26,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -48,6 +47,12 @@ const codeEnvVar = "MYPORTFOLIO_MCP_CODE"
 // learns the end-to-end-encrypted, device-required architecture up front
 // instead of having to fail a call to discover it (ARCHITECTURE.md §11: "this
 // is a real product limitation and belongs in the user-facing copy").
+//
+// This is Tier 1's suffix, and the claim "never to a server" is true only here.
+// internal/server's Tier-2 hosted endpoint has its own, which says the opposite
+// because for that tier the server does hold the key. The suffix is the ONLY
+// thing the two tiers vary — the tools themselves are defined once, in
+// mcpshim.NewToolServer.
 const toolDescriptionSuffix = " This connector talks end-to-end encrypted directly to your own unlocked browser tab, never to a server — if no device is unlocked and online it returns a clear error instead of hanging."
 
 func main() {
@@ -93,33 +98,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "myportfolio-mcp-shim", Version: version}, nil)
-
-	// Two tools, and there is deliberately no third. ARCHITECTURE.md §11:
-	// an mcp_execute-style server-side script runner would have nothing to
-	// read, because the server never sees plaintext — and giving it something
-	// to read is the one property this whole design exists to prevent.
-	sdkmcp.AddTool(server, &sdkmcp.Tool{
-		Name:        "mcp_help",
-		Description: "Discover the small read-only catalog of portfolio operations this connector can run. Call with no arguments for the terse catalog, then pass operation_id (or operation_ids) for an operation's full schema." + toolDescriptionSuffix,
-	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, input mcpshim.HelpInput) (*sdkmcp.CallToolResult, any, error) {
-		result, err := client.Call(ctx, "mcp_help", input)
-		if err != nil {
-			return nil, nil, err
-		}
-		return nil, json.RawMessage(result), nil
-	})
-
-	sdkmcp.AddTool(server, &sdkmcp.Tool{
-		Name:        "mcp_call",
-		Description: "Run exactly one portfolio operation by id — see mcp_help for the catalog. Read-only: this connector cannot modify your portfolio." + toolDescriptionSuffix,
-	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, input mcpshim.CallInput) (*sdkmcp.CallToolResult, any, error) {
-		result, err := client.Call(ctx, "mcp_call", input)
-		if err != nil {
-			return nil, nil, err
-		}
-		return nil, json.RawMessage(result), nil
-	})
+	// The tools themselves live in mcpshim.NewToolServer, shared with the Tier-2
+	// hosted endpoint so the two cannot drift into two wire contracts.
+	server := mcpshim.NewToolServer("myportfolio-mcp-shim", version, toolDescriptionSuffix, client.Call)
 
 	slog.Info("[mcpshim] starting stdio MCP server", "version", version)
 	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {

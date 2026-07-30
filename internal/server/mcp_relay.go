@@ -29,6 +29,12 @@ import (
 	"github.com/coder/websocket"
 )
 
+// relayEndpoint is the path a pairing code's relay_url ends in — the relay
+// ENDPOINT, not an origin (§11 "relay_url is the endpoint, not the origin").
+// Each leg appends only its own segment, and the Tier-2 SSRF check
+// (relayURLIsSelf) accepts nothing else.
+const relayEndpoint = "/api/mcp/relay"
+
 const (
 	// pairingTTL ages out a pairing the user minted and never used. Re-pairing
 	// is a paste of a fresh code, so the cost of expiry is low and the cost of

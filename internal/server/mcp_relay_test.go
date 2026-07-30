@@ -22,10 +22,6 @@ import (
 	"github.com/korjavin/myportfolio/internal/mcpshim"
 )
 
-// relayEndpoint is the path a pairing code's relay_url ends in — the relay
-// ENDPOINT, not an origin. Each leg appends only its own segment.
-const relayEndpoint = "/api/mcp/relay"
-
 // relayFixture is a signed-up account, a real listener (WebSockets need one),
 // and the pairing key. The key is generated HERE and never sent anywhere: the
 // browser mints it client-side, so every test that opens a frame is using
