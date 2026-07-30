@@ -60,7 +60,8 @@ const {
     QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders,
     MCP_CODE_ENV_VAR, CONNECTOR_FACTS, relayEndpoint, shimEnvLine,
     mintPairing, savePairing, revokePairing,
-    HOSTED_CONSENT, hostedConnectorURL, readHostedConnector, enableHostedConnector, disableHostedConnector,
+    HOSTED_CONSENT, CONNECTOR_DOCS,
+    hostedConnectorURL, readHostedConnector, enableHostedConnector, disableHostedConnector,
     sampleRecords, sampleLoaded, sampleConfirm, sampleRemoveConfirm, isSampleId, ownForeignCurrency,
 } = await import('../features/settings.js');
 
@@ -762,22 +763,44 @@ describe('The hosted connector — revoking hits the route that drops the key', 
 });
 
 describe('The hosted connector — the consent names the trade AND the alternative', () => {
-    test('it says the server can read the traffic, in transit and in plaintext', () => {
+    // These were written against a six-sentence consent and are now written
+    // against one, because the owner was right that nobody read the six. The
+    // PROPERTIES did not change and none was dropped — what changed is that they
+    // are pinned as properties rather than as the exact phrasing that carried
+    // them, so the copy can stay short without the guard going quiet.
+    //
+    // The two facts that must survive any future edit: the server can read the
+    // traffic, and there is a named alternative that does not. Everything the
+    // long version also said (sealed at rest, what the relay learns, why the
+    // shape is the shape) moved to docs/AI-CONNECTOR.md, which is linked from the
+    // card and is allowed to be long.
+
+    test('it is ONE short sentence — this is the point of the copy, so it is pinned', () => {
+        // Sentence-enders, not em dashes or semicolons: those keep it one
+        // sentence to read. A second '. ' is an essay starting again.
+        assert.equal(HOSTED_CONSENT.split(/[.!?](\s|$)/).filter((s) => s.trim()).length, 1,
+            `the consent is more than one sentence again:\n${HOSTED_CONSENT}`);
+        assert.ok(HOSTED_CONSENT.length <= 200, `${HOSTED_CONSENT.length} chars is drifting back to an essay`);
+    });
+
+    test('it says the server can read the traffic, and when', () => {
+        // The load-bearing risk. "Involves risks" would be worse than silence:
+        // a warning naming no risk cannot be weighed against the alternative.
         assert.match(HOSTED_CONSENT, /pairing key/);
-        assert.match(HOSTED_CONSENT, /read your questions and their answers/);
+        assert.match(HOSTED_CONSENT, /read your questions and answers/);
         assert.match(HOSTED_CONSENT, /in transit/);
-        assert.match(HOSTED_CONSENT, /plaintext/);
     });
 
-    test('it says the key is stored sealed at rest', () => {
-        assert.match(HOSTED_CONSENT, /sealed at rest/);
-    });
-
-    test('it says this is weaker than the local shim, and is not end-to-end encrypted', () => {
-        // §11: not zero knowledge, "and must never be described as such".
+    test('it says this is weaker, and never claims end-to-end or zero knowledge', () => {
+        // §11: not zero knowledge, "and must never be described as such" — and
+        // not end-to-end encrypted either. The old copy shouted "NOT end-to-end
+        // encrypted"; "can read your questions and answers" is the same fact
+        // without the jargon, so the phrase is gone and the negative guards are
+        // what keep the claim from ever appearing.
         assert.match(HOSTED_CONSENT, /weaker/);
-        assert.match(HOSTED_CONSENT, /NOT end-to-end encrypted/);
         assert.doesNotMatch(HOSTED_CONSENT, /zero.knowledge/i);
+        assert.doesNotMatch(HOSTED_CONSENT, /end.to.end/i);
+        assert.doesNotMatch(HOSTED_CONSENT, /encrypted/i);
     });
 
     test('it names Tier 1 as the alternative that keeps the guarantee', () => {
@@ -786,6 +809,18 @@ describe('The hosted connector — the consent names the trade AND the alternati
         assert.match(HOSTED_CONSENT, /Connect Claude/);
         const settings = fs.readFileSync(SETTINGS_PATH, 'utf8');
         assert.ok(settings.includes("'Connect Claude'"), 'the alternative names a button that is not there');
+    });
+
+    test('the detail the sentence dropped is in the doc it links to, not nowhere', () => {
+        // The cut is only honest if the essay landed somewhere. The link target
+        // is checked as a file, so a rename cannot leave the card pointing at a
+        // 404 while this passes.
+        const doc = fs.readFileSync(path.join(REPO_ROOT, 'docs/AI-CONNECTOR.md'), 'utf8');
+        assert.match(doc, /sealed at rest/);
+        assert.match(doc, /in transit/);
+        assert.match(CONNECTOR_DOCS, /docs\/AI-CONNECTOR\.md$/);
+        const settings = fs.readFileSync(SETTINGS_PATH, 'utf8');
+        assert.ok(settings.includes('docsLink('), 'the consent cuts detail and links nowhere');
     });
 });
 

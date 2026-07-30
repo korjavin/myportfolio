@@ -26,7 +26,9 @@ replica, because those carry the sealing key alongside the ciphertext it protect
 in depth here, not a boundary.
 
 So Tier 2 is **opt-in, per-account, revocable, and off by default**, and the consent step in Settings
-says all of the above at the moment you enable it. Enable it in Settings › Connect Claude, copy the
+says the load-bearing half of the above — our server can read your questions and answers, and Tier 1
+does not — at the moment you enable it, then links here for the rest. Enable it in Settings ›
+Connect Claude, copy the
 URL, and **treat that URL as a password** — anyone holding it can query your portfolio while one of
 your tabs is unlocked. Revoking drops the server's copy of the key, and deliberately does **not**
 disconnect a Tier-1 shim, because both tiers share one relay pairing.
