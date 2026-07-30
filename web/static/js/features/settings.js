@@ -1,5 +1,6 @@
 // Settings — reporting currency, quote providers, the accounts and securities
-// the transaction form draws on, Portfolio Performance import, and export.
+// the transaction form draws on, Portfolio Performance import, the sample
+// portfolio (§12), and export.
 //
 // Import is `parsePP` (web/domain/ppimport.js) and nothing else: the parser
 // mints deterministic ids from stable upstream keys, so re-importing the same
@@ -10,7 +11,7 @@
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import { parsePP } from '../../../domain/ppimport.js';
-import { RECORD, ASSET_CLASSES } from '../../../domain/schema.js';
+import { RECORD, SETTINGS_ID, ASSET_CLASSES } from '../../../domain/schema.js';
 import {
     state, records, putSettings, putAccount, putSecurity, remove, refresh,
     importRecords, exportAll, reportingCurrency, DEFAULT_CURRENCY,
@@ -863,6 +864,188 @@ function importCard(rerender) {
     );
 }
 
+// --- Sample portfolio ------------------------------------------------------
+//
+// ARCHITECTURE.md §12's supported answer to "try the Claude connector on demo
+// data" (bd myportfolio-cnd.6). `?demo=1` deliberately never answers MCP calls
+// — a demo tab answering relayed calls would serve fabricated trades to
+// somebody's agent as if they were their portfolio, and an agent cannot tell —
+// and both relay legs are session-authed, so making it work would mean an
+// unauthenticated pairing endpoint. This is the other side of that decision: a
+// signed-in user puts the fixture in their OWN vault, so the connector works
+// completely unchanged with no server change at all, and nothing is deceived
+// because the user chose to put sample data there.
+//
+// It is deliberately tiny: demoRecords() already returns a plain record array
+// and importRecords() already writes an array through the §3 port, so the sync
+// layer picks it up on its own debounce. No bespoke upload path.
+
+/**
+ * What a sample load writes: everything demoRecords() returns EXCEPT the
+ * settings singleton.
+ *
+ * §4 gives settings a FIXED recordId, which makes it the one record in the
+ * fixture whose id collides with something the user already owns — and it is
+ * the record carrying `quoteProviders`, i.e. their API keys. Writing it would
+ * reset the reporting currency and delete every stored credential, silently,
+ * as a side effect of pressing "load sample data". Every other id in the
+ * fixture is namespaced (`*_demo_*`, `fx_eurusd_*`, `price_security_demo_*`),
+ * so the only thing it can collide with is a previous sample load — which is
+ * exactly what should happen, and is why a second press updates in place
+ * instead of doubling the portfolio.
+ */
+export function sampleRecords(seed) {
+    return seed.filter((r) => !(r.recordType === RECORD.settings && r.recordId === SETTINGS_ID));
+}
+
+/**
+ * Is a sample already in the vault? demo.js's security ids are stable literals
+ * under one prefix, and securities are already on `state`, so this needs no
+ * extra read. features.settings.test.js checks it against the real fixture
+ * rather than a restated id, so renaming them there fails here.
+ */
+export const SAMPLE_ID_PREFIX = 'security_demo_';
+
+export function sampleLoaded(securities) {
+    return (securities ?? []).some((s) => String(s?.recordId ?? '').startsWith(SAMPLE_ID_PREFIX));
+}
+
+/**
+ * The confirmation. This writes ~1900 records into a real vault that then
+ * SYNCS, so it must not be a stray tap: it names the true record count (the
+ * fixture is built before the dialog opens, which is what makes that possible),
+ * says the data is invented, says nothing existing is deleted, and says how to
+ * take it back out.
+ */
+export function sampleConfirm({ count, hasData }) {
+    return {
+        title: 'Load the sample portfolio',
+        confirmLabel: 'Load it',
+        message: `This writes ${count} invented records into your own vault — five years of made-up `
+            + 'trades, dividends and prices — and syncs them to your other devices. None of it is '
+            + 'real market or personal data. '
+            + (hasData
+                ? 'Nothing you already have is deleted, but your own holdings and the sample will be '
+                + 'mixed together on every screen until you remove it. '
+                : '')
+            + 'Use "Remove the sample portfolio" on this screen to undo it.',
+    };
+}
+
+export function sampleRemoveConfirm(count) {
+    return {
+        title: 'Remove the sample portfolio',
+        confirmLabel: 'Remove',
+        message: `Deletes the ${count} sample records, on every device. Anything you entered or `
+            + 'imported yourself is untouched.',
+    };
+}
+
+// The fixture is a DYNAMIC import, the same way boot.js loads it: §12 keeps
+// demo.js out of sw.js's PRECACHE so a user who never presses this never
+// downloads it, and the precache guard fails if it is added.
+//
+// `today` is the same shape boot.js's demo branch passes — a fixture seeded
+// against a wrong "today" produces a portfolio whose performance range ends in
+// the past (bd myportfolio-cnd.5).
+//
+// ponytail: loading again on a later day updates every record in place (the ids
+// are derived, not minted) but leaves the handful of `fx` days that fell off the
+// back of the five-year window behind as unread rows. Harmless — fx.js looks a
+// rate up by date — and removing them would mean tracking what a previous load
+// wrote. Remove-then-load is the clean path if it ever matters.
+async function sampleSeed() {
+    const { demoRecords } = await import('./demo.js');
+    return sampleRecords(demoRecords({ today: new Date().toISOString().slice(0, 10) }));
+}
+
+// A report has to survive the re-render its own write causes — refresh() rebuilds
+// this screen and detaches the status slot — exactly as importCard's does.
+let lastSample = null;
+
+function sampleCard(rerender) {
+    const status = ui.el('div', 'wg-error-slot');
+    if (lastSample) status.replaceChildren(ui.messages(lastSample.lines, lastSample.tone));
+
+    const fail = (message) => status.replaceChildren(ui.messages([message]));
+
+    // The fixture is built BEFORE the dialog and written only inside onConfirm.
+    // That ordering is the safety property: pressing the button and then
+    // cancelling touches nothing, and the count in the dialog is the real one.
+    const ceremony = (ask, apply) => async () => {
+        status.replaceChildren(ui.emptyState('Building the sample portfolio…'));
+        let seed;
+        try {
+            seed = await sampleSeed();
+        } catch (err) {
+            fail(`Could not build the sample portfolio: ${err?.message ?? err}`);
+            return;
+        }
+        status.replaceChildren();
+        ui.confirm({
+            ...ask(seed.length),
+            onConfirm: async () => {
+                status.replaceChildren(ui.emptyState('Writing to your vault…'));
+                try {
+                    lastSample = await apply(seed);
+                } catch (err) {
+                    fail(`The sample portfolio was not written in full: ${err?.message ?? err}`);
+                    return;
+                }
+                rerender();
+            },
+        });
+    };
+
+    const loaded = sampleLoaded(state.securities);
+
+    const load = ui.button(
+        'wg-toolbar-btn wg-toolbar-btn--primary',
+        loaded ? 'Reload the sample portfolio' : 'Load sample portfolio',
+        ceremony(
+            (count) => sampleConfirm({ count, hasData: state.transactions.length > 0 && !loaded }),
+            async (seed) => ({
+                lines: [`Wrote ${await importRecords(seed)} sample records. They reach your other `
+                    + 'devices on the usual sync delay.'],
+                tone: 'normal',
+            })
+        )
+    );
+
+    // Tombstones through the same §3 port the load went through, so sync carries
+    // the removal exactly the way it carried the write. records.del + one
+    // refresh() rather than store.remove() per record, which would re-derive the
+    // whole world 1900 times.
+    const drop = !loaded ? null : ui.button(
+        'wg-toolbar-btn wg-toolbar-btn--secondary',
+        'Remove the sample portfolio',
+        ceremony(sampleRemoveConfirm, async (seed) => {
+            for (const rec of seed) await records.del(rec.recordType, rec.recordId);
+            await refresh();
+            return { lines: [`Removed ${seed.length} sample records.`], tone: 'normal' };
+        })
+    );
+
+    const row = ui.el('div', 'flex-row flex-between gap-sm mt-md');
+    row.appendChild(ui.el('span', 'flex-1'));
+    if (drop) row.appendChild(drop);
+    row.appendChild(load);
+
+    return ui.card(
+        ui.sectionLabel('Sample portfolio'),
+        ui.el('p', 'wg-muted text-sm m-0',
+            'Five years of invented trades, dividends and prices, written into your own vault like '
+            + 'any other import. This is the supported way to try the Claude connector — or the app '
+            + 'itself — on data that is not yours: the demo at ?demo=1 never answers Claude, because '
+            + 'a demo tab cannot tell an agent that the trades it is reading are made up. Nothing you '
+            + 'already have is deleted, and the sample can be removed again. It is denominated in '
+            + 'EUR and ships only EURUSD rates, so on a vault reporting in another currency its '
+            + 'values show as unconverted — your own reporting currency is never changed by this.'),
+        row,
+        status
+    );
+}
+
 function exportCard() {
     const status = ui.el('div', 'wg-error-slot');
     const download = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Export JSON', async () => {
@@ -937,6 +1120,7 @@ export function render(container) {
             onOpen: (record) => securityModal(record, rerender),
         }),
         importCard(rerender),
+        sampleCard(rerender),
         exportCard()
     );
 }

@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { QUOTE_HOSTS } from '../../../domain/quotes.js';
+import { RECORD, SETTINGS_ID } from '../../../domain/schema.js';
 import { fromBase64, toBase64 } from '../core/crypto.js';
 import { MCP_PAIRING_TYPE, MCP_PAIRING_ID, readPairing, purgePairing } from '../core/mcp-responder.js';
 
@@ -58,7 +59,17 @@ const {
     QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders,
     MCP_CODE_ENV_VAR, CONNECTOR_FACTS, relayEndpoint, shimEnvLine,
     mintPairing, savePairing, revokePairing,
+    sampleRecords, sampleLoaded, sampleConfirm, sampleRemoveConfirm, SAMPLE_ID_PREFIX,
 } = await import('../features/settings.js');
+
+// The same module instance settings.js holds, so `useRecords` below swaps the
+// port the card's own importRecords writes through.
+const store = await import('../features/store.js');
+const { demoRecords } = await import('../features/demo.js');
+// The port store.js starts on, so the swap below can be put back. Dynamic like
+// the rest: core/localdb.js opens a Dexie handle at module load and the stub
+// above is only in place once this file's static imports have run.
+const { localRecords } = await import('../core/localdb.js');
 
 /** What the card's Save handler builds from the rendered rows, untouched. */
 const editsFrom = (rows) => rows.map((row) => ({
@@ -665,7 +676,12 @@ describe('Connect Claude — the minted code parses in the real shim', { skip: !
                 if (stderr.includes('starting stdio MCP server')) settle('started');
             });
             child.on('error', reject);
-            child.on('exit', () => { clearTimeout(timer); resolve({ outcome: 'rejected', stderr }); });
+            // 'close', not 'exit': 'exit' fires while the pipes may still hold
+            // buffered output, so the negative control below resolved with an
+            // empty `stderr` roughly one full-suite run in three and failed on
+            // the message it was asserting. 'close' is the event that waits for
+            // stdio to drain.
+            child.on('close', () => { clearTimeout(timer); resolve({ outcome: 'rejected', stderr }); });
         });
     }
 
@@ -704,5 +720,295 @@ describe('Connect Claude — the minted code parses in the real shim', { skip: !
         const bad = await runShim(binary, flipped);
         assert.equal(bad.outcome, 'rejected', 'the shim started on a corrupted code');
         assert.match(bad.stderr, new RegExp(`invalid ${MCP_CODE_ENV_VAR}`));
+    });
+});
+
+// ===========================================================================
+// The sample portfolio (bd myportfolio-cnd.6, ARCHITECTURE.md §12)
+// ===========================================================================
+//
+// The supported way to try the Claude connector on demo data: `?demo=1` never
+// answers MCP calls, so a signed-in user loads the fixture into their OWN vault
+// instead. What has to hold, and what each of these pins:
+//
+//   • the written set IS demoRecords(), minus the one record whose id collides
+//     with something the user already owns (the §4 settings singleton, which
+//     carries their API keys);
+//   • nothing is written without a confirmation that names the record count and
+//     says the data is invented;
+//   • a second load updates in place rather than duplicating;
+//   • loading over existing data destroys none of it;
+//   • the removal takes exactly the sample back out and nothing else.
+//
+// The first four are exercised against the SHIPPED importRecords over the real
+// §3 port; only the DOM wiring is a source guard, because there is no jsdom.
+
+const SAMPLE_TODAY = '2026-03-17';
+const SAMPLE_SEED = demoRecords({ today: SAMPLE_TODAY });
+
+/** Every live row in a port, flattened across the record types in play. */
+async function liveRows(port) {
+    const types = new Set([
+        ...SAMPLE_SEED.map((r) => r.recordType),
+        RECORD.settings, RECORD.account, RECORD.security, RECORD.transaction,
+    ]);
+    const lists = await Promise.all([...types].map((t) => port.list(t)));
+    return lists.flat();
+}
+
+const idsOf = (rows) => new Set(rows.map((r) => r.recordId));
+
+/** Bodies only — the port owns recordId/recordType/clientTs/deleted. */
+function bodyOf(rec) {
+    const { recordId, recordType, clientTs, deleted, ...body } = rec;
+    return body;
+}
+
+describe('sample portfolio — what gets written', () => {
+    test('it is demoRecords() minus the settings singleton, and nothing else', () => {
+        const written = sampleRecords(SAMPLE_SEED);
+        const dropped = SAMPLE_SEED.filter((r) => !written.includes(r));
+        assert.equal(dropped.length, 1, 'exactly one record is held back');
+        assert.equal(dropped[0].recordType, RECORD.settings);
+        assert.equal(dropped[0].recordId, SETTINGS_ID);
+        // Order and identity preserved for everything else: the fixture is the
+        // input, not something restated here.
+        assert.deepEqual(written, SAMPLE_SEED.filter((r) => r.recordId !== SETTINGS_ID));
+    });
+
+    test('every other fixture id is namespaced, so it can only collide with itself', () => {
+        // This is WHY only the settings record needs holding back, and it is
+        // also what makes a second load an update: an id that looked like an
+        // ordinary one would overwrite a real record instead.
+        for (const rec of sampleRecords(SAMPLE_SEED)) {
+            assert.match(
+                rec.recordId,
+                /(_demo_|^fx_eurusd_)/,
+                `${rec.recordId} is not namespaced as sample data`
+            );
+        }
+    });
+
+    test('sampleLoaded reads the real fixture, not a restated id', () => {
+        const securities = sampleRecords(SAMPLE_SEED).filter((r) => r.recordType === RECORD.security);
+        assert.ok(securities.length > 0);
+        assert.equal(sampleLoaded(securities), true);
+        assert.equal(sampleLoaded([]), false);
+        assert.equal(sampleLoaded(undefined), false);
+        assert.equal(sampleLoaded([{ recordId: 'security_1234', name: 'Mine' }]), false);
+        assert.ok(securities.every((s) => s.recordId.startsWith(SAMPLE_ID_PREFIX)));
+    });
+});
+
+describe('sample portfolio — the confirmation', () => {
+    test('it names the real count, calls the data invented, and says how to undo it', () => {
+        const count = sampleRecords(SAMPLE_SEED).length;
+        const { title, message, confirmLabel } = sampleConfirm({ count, hasData: false });
+        assert.match(title, /sample portfolio/i);
+        assert.ok(confirmLabel);
+        // The count, not a rounded "~1900": a user agreeing to write into a vault
+        // that syncs is told the actual number.
+        assert.ok(message.includes(String(count)), `the count ${count} is not in the message`);
+        assert.match(message, /invented|made-up|fabricated/i);
+        assert.match(message, /sync/i);
+        assert.match(message, /remove/i);
+        assert.match(message, /none of it is real/i);
+    });
+
+    test('with data already in the vault it says so instead of staying quiet', () => {
+        const count = sampleRecords(SAMPLE_SEED).length;
+        const empty = sampleConfirm({ count, hasData: false }).message;
+        const full = sampleConfirm({ count, hasData: true }).message;
+        assert.notEqual(empty, full);
+        assert.match(full, /nothing you already have is deleted/i);
+        assert.match(full, /mixed together/i);
+    });
+
+    test('the removal confirmation names the count and what it spares', () => {
+        const { message } = sampleRemoveConfirm(7);
+        assert.ok(message.includes('7'));
+        assert.match(message, /untouched|stays/i);
+    });
+});
+
+describe('sample portfolio — through the shipped importRecords and the real port', () => {
+    // store.js keeps the port behind a module-level `impl`; useRecords is the
+    // documented swap. Restore the default afterwards so the rest of the suite
+    // is unaffected.
+    async function withPort(seedRows, fn) {
+        const port = memoryRecords();
+        for (const rec of seedRows) await port.put(rec.recordType, rec.recordId, bodyOf(rec));
+        store.useRecords(port);
+        try {
+            return await fn(port);
+        } finally {
+            store.useRecords(localRecords);
+        }
+    }
+
+    test('the written set is exactly sampleRecords(demoRecords())', async () => {
+        const want = sampleRecords(SAMPLE_SEED);
+        await withPort([], async (port) => {
+            const written = await store.importRecords(want);
+            assert.equal(written, want.length);
+            // refresh() swallows its own failures into state.error, so a domain
+            // that could not read this back would otherwise pass silently.
+            assert.equal(store.state.error, null);
+
+            const live = await liveRows(port);
+            assert.deepEqual(idsOf(live), idsOf(want));
+            const byId = new Map(live.map((r) => [r.recordId, r]));
+            for (const rec of want) {
+                assert.deepEqual(bodyOf(byId.get(rec.recordId)), bodyOf(rec), rec.recordId);
+                assert.equal(byId.get(rec.recordId).recordType, rec.recordType);
+            }
+            // The settings singleton was never created.
+            assert.deepEqual(await port.list(RECORD.settings), []);
+        });
+    });
+
+    test('a second load updates in place instead of duplicating', async () => {
+        const want = sampleRecords(SAMPLE_SEED);
+        await withPort([], async (port) => {
+            await store.importRecords(want);
+            const first = await liveRows(port);
+            await store.importRecords(want);
+            const second = await liveRows(port);
+            assert.equal(second.length, first.length);
+            assert.deepEqual(idsOf(second), idsOf(first));
+            // Same bodies too — demoRecords is deterministic for a given `today`,
+            // so a second press must be a no-op in everything but clientTs.
+            const byId = new Map(first.map((r) => [r.recordId, bodyOf(r)]));
+            for (const rec of second) assert.deepEqual(bodyOf(rec), byId.get(rec.recordId), rec.recordId);
+        });
+    });
+
+    test('loading over existing data destroys none of it, including the API keys', async () => {
+        // A real portfolio: the user's settings (with a credential in them), an
+        // account, a security and a transaction, all with ordinary ids.
+        const mine = [
+            {
+                recordId: SETTINGS_ID, recordType: RECORD.settings, clientTs: 1, deleted: false,
+                reportingCurrency: 'CHF', quoteProviders: { twelvedata: { apiKey: 'MY-REAL-KEY' } },
+            },
+            {
+                recordId: 'account_mine', recordType: RECORD.account, clientTs: 2, deleted: false,
+                name: 'My cash', kind: 'cash', currency: 'CHF', closed: false,
+            },
+            {
+                recordId: 'security_mine', recordType: RECORD.security, clientTs: 3, deleted: false,
+                name: 'My ETF', ticker: 'MINE', currency: 'CHF', quote: {},
+            },
+            {
+                recordId: 'tx_mine', recordType: RECORD.transaction, clientTs: 4, deleted: false,
+                type: 'deposit', accountId: 'account_mine', date: '2025-01-02',
+                amount: 500000, currency: 'CHF',
+            },
+        ];
+
+        await withPort(mine, async (port) => {
+            await store.importRecords(sampleRecords(SAMPLE_SEED));
+            const live = await liveRows(port);
+            const byId = new Map(live.map((r) => [r.recordId, r]));
+            for (const rec of mine) {
+                assert.ok(byId.has(rec.recordId), `${rec.recordId} was destroyed`);
+                assert.deepEqual(bodyOf(byId.get(rec.recordId)), bodyOf(rec), rec.recordId);
+            }
+            // The one that would otherwise have been silently rewritten.
+            assert.equal(byId.get(SETTINGS_ID).reportingCurrency, 'CHF');
+            assert.deepEqual(
+                byId.get(SETTINGS_ID).quoteProviders,
+                { twelvedata: { apiKey: 'MY-REAL-KEY' } }
+            );
+        });
+    });
+
+    test('the removal takes the sample out and leaves the rest', async () => {
+        const want = sampleRecords(SAMPLE_SEED);
+        const mine = [{
+            recordId: 'tx_mine', recordType: RECORD.transaction, clientTs: 1, deleted: false,
+            type: 'deposit', accountId: 'account_mine', date: '2025-01-02',
+            amount: 500000, currency: 'EUR',
+        }];
+        await withPort(mine, async (port) => {
+            await store.importRecords(want);
+            // Exactly what the card's remove ceremony does: a tombstone per
+            // fixture record through the same port.
+            for (const rec of want) await port.del(rec.recordType, rec.recordId);
+            const live = await liveRows(port);
+            assert.deepEqual(idsOf(live), new Set(['tx_mine']));
+        });
+    });
+});
+
+describe('sample portfolio — the card is wired to these functions', () => {
+    const source = fs.readFileSync(SETTINGS_PATH, 'utf8');
+    const stripped = source
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/[^\n]*$/gm, '');
+    // Just this card, so a match cannot be satisfied by some other card's code.
+    const section = stripped.slice(
+        stripped.indexOf('export function sampleRecords'),
+        stripped.indexOf('function exportCard(')
+    );
+
+    test('the card is rendered', () => {
+        assert.match(stripped, /sampleCard\(rerender\),/);
+        assert.ok(section.length > 0);
+    });
+
+    test('nothing is written outside the confirmation', () => {
+        // Both write sites exist only as the `apply` argument of a ceremony(),
+        // and ceremony() calls apply() only from ui.confirm's onConfirm. Move
+        // either one out and these fail.
+        assert.equal(section.split('importRecords(').length - 1, 1);
+        assert.equal(section.split('records.del(').length - 1, 1);
+        assert.match(section, /ceremony\(\s*\(count\)[\s\S]*?importRecords\(seed\)/);
+        assert.match(section, /ceremony\(sampleRemoveConfirm,[\s\S]*?records\.del\(/);
+
+        const ceremony = section.slice(
+            section.indexOf('const ceremony ='),
+            section.indexOf('const loaded =')
+        );
+        assert.equal(ceremony.split('apply(').length - 1, 1);
+        assert.ok(ceremony.includes('ui.confirm('));
+        assert.ok(
+            ceremony.indexOf('onConfirm:') < ceremony.indexOf('apply('),
+            'apply() must only run from ui.confirm\'s onConfirm'
+        );
+        assert.ok(
+            ceremony.indexOf('ui.confirm(') < ceremony.indexOf('apply('),
+            'the fixture must not be written before the dialog opens'
+        );
+    });
+
+    test('the settings singleton is held back by the shipped filter', () => {
+        assert.match(section, /return sampleRecords\(demoRecords\(/);
+    });
+
+    test('the fixture is a dynamic import and never a static one', () => {
+        // §12: demo.js is deliberately absent from PRECACHE so a user who never
+        // presses this never downloads it. A static import would pull the whole
+        // fixture into the shell's module closure.
+        assert.match(section, /await import\('\.\/demo\.js'\)/);
+        assert.doesNotMatch(source, /^import[^\n]*['"]\.\/demo\.js['"]/m);
+    });
+
+    test('`today` is the same expression boot.js\'s demo branch passes', () => {
+        // A fixture seeded against a wrong "today" ends its performance range in
+        // the past (bd myportfolio-cnd.5). Read out of boot.js rather than
+        // restated here, so the two cannot drift apart.
+        const boot = fs.readFileSync(path.join(REPO_ROOT, 'web/static/js/features/boot.js'), 'utf8');
+        const today = boot.match(/today:\s*(new Date\(\)[^\n]*?\(0, 10\))/);
+        assert.ok(today, 'boot.js no longer passes `today` in a shape this can compare against');
+        assert.ok(
+            section.includes(`today: ${today[1]}`),
+            `the card must pass the same today as boot.js: ${today[1]}`
+        );
+    });
+
+    test('the removal goes through the §3 port, not a bespoke upload', () => {
+        assert.match(section, /records\.del\(rec\.recordType, rec\.recordId\)/);
+        assert.doesNotMatch(section, /fetch\(|\/api\//);
     });
 });
