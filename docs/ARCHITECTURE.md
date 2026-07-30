@@ -577,9 +577,21 @@ endpoint lives on our own server and relays to the unlocked tab, answering with 
 speak MCP to Claude's servers it must hold the pairing key and seal frames on the browser's behalf —
 so **it sees MCP requests and responses in plaintext in transit**. Ported from the sibling's design,
 which is honest about this in the place that matters most: the **tool description itself** says so, so
-the model relays it to the user rather than it living only in a settings screen. The key is stored
-sealed at rest (AES-256 under an HKDF-derived key from the session secret), which defends a
-database-only breach — it is **not** zero knowledge, and must never be described as such.
+the model relays it to the user rather than it living only in a settings screen. It is **not** zero
+knowledge and must never be described as such.
+
+The key is stored sealed at rest — AES-256-GCM under an HKDF-SHA256 key derived from the session
+secret, label `mp/mcp-pairing-key/v1`. **Be exact about what that buys, because an earlier draft of
+this section overstated it, and an overstatement here is what ends up in a README.** The session secret
+is a row in `server_secrets` in the *same SQLite file* as the sealed key — deliberately, see
+`store.SessionSecret`: an env var an operator forgets is worse for cookies. So sealing defends a
+**table-scoped** disclosure: a query that reads only `mcp_remote`, a partial dump, a stray log line. It
+does **not** defend a stolen database file or a Litestream replica, either of which carries the sealing
+key alongside the ciphertext it protects. Sealing here is defence in depth, not a boundary — which is
+why the operator note about the volume carries as much weight as it does.
+
+Rotating the session secret orphans every stored pairing key, so already-connected remotes must
+re-pair. Accepted, and it must be stated where an operator will see it.
 
 Tier 2 is therefore **opt-in, per-account, revocable, and off by default**, and Tier 1 remains the
 recommendation for anyone who wants the original guarantee. Both tiers reuse the same relay, the same
