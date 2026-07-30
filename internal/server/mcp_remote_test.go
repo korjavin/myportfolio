@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -105,6 +106,53 @@ func TestMCPRemoteEnableLookupDisable(t *testing.T) {
 	if _, ok := f.row(t); ok {
 		t.Error("disable left the sealed pairing key on disk — a revoked connector with a decryptable key is not revoked")
 	}
+}
+
+// Revocation has to reach the entry itself, not only the map. A request that
+// resolved its token a moment before the user hit disconnect still holds the
+// pointer, and mcpshim.Client.Close leaves the client able to redial — so an
+// entry that is merely deleted from the registry would keep answering.
+func TestMCPRemoteRevokedEntryRefusesToDial(t *testing.T) {
+	f := newRemoteFixture(t)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	// Exactly the race: the entry is in hand before the connector goes away.
+	inFlight := f.registry.lookup(token)
+	if inFlight == nil {
+		t.Fatal("the freshly minted token does not resolve")
+	}
+
+	if err := f.registry.disable(t.Context(), f.account); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	// No dial is attempted, so this returns immediately rather than waiting out
+	// the shim's reconnect budget against a relay URL nothing is listening on.
+	if _, err := inFlight.call(t.Context(), "mcp_help", nil); !errors.Is(err, errConnectorRevoked) {
+		t.Errorf("call through a revoked entry = %v, want errConnectorRevoked", err)
+	}
+
+	// Re-minting revokes the replaced entry for the same reason.
+	if _, err := f.registry.enable(t.Context(), f.account, f.pc); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	replaced := f.registry.lookup(f.mustToken(t))
+	if _, err := f.registry.enable(t.Context(), f.account, f.pc); err != nil {
+		t.Fatalf("re-enable again: %v", err)
+	}
+	if _, err := replaced.call(t.Context(), "mcp_help", nil); !errors.Is(err, errConnectorRevoked) {
+		t.Errorf("call through a re-minted-away entry = %v, want errConnectorRevoked", err)
+	}
+}
+
+func (f *remoteFixture) mustToken(t *testing.T) string {
+	t.Helper()
+	token, ok := f.registry.tokenFor(f.account)
+	if !ok {
+		t.Fatal("no connector enabled")
+	}
+	return token
 }
 
 // A wrong token is rejected, and every rejection is uniform: nothing about the

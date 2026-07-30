@@ -36,9 +36,12 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/korjavin/myportfolio/internal/mcpshim"
@@ -80,13 +83,40 @@ func constantTimeTokenEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// errConnectorRevoked is what a call through a torn-down entry gets. It is the
+// user's own action, so it says what to do about it rather than sounding like a
+// fault: the model relays this text.
+var errConnectorRevoked = errors.New("this connector was disconnected or replaced — open your portfolio's Settings and enable the connector again to get a new URL")
+
 // mcpRemoteEntry is one enabled account's live connector: the token that
 // authenticates it and the shim client that dials the relay on the account's
 // behalf. The plaintext pairing key exists nowhere else in the process — it
 // lives inside the client's pairing code and is never copied out.
+//
+// Route calls through the entry's own call method, never through entry.client
+// directly. Removing an entry from the registry does not by itself stop it: a
+// request that resolved its token a moment before the user hit disconnect still
+// holds this pointer, and mcpshim.Client.Close only closes the current
+// connection without marking the client unusable — so the next Call would
+// happily REDIAL with the revoked pairing. revoked is what actually ends it, and
+// it is set before the close (codex review found this).
 type mcpRemoteEntry struct {
-	token  string
-	client *mcpshim.Client
+	token   string
+	client  *mcpshim.Client
+	revoked atomic.Bool
+}
+
+// call runs one MCP call for this connector, refusing once the connector has
+// been revoked. The check-then-call gap is one instruction wide and cannot be
+// closed — a call already inside the relay round trip finishes, exactly as a
+// request already past requireSession does when a device is revoked mid-flight.
+// What it does close is the unbounded case: a stale entry that keeps working
+// indefinitely because nothing ever told it to stop.
+func (e *mcpRemoteEntry) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if e.revoked.Load() {
+		return nil, errConnectorRevoked
+	}
+	return e.client.Call(ctx, method, params)
 }
 
 // mcpRemoteRegistry is the process's view of which accounts have the hosted
@@ -297,13 +327,16 @@ func (r *mcpRemoteRegistry) stop(accountID string) {
 	closeEntry(entry)
 }
 
-// closeEntry drops an entry's connection. Outside the lock: Close talks to the
-// socket, and a mutex held across that would stall every other account's
-// lookups. A client that never dialed has nothing to close.
+// closeEntry revokes an entry and drops its connection, in that order: marking
+// it first means a request holding this pointer cannot slip a call in between.
+// Closing runs outside the registry lock, because Close talks to the socket and a
+// mutex held across that would stall every other account's lookups. A client
+// that never dialed has nothing to close.
 func closeEntry(entry *mcpRemoteEntry) {
 	if entry == nil {
 		return
 	}
+	entry.revoked.Store(true)
 	if err := entry.client.Close(); err != nil {
 		// No token and no account id: this is a socket teardown, and the only
 		// interesting failure is the transport's own.
