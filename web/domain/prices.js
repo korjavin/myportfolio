@@ -70,9 +70,28 @@ export function createPricesDomain({ records }) {
    * screen belongs in the view: a reader that thins the series cannot be used
    * for anything but drawing it.
    */
-  async function series(securityId, { from, to } = {}) {
+  async function series(securityId, range) {
     if (!securityId) return [];
-    const chunks = (await records.list(RECORD.price)).filter((r) => r.securityId === securityId);
+    return (await seriesFor([securityId], range)).get(securityId);
+  }
+
+  /**
+   * The same series for several securities, off ONE port read.
+   *
+   * The Holdings list draws a sparkline per row, and calling series() per row
+   * re-reads (and structured-clones) every price chunk in the database once per
+   * position. This is that loop hoisted, not a second reader: series() is now a
+   * one-security call into it, so the dedupe and ordering rules below have
+   * exactly one implementation.
+   *
+   * @returns Map(securityId -> [{ date, close }]), one entry per id asked for,
+   *          empty array where the security has no stored closes.
+   */
+  async function seriesFor(securityIds, { from, to } = {}) {
+    const wanted = new Set(securityIds);
+    const out = new Map([...wanted].map((id) => [id, new Map()]));
+    if (wanted.size === 0) return out;
+    const chunks = (await records.list(RECORD.price)).filter((r) => wanted.has(r.securityId));
 
     // ONE POINT PER DAY, first chunk in port order wins. Two chunks for the
     // same security-year are reachable — ppimport.js mints
@@ -83,18 +102,18 @@ export function createPricesDomain({ records }) {
     // latest close, while portfolio.js — which keeps the first close it sees at
     // an equal date, off the same records.list order — values the holdings row
     // off the other one. Same rule here, so the two never disagree.
-    const byDate = new Map();
-    for (const { date, close } of eachClose(chunks)) {
+    for (const { securityId, date, close } of eachClose(chunks)) {
       // String comparison is exact for zero-padded ISO days, which is why the
       // key validation above is not optional.
       if (from && date < from) continue;
       if (to && date > to) continue;
+      const byDate = out.get(securityId);
       if (!byDate.has(date)) byDate.set(date, close);
     }
-    return [...byDate.entries()]
+    return new Map([...out].map(([id, byDate]) => [id, [...byDate.entries()]
       .map(([date, close]) => ({ date, close }))
-      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))]));
   }
 
-  return { series };
+  return { series, seriesFor };
 }

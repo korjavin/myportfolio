@@ -14,6 +14,7 @@
 
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
+import { trendLine, trendVariant } from './pricechart.js';
 import { loadPerformance } from './store.js';
 
 const MS_PER_DAY = 86400000;
@@ -49,6 +50,61 @@ function returnCell(result) {
         return ui.delta('wg-delta--flat', reason, { bare: true });
     }
     return ui.delta(fmt.deltaClass(result.value), fmt.percent(result.value), { bare: true });
+}
+
+/**
+ * Total portfolio value across the selected range — the graph the app never
+ * had, and the one "why is there no quotes graph" was actually asking for.
+ *
+ * It computes nothing. `perf.portfolio.valueSeries` is the same list of
+ * valuations TTWROR was chained through, so the line and the percentage above
+ * it cannot disagree, and the line is the shared `trendLine` the price chart
+ * draws — not a second renderer.
+ */
+function valueChartCard(perf) {
+    // A day perf.js could not value comes back null. Dropping it is the only
+    // honest option: plotting it as zero draws a crash that did not happen, and
+    // these are a leading run anyway (a holding is unpriced until its first
+    // stored close, never after it).
+    const known = (perf.portfolio.valueSeries ?? []).filter((p) => p.value !== null);
+    // The same surface either way — .wg-chart-card is the shared chart card the
+    // price history uses, so the two charts in this app cannot drift apart.
+    const chart = ui.el('div', 'wg-chart-card wg-trend-chart');
+    chart.appendChild(ui.sectionLabel('Portfolio value'));
+
+    if (known.length < 2) {
+        chart.appendChild(ui.emptyState(known.length === 0
+            ? 'No day in this range could be valued — every holding needs a stored close before the total has a value.'
+            : 'Only one valued day in this range. A second one draws a line.'));
+        return chart;
+    }
+
+    const values = known.map((p) => p.value);
+    const open = values[0];
+    const close = values[values.length - 1];
+    const change = close - open;
+
+    const head = ui.el('div', 'flex-row flex-between gap-md');
+    head.appendChild(ui.el('span', 'wg-muted text-sm', `${known.length} valuations`));
+    // Through ui.delta, so the sign is carried by its ▲/▼ glyph and not by the
+    // line's colour (ARCHITECTURE.md §9). The line agrees with it; it is never
+    // the only thing saying which way this went.
+    head.appendChild(ui.delta(
+        fmt.deltaClass(change), `${fmt.money(close)} · ${fmt.sharePercent(change, open)}`, { bare: true }
+    ));
+
+    const plot = ui.el('div', 'wg-trend-chart__plot');
+    plot.appendChild(trendLine(values, trendVariant(values)));
+
+    const axis = ui.el('div', 'wg-trend-chart__axis');
+    axis.appendChild(ui.el('span', null, known[0].date));
+    axis.appendChild(ui.el('span', null, known[known.length - 1].date));
+
+    chart.append(head, plot, axis, ui.el('p', 'wg-muted text-sm m-0',
+        `Opening ${fmt.money(open)} · closing ${fmt.money(close)}. `
+        + 'Value only — deposits and withdrawals move this line; TTWROR below takes them out.'));
+
+    return chart;
 }
 
 function portfolioCard(perf) {
@@ -104,7 +160,10 @@ export async function render(container) {
         return;
     }
 
-    const children = [portfolioCard(perf)];
+    // The chart leads. Two screens' worth of numbers arrived before any of them
+    // had a picture, which is how the one chart this app already had stayed
+    // invisible behind a tap on Holdings.
+    const children = [valueChartCard(perf), portfolioCard(perf)];
 
     if (perf.securities.length > 0) {
         children.push(ui.sectionLabel('By security'));

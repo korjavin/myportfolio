@@ -14,11 +14,19 @@ function fixture() {
     byType.get(recordType).push({ ...body, recordId: id, recordType, clientTs: 1, deleted: false });
     return id;
   };
-  const records = { async list(recordType) { return (byType.get(recordType) || []).slice(); } };
+  let reads = 0;
+  const records = {
+    async list(recordType) {
+      reads += 1;
+      return (byType.get(recordType) || []).slice();
+    },
+  };
   return {
     put,
     records,
     series: (securityId, range) => createPricesDomain({ records }).series(securityId, range),
+    seriesFor: (ids, range) => createPricesDomain({ records }).seriesFor(ids, range),
+    reads: () => reads,
     snapshot: (opts) => createPortfolioDomain({ records }).snapshot(opts),
   };
 }
@@ -163,4 +171,41 @@ test('the last point agrees with the quote portfolio.js values the position at',
   const historical = (await f.snapshot({ asOf })).positions[0];
   assert.equal(clipped[clipped.length - 1].date, historical.priceDate);
   assert.equal(clipped[clipped.length - 1].close, historical.price);
+});
+
+test('seriesFor reads the price store once for the whole holdings list', async () => {
+  // What the Holdings sparklines need: one read, not one per row. Called
+  // per-security instead, a twenty-position list structured-clones every price
+  // chunk in the database twenty times on every render.
+  const f = fixture();
+  f.put('price', chunk('sec_1', '2024', { '01-02': 100000000, '02-02': 120000000 }));
+  f.put('price', chunk('sec_2', '2024', { '01-03': 999000000 }));
+
+  const before = f.reads();
+  const got = await f.seriesFor(['sec_1', 'sec_2', 'sec_none']);
+  assert.equal(f.reads() - before, 1);
+
+  // Every id asked for gets an entry, including the one with no closes — a row
+  // with no history must render its empty slot, not fall off the map.
+  assert.deepEqual([...got.keys()], ['sec_1', 'sec_2', 'sec_none']);
+  assert.deepEqual(got.get('sec_1'), [
+    { date: '2024-01-02', close: 100000000 },
+    { date: '2024-02-02', close: 120000000 },
+  ]);
+  assert.deepEqual(got.get('sec_2'), [{ date: '2024-01-03', close: 999000000 }]);
+  assert.deepEqual(got.get('sec_none'), []);
+  assert.deepEqual(await f.seriesFor([]), new Map());
+});
+
+test('seriesFor agrees with series() point for point — one reader, not two', async () => {
+  // series() is now a one-security call into seriesFor, and this is what pins
+  // it: the dedupe, the clipping and the ordering have a single implementation.
+  const f = fixture();
+  f.put('price', chunk('sec_1', '2024', { '01-02': 100000000, '3-15': 200000000 }));
+  f.put('price', chunk('sec_1', '2024', { '01-02': 555000000, '06-01': 300000000 }));
+  f.put('price', chunk('sec_1', '2023', { '12-31': 90000000 }));
+
+  const range = { from: '2023-12-31', to: '2024-01-31' };
+  assert.deepEqual((await f.seriesFor(['sec_1'])).get('sec_1'), await f.series('sec_1'));
+  assert.deepEqual((await f.seriesFor(['sec_1'], range)).get('sec_1'), await f.series('sec_1', range));
 });

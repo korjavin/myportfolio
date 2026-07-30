@@ -1,4 +1,5 @@
-// A security's close history, as a card.
+// A security's close history, as a card — plus the shared line every other
+// trend on the app draws (`trendLine` / `trendVariant`).
 //
 // The line itself is the ported `wg-sparkline` primitive — not a second
 // hand-rolled SVG renderer and not a chart library. Everything this module adds
@@ -36,14 +37,40 @@ function downsample(points, max) {
     return out;
 }
 
-function sparkline(series, variant) {
+/**
+ * A downsampled sparkline over `values` — §5 integers, at any scale.
+ *
+ * Exported because the Holdings rows and the Performance screen's portfolio
+ * value chart draw THIS line rather than a second one. Everything above the
+ * line stays with the caller: a security's closes and a portfolio's valuations
+ * are the same geometry but not the same units, and only the caller knows which
+ * fmt formatter the headline takes.
+ *
+ * Returns null for an empty series — the caller's own empty state, not a
+ * zero-height axis.
+ */
+export function trendLine(values, variant, { width = 320, height = 96, max = MAX_POINTS } = {}) {
     if (!window.WGSparkline) throw new Error('pricechart: wg-sparkline.js must load before the screens');
     return window.WGSparkline.render({
-        points: downsample(series, MAX_POINTS).map((p) => p.close),
+        points: downsample(values, max),
         variant,
-        width: 320,
-        height: 96,
+        width,
+        height,
     });
+}
+
+/**
+ * Gain / loss / flat from the series' own first→last value.
+ *
+ * NOT the row's unrealized P/L, which measures against cost basis: a line can
+ * be rising over its stored window while the position is still under water.
+ * Each carries its own sign in its own way — this one through the line, the
+ * badge through ui.delta's ▲/▼ glyph, which is why neither is colour alone.
+ */
+export function trendVariant(values) {
+    if (values.length < 2) return 'mint';
+    const change = values[values.length - 1] - values[0];
+    return change === 0 ? 'mint' : (change > 0 ? 'gain' : 'loss');
 }
 
 function chartBody(series) {
@@ -72,19 +99,17 @@ function chartBody(series) {
         { bare: true }
     ));
 
-    const variant = series.length < 2 || change === 0 ? 'mint' : (change > 0 ? 'gain' : 'loss');
-
     // The date axis. Plain text rather than SVG <text>, because these two labels
-    // are the whole axis at this size — but .wg-price-chart__axis resolves them
+    // are the whole axis at this size — but .wg-trend-chart__axis resolves them
     // from the shared chart axis-tick theme, so they cannot drift away from the
     // tick styling every other chart uses. (The token names themselves stay in
     // the stylesheet: naming one here, even in a comment, is a guard failure.)
-    const axis = ui.el('div', 'wg-price-chart__axis');
+    const axis = ui.el('div', 'wg-trend-chart__axis');
     axis.appendChild(ui.el('span', null, first.date));
     if (series.length > 1) axis.appendChild(ui.el('span', null, last.date));
 
-    const plot = ui.el('div', 'wg-price-chart__plot');
-    plot.appendChild(sparkline(series, variant));
+    const plot = ui.el('div', 'wg-trend-chart__plot');
+    plot.appendChild(trendLine(closes, trendVariant(closes)));
 
     return [
         head,
@@ -101,7 +126,7 @@ function chartBody(series) {
  * the modal that hosts it is built in one pass and must not wait on a read.
  */
 export function priceHistoryCard(securityId) {
-    const card = ui.el('div', 'wg-chart-card wg-price-chart');
+    const card = ui.el('div', 'wg-chart-card wg-trend-chart');
     card.appendChild(ui.el('p', 'wg-muted text-sm m-0', 'Reading price history…'));
 
     priceSeries(securityId).then(

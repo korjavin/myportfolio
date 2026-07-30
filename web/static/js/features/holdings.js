@@ -18,9 +18,9 @@
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import { openTxModal } from './transactions.js';
-import { priceHistoryCard } from './pricechart.js';
+import { priceHistoryCard, trendLine, trendVariant } from './pricechart.js';
 import { refreshAction, refreshReport, staleBadge, valuationAsOf } from './quotes.js';
-import { state, putPrice, reportingCurrency } from './store.js';
+import { state, putPrice, priceSeriesFor, reportingCurrency } from './store.js';
 import { parseFixed, DECIMALS } from '../../../domain/money.js';
 import { todayLocal } from './forms.js';
 
@@ -137,6 +137,40 @@ function openPositionModal(position) {
     });
 }
 
+// Row-sized: 56 CSS pixels of line, so ~24 points is already a node every
+// ~2.3px — the same density the full card gets at 320px.
+const ROW_SPARK = { width: 56, height: 24, max: 24 };
+
+/**
+ * Fill each row's sparkline slot from ONE read of the price store.
+ *
+ * The chart the app has had all along was one tap away in the position modal
+ * and nobody found it; this is the same line, at the size that makes it
+ * visible without the tap. It lands asynchronously on purpose — the list is
+ * rendered off `state.snapshot` synchronously and must not start waiting on the
+ * price store to paint a number it already has.
+ *
+ * A security with no stored closes leaves its slot empty. The row already says
+ * "no price" in its subtitle, and the full empty state is what a tap gets.
+ */
+function paintSparklines(slots) {
+    if (slots.size === 0) return;
+    priceSeriesFor([...slots.keys()]).then((bySecurity) => {
+        for (const [securityId, nodes] of slots) {
+            const closes = (bySecurity.get(securityId) ?? []).map((p) => p.close);
+            if (closes.length === 0) continue;
+            const variant = trendVariant(closes);
+            for (const node of nodes) {
+                if (!node.isConnected) continue;
+                node.replaceChildren(trendLine(closes, variant, ROW_SPARK));
+            }
+        }
+    }, (err) => {
+        // A list that renders without its decoration beats a list that throws.
+        console.warn('holdings: could not read price history for the row sparklines', err);
+    });
+}
+
 export function render(container) {
     const snapshot = state.snapshot;
     const positions = (snapshot?.positions ?? []).filter((p) => filter === 'all' || p.shares !== 0);
@@ -186,6 +220,11 @@ export function render(container) {
 
     const summary = ui.card(stats, freshness);
 
+    // securityId → the slots waiting on it. A Map of lists, not one node per
+    // id: §4 keys a position by (accountId, securityId), so the same ETF at two
+    // brokers is two rows drawing the same security's line.
+    const slots = new Map();
+
     const rows = ui.list(positions.map((p) => {
         const sub = [`${fmt.shares(p.shares)} sh`];
         if (p.price !== null && p.price !== undefined) sub.push(`@ ${fmt.price(p.price)}`);
@@ -195,14 +234,22 @@ export function render(container) {
         if (p.marketValue !== null && p.marketValue !== undefined && p.cost > 0) {
             sub.push(fmt.sharePercent(p.unrealized, p.cost));
         }
+        const spark = ui.el('span', 'wg-row__spark');
+        if (p.securityId) {
+            if (!slots.has(p.securityId)) slots.set(p.securityId, []);
+            slots.get(p.securityId).push(spark);
+        }
+
         return ui.row({
             title: title(p),
             subtitle: sub.join(' · '),
             value: fmt.money(p.marketValue),
             valueNode: ui.delta(fmt.deltaClass(p.unrealized), fmt.signedMoney(p.unrealized), { bare: true }),
+            spark,
             onOpen: () => openPositionModal(p),
         });
     }));
 
     container.replaceChildren(head, report, summary, rows);
+    paintSparklines(slots);
 }
