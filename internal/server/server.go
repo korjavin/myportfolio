@@ -12,6 +12,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -134,8 +135,14 @@ type API struct {
 	recoveryLimiter *rateLimiter
 	// relayLimiter throttles relayed MCP frames per PAIRING (mcp_relay.go).
 	// Third instance of the same limiter, still not a second implementation.
-	relayLimiter   *rateLimiter
-	pairings       *pairingTable
+	relayLimiter *rateLimiter
+	pairings     *pairingTable
+	// mcpRemote is the hosted connector's registry (§11 Tier 2, mcp_remote.go).
+	// Built and restored here so a restart does not silently revoke a connector
+	// the user configured in Claude, but NOT routed: the streamable-HTTP endpoint
+	// that authenticates against it and the Settings routes that enable and
+	// revoke it are separate beads. Nothing on the internet reaches it yet.
+	mcpRemote      *mcpRemoteRegistry
 	trustedProxies []netip.Prefix
 }
 
@@ -159,8 +166,13 @@ func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []ne
 		recoveryLimiter:    newRateLimiter(recoveryAttemptMax, recoveryAttemptWindow),
 		relayLimiter:       newRateLimiter(relayFrameMax, relayFrameWindow),
 		pairings:           newPairingTable(pairingTTL),
+		mcpRemote:          newMCPRemoteRegistry(db, sessionSecret),
 		trustedProxies:     trustedProxies,
 	}
+	// Rebuild the hosted connectors from the database. context.Background rather
+	// than a request context because this is boot, not a request; a row that
+	// cannot be opened is logged and skipped, so this never blocks startup.
+	api.mcpRemote.restore(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
