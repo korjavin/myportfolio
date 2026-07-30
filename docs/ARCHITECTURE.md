@@ -385,6 +385,11 @@ over near-verbatim. Four differences:
    **The MCP relay is back in scope** — this clause used to say "no MCP relay, do not port `mcp*`",
    and the owner reversed it: an AI connector is a headline goal for this product, not a nicety.
    See §11. `sealMCPFrame`/`openMCPFrame` are therefore restored to `crypto.js` under `mp/v1/mcp`.
+   **It carries its own honest-limitations delta, and it belongs in the same breath as the ones
+   below**: the relay cannot read a frame but does see frame sizes, timing and pairing ids; the
+   pairing key lives in a vault record so *any* unlocked device can answer; and whatever the AI is
+   told leaves this trust boundary entirely for the model provider. §11 states each in full, and
+   `docs/AI-CONNECTOR.md` states them to the user.
 4. **No oplog** — §6 replaces `sync.js`'s ops machinery with the state blob. Keep its
    `deriveKData`/`encryptSnapshot`-shaped primitives, drop `encryptRecord`/seq handling.
 
@@ -655,6 +660,31 @@ the same unattributable symptom the pairing-code checksum was added to eliminate
   other; an abrupt close reaches the browser as `1006`, which reads as a transient drop and gets
   retried — re-evicting its replacement forever. Closing with `4409` makes the loser step aside.
 - One device leg per pairing is the standing limitation.
+
+### The pairing TTL is an IDLE timeout, and the refresh deliberately excludes connecting
+
+`pairingTTL` used to run from the mint and was never refreshed, so a pairing that worked all day was
+dead the next morning and the shim reported it gone. It is now an **idle** timeout: any relayed frame,
+on either leg, pushes the expiry out.
+
+Two details that are decisions, not incidentals:
+
+- **Connecting does not refresh it — only a frame does.** The PWA tab reconnects its device leg on its
+  own, so refreshing on join would make an abandoned route immortal. A connected but silent leg must
+  still be allowed to expire, and there is a test holding exactly that shape.
+- **`touch` extends a live pairing only.** The sweep runs hourly while every lookup rejects an expired
+  record on sight, so without that guard a leg connected across the expiry instant could renew inside
+  the grace window — once a day, forever — resurrecting a pairing no fresh dial could reach. Expiry is
+  monotone by construction.
+
+Expiry still closes with **`4404`**, never `4409`: the account genuinely has no pairing left, so the
+responder's record really is a tombstone and purging it is right.
+
+**Restarts remain unhandled, deliberately.** The table is still in-memory, so a redeploy — which here
+is every green push to master — drops every pairing, and the `4404`/401 paths handle it. Note the
+fact that makes persistence *thinkable* if this ever becomes intolerable: **the pairing key is not in
+the table**, so persisting a routing id would add no secret to the server. It would still be a
+schema, and the `4404` machinery exists precisely so its loss is survivable, so it has not been built.
 
 ### Where we diverge from the sibling
 
