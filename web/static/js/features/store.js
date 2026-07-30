@@ -68,6 +68,13 @@ const prices = createPricesDomain({ records });
  */
 export const priceSeries = (securityId, range) => prices.series(securityId, range);
 
+/**
+ * The same, for a list of securities, off one read — what the Holdings list
+ * needs to draw a sparkline on every row without re-reading the price store
+ * once per position.
+ */
+export const priceSeriesFor = (securityIds, range) => prices.seriesFor(securityIds, range);
+
 /** Used when a user has not chosen one yet. Only ever a default, never implied. */
 export const DEFAULT_CURRENCY = 'EUR';
 

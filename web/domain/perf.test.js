@@ -52,6 +52,70 @@ function npvIndependent(flows, rate) {
   );
 }
 
+// --- Value series ----------------------------------------------------------
+
+test('valueSeries is the chart the Performance screen draws, sampled across the range', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: eur(10000) }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-01', shares: sh(100), amount: eur(10000),
+  }));
+  f.put('price', {
+    securityId: 'sec_1', year: 2024,
+    closes: { '01-01': px(100), '04-01': px(110), '07-01': px(90), '12-31': px(130) },
+  });
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-12-31' });
+  const series = res.portfolio.valueSeries;
+
+  // Ascending, endpoints exact, and enough points to have a SHAPE — the whole
+  // reason a sampling grid exists. With flow boundaries alone this is four
+  // points and the line runs straight through a 20% drawdown.
+  assert.deepEqual([...series].sort((a, b) => (a.date < b.date ? -1 : 1)), series);
+  assert.equal(series[0].date, res.openDate);
+  assert.equal(series[series.length - 1].date, res.to);
+  assert.equal(series[0].value, res.portfolio.openValue);
+  assert.equal(series[series.length - 1].value, res.portfolio.closeValue);
+  assert.ok(series.length > 30, `only ${series.length} points — the line has no shape`);
+
+  // §5 all the way out: valuations are integers, never floats.
+  for (const p of series) {
+    assert.ok(p.value === null || Number.isSafeInteger(p.value), `${p.date} value is not an integer`);
+  }
+
+  // The July dip is actually IN the series. A boundary-only series has points
+  // at 2023-12-31, 2024-01-01 and 2024-12-31 only, and draws straight over it.
+  assert.ok(series.some((p) => p.date > '2024-07-01' && p.value === eur(9000)),
+    'the drawdown between two transactions is missing from the line');
+});
+
+test('the sampling grid moves no number — extra boundaries telescope', async () => {
+  // The pin on the one risk of adding boundaries for the chart's benefit: a
+  // sub-period boundary that carries no flow must contribute a factor that
+  // cancels out. If it ever does not, TTWROR silently changes shape with the
+  // length of the range.
+  const f = fixture();
+  basics(f);
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: eur(10000) }));
+  f.put('transaction', tx({
+    type: 'buy', securityId: 'sec_1', date: '2024-01-01', shares: sh(100), amount: eur(10000),
+  }));
+  f.put('transaction', tx({ type: 'deposit', date: '2024-06-30', amount: eur(5000) }));
+  f.put('price', {
+    securityId: 'sec_1', year: 2024,
+    closes: { '01-01': px(100), '06-29': px(120), '06-30': px(120), '12-31': px(130) },
+  });
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-12-31' });
+  // Computed off the sub-period end values alone, exactly as the deposit test
+  // above does, with no reference to how many samples the engine took.
+  const expected = (12000 / 10000) * (18000 / 17000) - 1;
+  assert.equal(res.portfolio.ttwror.ok, true);
+  assert.ok(Math.abs(res.portfolio.ttwror.value - expected) < 1e-12,
+    `${res.portfolio.ttwror.value} != ${expected}`);
+});
+
 // --- TTWROR ----------------------------------------------------------------
 
 test('TTWROR: a mid-period deposit does not move the number', async () => {

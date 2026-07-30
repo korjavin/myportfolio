@@ -195,8 +195,12 @@ export function select(options, value) {
  * A tappable list row: the whole row opens the editor, with an optional
  * trailing delete button outside the tap target (nesting a button inside a
  * button is invalid HTML and breaks keyboard activation).
+ *
+ * `spark` is an optional node between the label and the value — the holdings
+ * sparkline slot. It is decorative by construction: everything it shows is
+ * already in `subtitle`/`valueNode` as text, so a row is complete without it.
  */
-export function row({ title, subtitle, value, valueNode, onOpen, onDelete, deleteLabel = 'Delete' }) {
+export function row({ title, subtitle, value, valueNode, spark, onOpen, onDelete, deleteLabel = 'Delete' }) {
     const li = el('li', 'wg-row');
 
     const tap = el('button', 'wg-row__tap');
@@ -205,6 +209,8 @@ export function row({ title, subtitle, value, valueNode, onOpen, onDelete, delet
     main.appendChild(el('span', 'wg-row__title', title));
     if (subtitle) main.appendChild(el('span', 'wg-row__sub', subtitle));
     tap.appendChild(main);
+
+    if (spark) tap.appendChild(spark);
 
     const end = el('span', 'wg-row__end');
     if (value !== undefined && value !== null) end.appendChild(el('span', 'wg-row__value', value));

@@ -68,6 +68,19 @@ const MS_PER_DAY = 86400000;
 // and so does every spreadsheet implementation. Matching it is the point.
 const DAYS_PER_YEAR = 365;
 
+// How many evenly spaced valuations the range is sampled at, on top of the flow
+// boundaries, so `portfolio.valueSeries` has a shape and not just endpoints.
+// Sized for a phone-width chart (a point every ~5px at 320px), because that is
+// the only consumer — every extra sample is a full snapshot() fold.
+//
+// ponytail: measured at ~1.6x on a 30-transaction / 4-security / 5-year set
+// (183ms -> 291ms), and proportionally less on a busier log, where the flow
+// boundaries already outnumber the grid. Both screens render this behind a
+// "Computing…" placeholder, so it costs latency and not a frozen screen. If it
+// ever does matter, the fix is the streaming snapshot() the ponytail note below
+// already asks for — not a coarser chart.
+const SERIES_POINTS = 60;
+
 // --- Calendar --------------------------------------------------------------
 
 // Date.UTC(2024, 1, 30) quietly rolls to March 1, which would move a
@@ -420,6 +433,19 @@ export function createPerformanceDomain({ records }) {
         boundaries.add(addDays(d, -1));
       }
     }
+
+    // CHART RESOLUTION, and nothing else. The boundaries above are transaction
+    // days, so a portfolio that trades twice a year has a value series of four
+    // points — right at every one of them and a straight line across every
+    // market move in between. A sampling grid fixes the shape without changing
+    // a number: chainLink's consecutive factors telescope through an extra
+    // boundary, and irrOf reads only the endpoints and the flows. What each
+    // extra boundary DOES cost is one more snapshot() (see the ponytail note
+    // below), which is why this is a capped grid and not a daily one.
+    const spanDays = Math.round((dayMs(rangeTo) - dayMs(openDate)) / MS_PER_DAY);
+    const stride = Math.max(1, Math.ceil(spanDays / SERIES_POINTS));
+    for (let d = stride; d < spanDays; d += stride) boundaries.add(addDays(openDate, d));
+
     const dates = [...boundaries].sort();
 
     const portfolioFlows = new Map();       // date -> { in, out }
@@ -529,6 +555,12 @@ export function createPerformanceDomain({ records }) {
       flowOut: [...portfolioFlows.values()].reduce((a, f) => a + f.out, 0),
       ttwror: chainLink(dates, portfolioValueAt, portfolioFlows),
       irr: irrOf(openDate, openValues.portfolio, rangeTo, closeValues.portfolio, portfolioFlows),
+      // The valuations TTWROR was just chained through, ascending — a chart
+      // series handed out rather than a second computation of one. `value` is
+      // null on a day the portfolio could not be valued, the same null
+      // chainLink refuses to divide by; a consumer must drop those rather than
+      // draw them as zero.
+      valueSeries: dates.map((date) => ({ date, value: valuesByDate.get(date).portfolio })),
     };
 
     const securityIds = new Set([...securityFlows.keys()]);
