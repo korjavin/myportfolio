@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -159,13 +160,17 @@ func newMCPRemoteRegistry(db *store.DB, sessionSecret string) *mcpRemoteRegistry
 // re-pair, and that consequence belongs in the deployment docs rather than in a
 // panic here.
 //
-// The pairing itself is NOT restored, and cannot be by this bead: the relay's
+// The pairing itself is NOT restored, and deliberately is not: the relay's
 // pairing table is in-memory on purpose (§11's "Restarts remain unhandled,
 // deliberately") and it has no restore seam. So a connector that survives a
-// restart resolves its token but dials a pairing the relay has forgotten, and
-// the caller gets §11's actionable "no unlocked device" error until the user
-// re-pairs. Closing that gap needs a seam in mcp_relay.go, which this bead may
-// not touch.
+// restart resolves its token but dials a pairing the relay has forgotten.
+//
+// What the caller then gets is mcpshim.ErrPairingGone — "re-pair from Settings"
+// — because the relay answers that dial with a 401 and DialPairing maps it to
+// the same terminal error close code 4404 carries. H1 predicted the "no unlocked
+// device" error here and that would have been the wrong sentence: unlocking a tab
+// cannot fix this, since the tab's own device leg is closed with 4404 too. The
+// two are kept distinguishable precisely so this case can say the useful thing.
 func (r *mcpRemoteRegistry) restore(ctx context.Context) {
 	rows, err := r.db.ListMCPRemote(ctx)
 	if err != nil {
@@ -188,15 +193,20 @@ func (r *mcpRemoteRegistry) restore(ctx context.Context) {
 // returning the freshly minted token. Re-enabling replaces the row, rotates the
 // token, and drops the previous pairing key.
 //
-// pc.RelayURL IS DIALED BY THIS SERVER, so every caller must first bind it to
-// the request's own host. It arrives inside a pairing code the account holder
-// submitted, and an unchecked one turns this into an SSRF: an authenticated user
-// aims the dial at any host or port the server can reach and triggers it by
-// hitting their own connector URL. The sibling does this with relayURLIsSelf in
-// its handler, because only the handler has the request; the same is true here,
-// so the handler bead owns that check and this comment is the standing reminder
-// that it is not optional.
-func (r *mcpRemoteRegistry) enable(ctx context.Context, accountID string, pc *mcpshim.PairingCode) (string, error) {
+// req is the request that asked for this, and it is a parameter rather than a
+// convenience. pc.RelayURL IS DIALED BY THIS SERVER, and it arrives inside a
+// pairing code the account holder submitted, so an unchecked one is an SSRF: an
+// authenticated user aims the dial at any host or port the server can reach and
+// triggers it by hitting their own connector URL. The sibling puts that check in
+// its handler (relayURLIsSelf) because only the handler has the request — which
+// leaves the guard one forgetful caller away from being absent. Taking the
+// request here instead makes it unbypassable: there is no way to call enable
+// without supplying the host the URL must match, and no way to supply the wrong
+// one. The Settings handler (H3) therefore inherits the check by construction.
+func (r *mcpRemoteRegistry) enable(ctx context.Context, accountID string, pc *mcpshim.PairingCode, req *http.Request) (string, error) {
+	if !relayURLIsSelf(pc.RelayURL, req.Host, serverListenPort(req)) {
+		return "", errRelayURLNotSelf
+	}
 	// A wrong-length key would seal and store fine and then fail only at the
 	// AEAD, which reaches the user as "no device online" — §11's least
 	// attributable failure. Callers parse the code with mcpshim.ParsePairingCode,

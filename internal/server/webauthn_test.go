@@ -28,6 +28,10 @@ type vault struct {
 	t  *testing.T
 	h  http.Handler
 	db *store.DB
+	// api is the same *API the handler serves. The hosted connector has no enable
+	// route yet (H3), so its tests turn it on through this registry rather than
+	// through a second one that nothing is serving.
+	api *API
 }
 
 func newVault(t *testing.T) *vault {
@@ -37,7 +41,8 @@ func newVault(t *testing.T) *vault {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &vault{t: t, h: New(testFS(), db, testSessionSecret, defaultTrustedProxies), db: db}
+	api := newAPI(db, testSessionSecret, defaultTrustedProxies)
+	return &vault{t: t, h: api.handler(testFS()), db: db, api: api}
 }
 
 func (v *vault) do(method, path string, body any, cookies ...*http.Cookie) *httptest.ResponseRecorder {

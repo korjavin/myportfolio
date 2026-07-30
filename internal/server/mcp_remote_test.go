@@ -76,7 +76,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 func TestMCPRemoteEnableLookupDisable(t *testing.T) {
 	f := newRemoteFixture(t)
 
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestMCPRemoteEnableLookupDisable(t *testing.T) {
 // entry that is merely deleted from the registry would keep answering.
 func TestMCPRemoteRevokedEntryRefusesToDial(t *testing.T) {
 	f := newRemoteFixture(t)
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -134,11 +134,11 @@ func TestMCPRemoteRevokedEntryRefusesToDial(t *testing.T) {
 	}
 
 	// Re-minting revokes the replaced entry for the same reason.
-	if _, err := f.registry.enable(t.Context(), f.account, f.pc); err != nil {
+	if _, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest()); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}
 	replaced := f.registry.lookup(f.mustToken(t))
-	if _, err := f.registry.enable(t.Context(), f.account, f.pc); err != nil {
+	if _, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest()); err != nil {
 		t.Fatalf("re-enable again: %v", err)
 	}
 	if _, err := replaced.call(t.Context(), "mcp_help", nil); !errors.Is(err, errConnectorRevoked) {
@@ -159,7 +159,7 @@ func (f *remoteFixture) mustToken(t *testing.T) string {
 // candidate distinguishes "no connector at all" from "wrong token".
 func TestMCPRemoteLookupRejectsWrongTokens(t *testing.T) {
 	f := newRemoteFixture(t)
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestMCPRemoteTokenIsHighEntropy(t *testing.T) {
 
 	seen := make(map[string]bool)
 	for range 8 {
-		token, err := f.registry.enable(t.Context(), f.account, f.pc)
+		token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 		if err != nil {
 			t.Fatalf("enable: %v", err)
 		}
@@ -245,14 +245,14 @@ func TestMCPRemoteTokenIsHighEntropy(t *testing.T) {
 func TestMCPRemoteReEnableDropsThePreviousKeyAndToken(t *testing.T) {
 	f := newRemoteFixture(t)
 
-	first, err := f.registry.enable(t.Context(), f.account, f.pc)
+	first, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable first: %v", err)
 	}
 	firstRow, _ := f.row(t)
 
 	second := &mcpshim.PairingCode{RelayURL: f.pc.RelayURL, PairingID: "pairing-2", Key: testPairingKey(t)}
-	secondToken, err := f.registry.enable(t.Context(), f.account, second)
+	secondToken, err := f.registry.enable(t.Context(), f.account, second, selfRequest())
 	if err != nil {
 		t.Fatalf("enable second: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestMCPRemoteReEnableDropsThePreviousKeyAndToken(t *testing.T) {
 // resolves and the key on disk still opens to what the browser generated.
 func TestMCPRemoteSurvivesARestart(t *testing.T) {
 	f := newRemoteFixture(t)
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestMCPRemoteSurvivesARestart(t *testing.T) {
 // why disable does not skip the database when the registry has no live entry.
 func TestMCPRemoteRotatedSessionSecretOrphansTheConnector(t *testing.T) {
 	f := newRemoteFixture(t)
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestMCPRemoteRotatedSessionSecretOrphansTheConnector(t *testing.T) {
 // fail to decrypt: cipher.AEAD.Open panics on it.
 func TestMCPRemoteRestoreSurvivesACorruptRow(t *testing.T) {
 	f := newRemoteFixture(t)
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestMCPRemoteRestoreSurvivesACorruptRow(t *testing.T) {
 // cascade cannot reach the live in-memory entry of a running process.
 func TestMCPRemoteAccountDeletionLeavesNoKey(t *testing.T) {
 	f := newRemoteFixture(t)
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestMCPRemoteTokenNeverReachesTheLog(t *testing.T) {
 	f := newRemoteFixture(t)
 	logged := captureLog(t)
 
-	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc, selfRequest())
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestMCPRemoteTokenNeverReachesTheLog(t *testing.T) {
 		t.Fatalf("disable: %v", err)
 	}
 	// A failing enable, whose error string is the other place a token escapes.
-	if _, err := f.registry.enable(t.Context(), "NO-SUCH-ACCOUNT", f.pc); err == nil {
+	if _, err := f.registry.enable(t.Context(), "NO-SUCH-ACCOUNT", f.pc, selfRequest()); err == nil {
 		t.Fatal("enable accepted an account that does not exist")
 	} else if strings.Contains(err.Error(), token) {
 		t.Error("a token appeared in an error string")
@@ -421,7 +421,7 @@ func TestMCPRemoteEnableRejectsAWrongLengthKey(t *testing.T) {
 	f := newRemoteFixture(t)
 
 	short := &mcpshim.PairingCode{RelayURL: f.pc.RelayURL, PairingID: "pairing-1", Key: f.key[:16]}
-	if _, err := f.registry.enable(t.Context(), f.account, short); err == nil {
+	if _, err := f.registry.enable(t.Context(), f.account, short, selfRequest()); err == nil {
 		t.Fatal("enable accepted a 16-byte pairing key")
 	}
 	if _, ok := f.row(t); ok {

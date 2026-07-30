@@ -136,6 +136,14 @@ func (c *Client) redialLocked(ctx context.Context) (*ShimCore, error) {
 			c.core = core
 			return core, nil
 		}
+		// A terminal pairing error from the dial itself (a 401, meaning the relay
+		// has no such pairing) is finished for the same reason a terminal CLOSE
+		// is: the remaining attempts would re-run a dial that can only 401, and
+		// wrapping it in "gave up reconnecting" would bury the sentence the user
+		// has to act on behind a transport-sounding one.
+		if isTerminalClose(err) {
+			return nil, err
+		}
 		lastErr = err
 	}
 	c.core = nil
