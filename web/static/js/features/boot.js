@@ -15,7 +15,8 @@
 // in-app control on an installed client, never on boot.
 
 import { renderScreen, resolveScreenId, screenTitle } from './screens.js';
-import { refresh, subscribe, useRecords } from './store.js';
+import { refresh, subscribe, useRecords, records } from './store.js';
+import { refreshResponder } from '../core/mcp-responder.js';
 import { db, openMirror, openSyncMeta } from '../core/localdb.js';
 import { startSync, watchFocus, subscribeSync, syncState, describeSync } from './sync.js';
 import { syncNotice } from './ui.js';
@@ -238,6 +239,18 @@ if (demo) {
         // because the sync wiring threw is worse than one with no sync.
         console.error('boot: sync wiring failed', err);
         refresh();
+    }).then(() => {
+        // The AI connector's device leg (ARCHITECTURE.md §11). Deliberately
+        // AFTER startSync has settled and only on this branch: the pairing key
+        // lives in a vault record, so reading it before the port is chosen would
+        // ask the pre-signup mirror for an account's pairing and find nothing.
+        // With no pairing record — every user who has not run Settings › Connect
+        // Claude — this opens no socket at all.
+        //
+        // Demo mode never reaches here, and that matters beyond tidiness: a demo
+        // tab answering relayed MCP calls would serve fabricated trades to
+        // somebody's agent as if they were their portfolio.
+        refreshResponder({ records });
     });
     watchFocus({ onRecords: refresh });
 }

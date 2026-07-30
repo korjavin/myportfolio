@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -92,6 +92,13 @@ const PRECACHE = [
     '/js/core/unlock.js',
     '/js/core/ldk.js',
     '/js/core/crypto.js',
+    // The device leg of the AI connector (ARCHITECTURE.md §11), pulled in by
+    // features/boot.js. It needs the network to do anything, so precaching it
+    // looks pointless — it is not: without them in the cache, an offline cold
+    // start fails to resolve the import graph of boot.js and the WHOLE SHELL is
+    // gone, not just the connector.
+    '/js/core/mcp-responder.js',
+    '/js/core/mcp-catalog.js',
     '/vendor/dexie.min.js',
     // web/domain/, served at /domain/ by web/embed.go. These are the pure
     // engines — without them offline the shell paints and then every number is
