@@ -33,6 +33,12 @@ const (
 	// pairingTTL ages out a pairing the user minted and never used. Re-pairing
 	// is a paste of a fresh code, so the cost of expiry is low and the cost of
 	// an immortal in-memory credential is not.
+	//
+	// It is an IDLE timeout, not a lifetime: every relayed frame pushes the
+	// expiry a full pairingTTL out (pairingTable.touch), so a pairing someone
+	// actually uses never expires under them. Minted-and-never-used, and
+	// used-then-abandoned, both still age out — the entry is a live route
+	// someone could dial, so unbounded extension is not on the table.
 	pairingTTL          = 24 * time.Hour
 	pairingCleanupEvery = time.Hour
 	pairingIDBytes      = 16
@@ -218,6 +224,10 @@ func (a *API) serveLeg(ctx context.Context, conn *websocket.Conn, record *pairin
 			}
 			return
 		}
+		// A frame arrived, so this pairing is in use: push its idle expiry out.
+		// Without this the TTL runs from the mint and a pairing dies mid-session
+		// a day after pairing, which the shim then reports as gone.
+		a.pairings.touch(record)
 		if !a.relayLimiter.Allow(record.id) {
 			conn.Close(websocket.StatusPolicyViolation, "rate limit exceeded")
 			if peer := record.peerConn(isDevice); peer != nil {
@@ -254,14 +264,18 @@ func (a *API) serveLeg(ctx context.Context, conn *websocket.Conn, record *pairin
 type pairingRecord struct {
 	id        string
 	accountID string
-	expiresAt time.Time
 
-	mu     sync.Mutex
-	device *websocket.Conn
-	shim   *websocket.Conn
+	mu sync.Mutex
+	// expiresAt is under mu because a relayed frame extends it (touch) from a
+	// leg's goroutine while the sweep and both lookups read it.
+	expiresAt time.Time
+	device    *websocket.Conn
+	shim      *websocket.Conn
 }
 
 func (p *pairingRecord) isExpired(now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return now.After(p.expiresAt)
 }
 
@@ -355,6 +369,10 @@ func (p *pairingRecord) closeLegs(code websocket.StatusCode, reason string) {
 // the browser learns its record is a tombstone instead of retrying forever.
 type pairingTable struct {
 	ttl time.Duration
+	// now is the table's clock, time.Now everywhere but in tests. Expiry is the
+	// one behaviour here that cannot be observed without waiting for it, and a
+	// test that really sleeps past a TTL is either slow or flaky.
+	now func() time.Time
 
 	mu    sync.Mutex
 	byID  map[string]*pairingRecord
@@ -364,11 +382,27 @@ type pairingTable struct {
 func newPairingTable(ttl time.Duration) *pairingTable {
 	t := &pairingTable{
 		ttl:   ttl,
+		now:   time.Now,
 		byID:  make(map[string]*pairingRecord),
 		byAcc: make(map[string]*pairingRecord),
 	}
 	t.startCleanup()
 	return t
+}
+
+// touch resets rec's idle expiry to a full TTL from now, so a pairing carrying
+// traffic never ages out mid-use. Called per relayed frame from either leg (see
+// serveLeg) — cheap, and the only thing standing between a working pairing and
+// the 4404 it used to get a day after minting.
+//
+// Deliberately NOT called when a leg merely connects: the PWA tab reconnects on
+// its own and would keep an abandoned pairing alive forever. Frames mean a
+// person is asking something.
+func (t *pairingTable) touch(rec *pairingRecord) {
+	expiresAt := t.now().Add(t.ttl)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.expiresAt = expiresAt
 }
 
 // startCleanup sweeps expired pairings, mirroring rateLimiter.startCleanup —
@@ -383,7 +417,7 @@ func (t *pairingTable) startCleanup() {
 }
 
 func (t *pairingTable) cleanup() {
-	now := time.Now()
+	now := t.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for id, rec := range t.byID {
@@ -400,7 +434,7 @@ func (t *pairingTable) cleanup() {
 // mint creates a fresh pairing for accountID, replacing any the account held.
 func (t *pairingTable) mint(accountID string) string {
 	id := generatePairingID()
-	rec := &pairingRecord{id: id, accountID: accountID, expiresAt: time.Now().Add(t.ttl)}
+	rec := &pairingRecord{id: id, accountID: accountID, expiresAt: t.now().Add(t.ttl)}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -439,7 +473,7 @@ func (t *pairingTable) byPairingID(id string) (*pairingRecord, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	rec, ok := t.byID[id]
-	if !ok || rec.isExpired(time.Now()) {
+	if !ok || rec.isExpired(t.now()) {
 		return nil, false
 	}
 	return rec, true
@@ -451,7 +485,7 @@ func (t *pairingTable) byAccountID(accountID string) (*pairingRecord, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	rec, ok := t.byAcc[accountID]
-	if !ok || rec.isExpired(time.Now()) {
+	if !ok || rec.isExpired(t.now()) {
 		return nil, false
 	}
 	return rec, true

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -605,6 +606,142 @@ func TestRelayServesThePinnedRelayEndpoint(t *testing.T) {
 	if _, _, err := f.dial(t, base+"/device?pairing="+pairingID, f.session); err != nil {
 		t.Fatalf("the device leg is not served at the pinned path %s/device: %v", pinned.Path, err)
 	}
+}
+
+// pairingClock is a hand-wound clock for the expiry tests. Expiry is the one
+// relay behaviour that cannot be observed without waiting for it, and a test
+// that really sleeps past a 24h TTL is not a test. Mutex-guarded because the
+// leg's goroutine reads it (pairingTable.touch) while the test winds it.
+type pairingClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *pairingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *pairingClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// expiryFixture is a relay on a wound clock with only the SHIM leg wired. The
+// shim leg authenticates on the pairing id alone, so this needs no vault and no
+// session; and the refresh under test lives in serveLeg, which both legs share,
+// so one leg drives it. The table is built by hand rather than through
+// newPairingTable so the expiry sweep runs when the test says (cleanup()) and
+// not on an hourly ticker.
+type expiryFixture struct {
+	*pairingTable
+	clock *pairingClock
+	srv   *httptest.Server
+}
+
+func newExpiryFixture(t *testing.T) *expiryFixture {
+	t.Helper()
+	clock := &pairingClock{now: time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)}
+	table := &pairingTable{
+		ttl:   pairingTTL,
+		now:   clock.Now,
+		byID:  make(map[string]*pairingRecord),
+		byAcc: make(map[string]*pairingRecord),
+	}
+	api := &API{pairings: table, relayLimiter: newRateLimiter(relayFrameMax, relayFrameWindow)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /shim", api.shimSocket)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return &expiryFixture{pairingTable: table, clock: clock, srv: srv}
+}
+
+func (f *expiryFixture) dialShimLeg(t *testing.T, pairingID string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
+	defer cancel()
+	target := strings.Replace(f.srv.URL, "http://", "ws://", 1) + "/shim?pairing=" + url.QueryEscape(pairingID)
+	conn, _, err := websocket.Dial(ctx, target, nil)
+	if err != nil {
+		t.Fatalf("dial shim leg: %v", err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+	return conn
+}
+
+// waitUntil polls a condition the relay satisfies asynchronously. A liveness
+// wait, so it shares testWait rather than inventing a tighter deadline of its
+// own — see that constant.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(testWait)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %v waiting for %s", testWait, what)
+}
+
+// TestAPairingInActiveUseDoesNotExpire. The TTL used to run from the mint and was
+// never refreshed, so a pairing that worked all day was dead the next morning and
+// the shim reported it gone. Any relayed frame must push the idle expiry out.
+//
+// The clock is wound past the ORIGINAL expiry before the assertion, so the only
+// thing that can make the pairing live is the refresh: delete the touch call in
+// serveLeg and this test cannot pass.
+func TestAPairingInActiveUseDoesNotExpire(t *testing.T) {
+	f := newExpiryFixture(t)
+	pairingID := f.mint("account-in-active-use")
+	shim := f.dialShimLeg(t, pairingID)
+
+	// 20h in — still inside the original TTL — the user asks Claude something.
+	// The relay is blind, so any bytes are a frame as far as it is concerned.
+	f.clock.Advance(20 * time.Hour)
+	writeFrame(t, shim, []byte("an opaque frame the relay cannot open"))
+
+	// 30h in: past the mint + 24h the old code would have expired at.
+	f.clock.Advance(10 * time.Hour)
+	waitUntil(t, "the relayed frame to refresh the pairing's idle expiry", func() bool {
+		_, ok := f.byPairingID(pairingID)
+		return ok
+	})
+	// And the sweep agrees — it is the half that closes the legs.
+	f.cleanup()
+	if _, ok := f.byPairingID(pairingID); !ok {
+		t.Fatal("the expiry sweep dropped a pairing that relayed a frame 10h ago")
+	}
+	if _, ok := f.byAccountID("account-in-active-use"); !ok {
+		t.Fatal("the account lost its in-use pairing")
+	}
+}
+
+// TestAnIdlePairingStillExpires, with the legs closed on 4404. Idle expiry is the
+// feature, not the bug: a pairing nobody uses is a live route someone could dial.
+//
+// The leg here is CONNECTED and silent, which pins the other half of the
+// decision — a reconnecting PWA tab must not keep an abandoned pairing alive on
+// its own, or the TTL is unbounded.
+func TestAnIdlePairingStillExpires(t *testing.T) {
+	f := newExpiryFixture(t)
+	pairingID := f.mint("account-gone-quiet")
+	shim := f.dialShimLeg(t, pairingID)
+
+	f.clock.Advance(pairingTTL + time.Minute)
+	f.cleanup()
+
+	if _, ok := f.byPairingID(pairingID); ok {
+		t.Fatal("an idle pairing survived its TTL — abandoned pairings must age out")
+	}
+	if _, ok := f.byAccountID("account-gone-quiet"); ok {
+		t.Fatal("an idle pairing survived its TTL on the account index")
+	}
+	// 4404, not 4409: expiry leaves the account with no pairing at all, so the
+	// browser's vault record really is a tombstone.
+	expectClose(t, shim, StatusNoPairing, "leg of an expired pairing")
 }
 
 // respondOnDevice is a stand-in for the browser responder (C4): it opens each
