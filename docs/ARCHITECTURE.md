@@ -768,6 +768,19 @@ near zero, and `demoRecords()` already returns a plain record array that `store.
 no server change at all) and real ownership of the data, so nothing is deceived: the user chose to
 put sample data in their own vault.
 
+**Two record types are deliberately withheld from that load, and one of them is a safety property:**
+
+- **`settings`** — the one fixture record whose id collides with something the user owns, and it
+  carries `quoteProviders`, i.e. their API keys. Writing it would reset the reporting currency and
+  delete every credential. `ppimport.js` declines to emit one for the same reason.
+- **`fx`** — withheld whenever the user's own records name a foreign currency, and a withholding load
+  also *purges* rates an earlier load wrote. `fx` records are keyed by `(pair, date)` with no
+  provenance, so unlike every other type they cannot be isolated by an id namespace: invented fixings
+  land in the same key space as real ECB ones, and `createFxRates` breaks a same-day tie **by rate**,
+  so the invented rate can win. Measured at roughly a 10% silent revaluation of a real dollar
+  holding, with no issue raised and no way for a re-fetch to correct it. Withholding is the only
+  defence available until `fx` records carry provenance.
+
 ## 13. Tracks
 
 Two tracks, disjoint file ownership, meeting only at §3.
