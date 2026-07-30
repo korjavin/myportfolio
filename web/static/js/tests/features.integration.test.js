@@ -19,7 +19,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTxBody, txToForm, buildPriceChunk } from '../features/forms.js';
+import { buildTxBody, txToForm, buildPriceChunk, deriveTxField } from '../features/forms.js';
 import * as fmt from '../features/fmt.js';
 import { createPortfolioDomain } from '../../../domain/portfolio.js';
 import { createPerformanceDomain } from '../../../domain/perf.js';
@@ -108,6 +108,30 @@ describe('screens → engine: adding a transaction', () => {
         assert.equal(position.marketValue, null);
         assert.equal(fmt.money(position.marketValue), fmt.UNKNOWN);
         assert.ok(snap.issues.some((i) => i.code === 'no_price'));
+    });
+
+    test('a buy entered as shares x price is the same record as one typed by hand', async () => {
+        // The acceptance criterion for the price field: the user reads "10
+        // shares @ 123.00, 4.56 commission" off a broker confirmation and types
+        // exactly that, instead of multiplying by hand. What lands in the
+        // record — and therefore in the cost basis — must be identical to
+        // BUY_FORM, which is the hand-multiplied version of the same trade.
+        const priced = { ...BUY_FORM, price: '123.00' };
+        priced.amount = deriveTxField('amount', priced);
+        assert.equal(priced.amount, '1234.56', 'gross 1230.00 + the 4.56 fee that left the account');
+
+        const { records, portfolio } = await fixture();
+        await records.put(RECORD.transaction, 'tx_1', buildTxBody(DEPOSIT_FORM).body);
+        await records.put(RECORD.transaction, 'tx_2', buildTxBody(priced).body);
+
+        const snap = await portfolio.snapshot();
+        assert.deepEqual(buildTxBody(priced).body, buildTxBody(BUY_FORM).body);
+        assert.equal(snap.positions[0].cost, 123456);
+        assert.equal(snap.totals.cash, 1000000 - 123456);
+
+        // …and reopening that record shows the price back, which is not stored:
+        // it is derived from the shares and the amount every time.
+        assert.equal(deriveTxField('price', { ...txToForm(buildTxBody(priced).body), type: 'buy' }), '123.00');
     });
 
     test('a trade entered in the form is attributed to a depot, not to nothing', async () => {

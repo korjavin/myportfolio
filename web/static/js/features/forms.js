@@ -21,7 +21,7 @@
 //
 // Pure module — no DOM, so `node --test` can exercise it without jsdom.
 
-import { parseFixed, formatFixed, DECIMALS } from '../../../domain/money.js';
+import { parseFixed, formatFixed, marketValue, perShare, DECIMALS } from '../../../domain/money.js';
 import { TX_TYPES, RECORD } from '../../../domain/schema.js';
 
 /** Types that book against a security. Everything else is cash-only. */
@@ -117,6 +117,58 @@ export function txToForm(record) {
         note: record.note ?? '',
         currency: record.currency ?? '',
     };
+}
+
+/** Optional form string as units, or null when blank/unparseable. */
+function optional(raw, decimals) {
+    const s = String(raw ?? '').trim();
+    if (s === '') return null;
+    try {
+        return parseFixed(s, decimals);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The third of {shares, price, amount} from the other two, as a form string.
+ *
+ * A broker's buy confirmation states shares and a PRICE PER SHARE; `amount` is
+ * what the form stores. Multiplying the two by hand is where a user rounds a
+ * four-decimal price wrong, so the form does it — through §5 helpers, because
+ * shares (1e8) x price (1e8) is a 1e16-scaled product that has to come back down
+ * to 1e2, and `shares * price / 1e14` in doubles loses cents on any realistic
+ * holding. marketValue() and perShare() do it in BigInt and round exactly once.
+ *
+ * FEES AND TAXES ARE INSIDE `amount`, not beside it. portfolio.js: "`amount` is
+ * the cash that moves ... on a buy it is gross + fees + taxes (what left the
+ * account), on a sell it is gross - fees - taxes (what arrived)" — PP's own
+ * model, which is why an import round-trips. So the derived amount must carry
+ * them, or every computed buy would be under-stated by its commission and the
+ * cost basis with it. This is the acceptance criterion: what this returns is
+ * what the user would have typed by hand.
+ *
+ * Returns '' when the inputs cannot produce a number yet (a half-typed field, no
+ * shares). The caller leaves the existing value alone rather than blanking it.
+ */
+export function deriveTxField(target, values) {
+    const shares = optional(values.shares, DECIMALS.shares);
+    if (shares === null || shares <= 0) return '';
+    // Which way fees/taxes sit relative to the gross trade value, per the above.
+    const sign = values.type === 'sell' ? -1 : 1;
+    // Integer cents, not floats: safe-integer addition is exact, and these have
+    // already been through parseFixed.
+    const costs = (optional(values.fees, DECIMALS.amount) ?? 0)
+        + (optional(values.taxes, DECIMALS.amount) ?? 0);
+
+    if (target === 'amount') {
+        const price = optional(values.price, DECIMALS.price);
+        if (price === null) return '';
+        return forInput(marketValue(shares, price) + sign * costs, DECIMALS.amount, 2);
+    }
+    const amount = optional(values.amount, DECIMALS.amount);
+    if (amount === null) return '';
+    return forInput(perShare(amount - sign * costs, shares), DECIMALS.price, 2);
 }
 
 /**

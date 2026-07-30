@@ -120,6 +120,16 @@ export function marketValue(shares, price) {
   return toSafeNumber(divRound(BigInt(shares) * BigInt(price), POW10(drop)));
 }
 
+// perShare: amount (1e2) / shares (1e8) -> price (1e8). The inverse of
+// marketValue, for the add-transaction form, where a broker states shares and a
+// total and the price per share is the field the user has to fill in. Rounded
+// once at the price scale, and exact where it can be: perShare(marketValue(s,
+// p), s) === p whenever s x p has no sub-cent remainder to lose.
+export function perShare(amount, shares) {
+  const scale = Number(POW10(DECIMALS.shares + DECIMALS.price - DECIMALS.amount));
+  return proportion(amount, scale, shares);
+}
+
 // convert: amount (1e2) x FX rate (1e8) -> amount (1e2).
 export function convert(amount, rate) {
   assertUnits(amount, 'convert amount');

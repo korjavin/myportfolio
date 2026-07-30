@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  DECIMALS, parseFixed, formatFixed, toFloat, marketValue, convert, proportion,
+  DECIMALS, parseFixed, formatFixed, toFloat, marketValue, perShare, convert, proportion,
 } from './money.js';
 
 const { amount, shares, price, fx } = DECIMALS;
@@ -129,6 +129,17 @@ test('marketValue multiplies 1e8 shares by a 1e8 price into a 1e2 amount', () =>
   assert.equal(marketValue(0, 4123500000), 0);
   // A short position is worth a negative amount.
   assert.equal(marketValue(-200000000, 4123500000), -8247);
+});
+
+test('perShare inverts marketValue: a 1e2 amount over 1e8 shares is a 1e8 price', () => {
+  // 2 shares for $82.47 is $41.235 a share — marketValue's own example, read
+  // the other way, which is the direction the add-transaction form needs.
+  assert.equal(perShare(8247, 200000000), 4123500000);
+  assert.equal(perShare(marketValue(200000000, 4123500000), 200000000), 4123500000);
+  // A four-decimal price survives: 1000 shares for $1234.50 is $1.2345.
+  assert.equal(perShare(123450, 100000000000), 123450000);
+  // Zero shares has no price at all — never Infinity, never 0.
+  assert.throws(() => perShare(8247, 0), RangeError);
 });
 
 test('marketValue stays exact where a float product would not', () => {
