@@ -8,7 +8,7 @@
 
 services:
   myportfolio:
-    image: ghcr.io/korjavin/myportfolio:latest
+    image: ghcr.io/korjavin/myportfolio:2bd1610f0344dcd9227066b5d0efaa052f3bced4
     container_name: myportfolio
     restart: unless-stopped
 
