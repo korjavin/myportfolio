@@ -658,6 +658,15 @@ func newExpiryFixture(t *testing.T) *expiryFixture {
 	return &expiryFixture{pairingTable: table, clock: clock, srv: srv}
 }
 
+// expiryOf reads a record's deadline under its lock, which is where touch writes
+// it. It is also the tests' sync point: a frame is relayed asynchronously, so
+// "the refresh landed" has to be waited for rather than assumed.
+func (f *expiryFixture) expiryOf(rec *pairingRecord) time.Time {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.expiresAt
+}
+
 func (f *expiryFixture) dialShimLeg(t *testing.T, pairingID string) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testWait)
@@ -668,6 +677,21 @@ func (f *expiryFixture) dialShimLeg(t *testing.T, pairingID string) *websocket.C
 		t.Fatalf("dial shim leg: %v", err)
 	}
 	t.Cleanup(func() { conn.CloseNow() })
+
+	// Dial returns as soon as the CLIENT sees the 101 — serveLeg may not have
+	// registered the leg on the record yet. A test that winds the clock and sweeps
+	// before it does is asserting against a pairing with no legs to close, and
+	// waits out the full close deadline for a close nobody could send. Caught by
+	// -count=2 on the whole package, where the server goroutine lags enough to
+	// lose the race about half the time.
+	rec, ok := f.byPairingID(pairingID)
+	if !ok {
+		t.Fatalf("pairing %s is not live at dial time", pairingID)
+	}
+	waitUntil(t, "the shim leg to register with its pairing", func() bool {
+		// The shim slot, seen from the device side.
+		return rec.peerConn(true) != nil
+	})
 	return conn
 }
 
@@ -696,19 +720,29 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 func TestAPairingInActiveUseDoesNotExpire(t *testing.T) {
 	f := newExpiryFixture(t)
 	pairingID := f.mint("account-in-active-use")
+	rec, ok := f.byPairingID(pairingID)
+	if !ok {
+		t.Fatal("a freshly minted pairing is not in the table")
+	}
+	minted := f.expiryOf(rec)
 	shim := f.dialShimLeg(t, pairingID)
 
 	// 20h in — still inside the original TTL — the user asks Claude something.
 	// The relay is blind, so any bytes are a frame as far as it is concerned.
 	f.clock.Advance(20 * time.Hour)
 	writeFrame(t, shim, []byte("an opaque frame the relay cannot open"))
+	// Wait for the frame to actually reach serveLeg before winding on: touch
+	// extends a LIVE pairing only, so a clock wound past the deadline first would
+	// be testing the resurrection guard instead.
+	waitUntil(t, "the relayed frame to push the pairing's idle expiry out", func() bool {
+		return f.expiryOf(rec).After(minted)
+	})
 
 	// 30h in: past the mint + 24h the old code would have expired at.
 	f.clock.Advance(10 * time.Hour)
-	waitUntil(t, "the relayed frame to refresh the pairing's idle expiry", func() bool {
-		_, ok := f.byPairingID(pairingID)
-		return ok
-	})
+	if _, ok := f.byPairingID(pairingID); !ok {
+		t.Fatal("a pairing that relayed a frame 10h ago expired on its ORIGINAL mint deadline")
+	}
 	// And the sweep agrees — it is the half that closes the legs.
 	f.cleanup()
 	if _, ok := f.byPairingID(pairingID); !ok {
@@ -742,6 +776,35 @@ func TestAnIdlePairingStillExpires(t *testing.T) {
 	// 4404, not 4409: expiry leaves the account with no pairing at all, so the
 	// browser's vault record really is a tombstone.
 	expectClose(t, shim, StatusNoPairing, "leg of an expired pairing")
+}
+
+// TestALateFrameDoesNotResurrectAnExpiredPairing. The sweep is hourly but every
+// lookup rejects an expired record on sight, so there is a window where the
+// record is unreachable-but-present. A frame arriving on a leg that stayed
+// connected across the expiry instant must not renew it there, or a pairing
+// nobody can dial keeps itself alive one grace window at a time, forever.
+//
+// Driven at touch() rather than through a socket: the guard lives there, and the
+// serveLeg wiring is already pinned by TestAPairingInActiveUseDoesNotExpire.
+func TestALateFrameDoesNotResurrectAnExpiredPairing(t *testing.T) {
+	f := newExpiryFixture(t)
+	pairingID := f.mint("account-that-went-quiet")
+	rec, ok := f.byPairingID(pairingID)
+	if !ok {
+		t.Fatal("a freshly minted pairing is not in the table")
+	}
+
+	// Past the TTL, but before the hourly sweep has run.
+	f.clock.Advance(pairingTTL + time.Minute)
+	f.touch(rec)
+
+	if _, ok := f.byPairingID(pairingID); ok {
+		t.Fatal("a frame renewed an already-expired pairing — expiry must be monotone")
+	}
+	f.cleanup()
+	if _, ok := f.byID[pairingID]; ok {
+		t.Fatal("the sweep did not drop the expired pairing")
+	}
 }
 
 // respondOnDevice is a stand-in for the browser responder (C4): it opens each

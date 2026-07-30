@@ -398,11 +398,20 @@ func newPairingTable(ttl time.Duration) *pairingTable {
 // Deliberately NOT called when a leg merely connects: the PWA tab reconnects on
 // its own and would keep an abandoned pairing alive forever. Frames mean a
 // person is asking something.
+// It extends a LIVE pairing only. Expiry has to be monotone: the sweep runs
+// hourly while every lookup rejects an expired record on sight, so without this
+// guard a leg that stayed connected across the expiry instant could renew inside
+// that grace window — once a day, forever — resurrecting a pairing no fresh dial
+// could reach. An already-expired record is left exactly as the sweep will find
+// it. (Inlined rather than calling isExpired: sync.Mutex does not re-enter.)
 func (t *pairingTable) touch(rec *pairingRecord) {
-	expiresAt := t.now().Add(t.ttl)
+	now := t.now()
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	rec.expiresAt = expiresAt
+	if now.After(rec.expiresAt) {
+		return
+	}
+	rec.expiresAt = now.Add(t.ttl)
 }
 
 // startCleanup sweeps expired pairings, mirroring rateLimiter.startCleanup —
