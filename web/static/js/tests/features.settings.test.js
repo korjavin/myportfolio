@@ -615,8 +615,16 @@ describe('Connect Claude — the card is wired to these functions', () => {
         assert.match(disconnect[0], /await revokePairing\(\{ http \}\);\s*await purgePairing\(records\);/);
     });
 
-    test('connect, finish and disconnect all re-run the responder without a reload', () => {
-        assert.equal(source.split('refreshResponder({ records })').length - 1, 3);
+    test('finish and disconnect re-run the responder without a reload, and nothing else does', () => {
+        // Exactly two calls, and the count is the assertion. A third — the
+        // obvious one, right after minting — is dropped by mcp-responder's
+        // `electing` guard if its election is still in flight, and takes
+        // Finish's call down with it: a saved pairing that answers nothing
+        // until a reload. See the comment in onConnect.
+        assert.equal(source.split('refreshResponder({ records })').length - 1, 2);
+        for (const fn of ['async function onDisconnect', 'busy(\'Storing the key…\')']) {
+            assert.ok(source.includes(fn), `${fn} not found`);
+        }
     });
 });
 

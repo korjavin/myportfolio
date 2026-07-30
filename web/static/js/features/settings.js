@@ -545,9 +545,24 @@ function connectClaudeCard() {
             fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Try again', paint));
             return;
         }
-        // mintPairing dropped the old record; stop the device leg still dialling
-        // the pairing that just died, so it does not sit in a 4409 loop.
-        refreshResponder({ records });
+        // Deliberately NOT refreshResponder() here, and the reason is a race
+        // codex found: refreshResponder returns early while an election is still
+        // in flight (`electing`), so a reconcile whose readPairing landed before
+        // the user pressed Finish releases the lock with no responder — and the
+        // Finish call is the one that gets dropped. The result is a saved pairing
+        // that answers nothing until a reload, i.e. "no device online" with an
+        // unlocked tab open, which is the least attributable symptom this whole
+        // feature can produce.
+        //
+        // Awaiting it instead is worse: the promise settles only once the lock is
+        // GRANTED, so a tab queued behind another tab's responder would sit on
+        // "Starting a pairing…" forever.
+        //
+        // Nothing is needed here anyway. The relay closed the old device leg with
+        // 4409 the moment mint() replaced the pairing, and mcp-responder's
+        // onStalePairing stops that responder and releases the election on its
+        // own; a leg that was offline for it takes the same 4409 on its next dial.
+        // Finish's refreshResponder is then the only election in play.
         paintCode(minted);
     }
 
