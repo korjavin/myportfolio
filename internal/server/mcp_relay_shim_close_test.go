@@ -90,7 +90,10 @@ func waitDeviceClosed(t *testing.T, closed <-chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-closed:
-	case <-time.After(5 * time.Second):
+	// testWait, not a tight 5s: same liveness-not-latency reasoning as testWait
+	// itself, and time.After is the shape the earlier sweep for
+	// context.WithTimeout deadlines did not see.
+	case <-time.After(testWait):
 		t.Fatalf("%s: the relay never closed the device leg", what)
 	}
 }

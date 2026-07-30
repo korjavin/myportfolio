@@ -385,6 +385,11 @@ over near-verbatim. Four differences:
    **The MCP relay is back in scope** — this clause used to say "no MCP relay, do not port `mcp*`",
    and the owner reversed it: an AI connector is a headline goal for this product, not a nicety.
    See §11. `sealMCPFrame`/`openMCPFrame` are therefore restored to `crypto.js` under `mp/v1/mcp`.
+   **It carries its own honest-limitations delta, and it belongs in the same breath as the ones
+   below**: the relay cannot read a frame but does see frame sizes, timing and pairing ids; the
+   pairing key lives in a vault record so *any* unlocked device can answer; and whatever the AI is
+   told leaves this trust boundary entirely for the model provider. §11 states each in full, and
+   `docs/AI-CONNECTOR.md` states them to the user.
 4. **No oplog** — §6 replaces `sync.js`'s ops machinery with the state blob. Keep its
    `deriveKData`/`encryptSnapshot`-shaped primitives, drop `encryptRecord`/seq handling.
 

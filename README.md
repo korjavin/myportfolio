@@ -28,6 +28,33 @@ that only ever sees ciphertext.
   default, so the server never learns which tickers you own. A proxy exists for users without a key,
   off by default and behind an explicit consent screen that says exactly what it leaks.
 
+## Ask an AI about your portfolio
+
+The point of keeping a rigorous, complete portfolio locally is being able to ask questions of it. So
+there is an MCP connector: **Claude Desktop or Claude Code, talking to your own portfolio, through a
+server that cannot read a word of it.** Eight read-only operations — holdings, valuation, performance
+(TTWROR and IRR), price history, transactions, and the list of everything the engine could not
+compute.
+
+It works the only way it can when the server holds nothing but ciphertext: a small shim process on
+your machine talks end-to-end encrypted to *your own unlocked browser tab*, which computes the
+answers. The server is a blind pipe.
+
+What that means in practice, up front rather than as a discovery:
+
+- **A question only works while a tab of the app is open and unlocked** on one of your devices. There
+  is no server-side fallback, by design.
+- **It is read-only.** It cannot add, change or delete anything.
+- **The shim is not published as a binary** — you build it with `go build ./cmd/mcpshim`, so a Go
+  toolchain on the machine running Claude is a prerequisite today.
+- **The relay in the middle cannot read your data, but it does see message sizes and timing**, and
+  whatever you tell the AI leaves this app for the model provider. Both are real costs, and both are
+  stated in full rather than in a footnote.
+
+[`docs/AI-CONNECTOR.md`](docs/AI-CONNECTOR.md) is the setup guide and the honest threat-model delta.
+Note that `?demo=1` deliberately does **not** answer connector calls — a demo tab would serve
+fabricated trades to an agent as if they were real.
+
 ## Honest limitations
 
 - **Web-delivered cryptography has a ceiling.** End-to-end encryption protects data at rest and in
