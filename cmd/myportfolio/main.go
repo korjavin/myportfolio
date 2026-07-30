@@ -58,6 +58,17 @@ func run() error {
 		return err
 	}
 
+	// The pre-fetched quote universe (ARCHITECTURE.md §7,
+	// internal/server/universe.go). Started here rather than inside server.New so
+	// the handler is testable without a goroutine reaching for the internet, and
+	// so it stops with the process's signal context.
+	//
+	// Nothing is configured for it: no API key anywhere, in the environment or in
+	// the vault. It fetches a fixed symbol list from a keyless upstream and serves
+	// one identical blob to everyone, and if that upstream is unavailable the app
+	// falls back to the user's own key exactly as before.
+	go server.StartQuoteUniverse(ctx, db)
+
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: server.New(web.StaticFS, db, sessionSecret, trustedProxies),

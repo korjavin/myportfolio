@@ -321,7 +321,8 @@ hold. Provider config and API keys live in the vault as `settings.quoteProviders
 
 - Crypto: CoinGecko (CORS-enabled, free tier works keyless).
 - Stocks/ETFs: a CORS-enabled provider the user brings a key for (Finnhub / Twelve Data /
-  Alpha Vantage). Yahoo Finance is **not** usable browser-direct — it blocks CORS.
+  Alpha Vantage), or — for a symbol on the pre-fetched universe list below — no key at all.
+  Yahoo Finance is **not** usable browser-direct: it blocks CORS.
 - The document's CSP `connect-src` is a **static** allowlist of the outbound hosts, **derived at
   startup from `quotes.js`'s frozen `QUOTE_HOSTS` and `fx.js`'s frozen `FX_HOSTS`** rather than
   restated in Go — `internal/server` lifts them out of the embedded domain modules with one
@@ -354,10 +355,55 @@ hold. Provider config and API keys live in the vault as `settings.quoteProviders
   amount. A fourth host reds `TestQuoteHostAllowlist` until a human types it, and that gate is the
   point: adding egress must be a decision, never a side effect.
 
-**Opt-in proxy fallback**: `GET /api/quote?provider=&symbol=` for users with no key. It is gated
-behind an explicit consent screen stating plainly that *the server will see which symbols you hold*.
-Off by default, per-account flag, revocable. It is the only endpoint on the server that sees anything
-meaningful, and it must never be silently enabled by any other flow.
+### The pre-fetched universe — keyless stocks without giving any of the above up
+
+Measured 2026-07-30: **there is no keyless CORS-enabled stock provider.** Yahoo's
+`/v8/finance/chart` answers correct JSON and sends no `access-control-allow-origin`, so the browser
+completes the request and is refused the read; Stooq serves a JavaScript proof-of-work challenge, not
+CSV. So for a user with no key the choice was never "proxy or browser-direct" — it was "server-side
+fetch or no stock quotes at all". (Do not "verify" a candidate quote host with plain `curl`. Grep the
+response headers for `access-control-allow-origin`.)
+
+`GET /api/quotes/universe` answers that without spending the privacy property, and the reason is
+structural rather than a promise: **it takes no input.** The server fetches a fixed, checked-in list
+of a few hundred symbols on a timer and serves one blob of daily closes that is byte-identical for
+every caller; the client filters it to its own holdings locally. There is no consent screen because
+there is nothing to consent to, no per-account flag because there is nothing to scope, and nothing to
+revoke. Yahoo is keyless *server-side*, where CORS does not apply, so **no API key exists anywhere** —
+not in the vault, not in the deployment environment.
+
+- **It must never accept a symbol parameter.** The instant it does it becomes the opt-in proxy below,
+  with that endpoint's privacy cost and none of its consent flow. Two endpoints, never one with a
+  parameter. `TestUniverseIgnoresQuery` pins the behaviour and
+  `TestUniverseHandlerReadsNoRequestInput` pins the source.
+- **Yahoo is a soft dependency.** It is undocumented, unversioned, unblessed, and can begin refusing
+  datacentre IPs without notice — it was answering HTTP 429 to the machine this was written on. So a
+  failed refresh keeps the previous blob and lets each entry's own `date` show the staleness; it is
+  never a hard error and never an empty blob overwriting good data. The BYO-key path above stays the
+  supported one and covers every symbol the list misses.
+- **No CSP change, and Yahoo is not in `QUOTE_HOSTS`.** This is server-to-server; the browser only
+  ever calls our own origin, which `connect-src 'self'` already admits. Adding it would widen egress
+  for a host the browser still cannot read from.
+- **Nothing of the caller goes upstream** — no IP, no cookies, no `Referer` — and nothing about who
+  asked is logged. Every request is identical, so a count is all there is worth recording.
+- The client matches on **ticker and currency both**. A bare ticker can name different instruments in
+  different symbologies, and Yahoo quotes London lines in pence (`GBp`); requiring the currency to
+  agree with the security's own turns "probably the same instrument" into "wrong by 100x is
+  impossible", and a mismatch is a fallthrough to the configured provider rather than a guess.
+- Money crosses the float boundary **exactly once**, in `quotes.js`'s `priceUnits`/`parseFixed` at the
+  §5 price scale of 1e8. The server forwards the upstream's decimal literal as a *string* and never
+  parses a price, so the universe path and the Twelve Data path produce the same integer from the same
+  decimal.
+- **Not wired into `?demo=1`** (§12): the fixture carries its own deterministic price history, and
+  live prices would break the tests that pin it and show real market prices against invented share
+  counts.
+
+**Opt-in proxy fallback**: `GET /api/quote?provider=&symbol=` for users with no key *and* a symbol
+outside the universe. It is gated behind an explicit consent screen stating plainly that *the server
+will see which symbols you hold*. Off by default, per-account flag, revocable. It is the only endpoint
+on the server that sees anything meaningful, and it must never be silently enabled by any other flow.
+Note that caching it would change its economics and **not** its privacy: on a single-user or family
+deployment the union of cached symbols *is* the user's holdings.
 
 Fetched quotes are written to `price` records, so **the last known price is always available
 offline** and valuation never depends on the network.

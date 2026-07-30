@@ -38,7 +38,7 @@
 // "versioned immutable assets" mechanism — there is no build step to
 // fingerprint filenames, and the server sends `Cache-Control: no-store` so the
 // HTTP cache never second-guesses the version we asked for.
-const CACHE_VERSION = 'v14';
+const CACHE_VERSION = 'v15';
 const CACHE = `myportfolio-shell-${CACHE_VERSION}`;
 
 // Everything the shell needs to boot with no network. Kept in sync with
@@ -154,9 +154,17 @@ self.addEventListener('fetch', (event) => {
 
     const url = new URL(req.url);
     if (url.origin !== self.location.origin) return;
-    // The API is the vault track's encrypted state blob and the opt-in quote
-    // proxy. Neither is cacheable, and caching a decrypted-adjacent response by
-    // accident is a real risk, so leave them to the network.
+    // The API is the vault track's encrypted state blob, the MCP relay, and the
+    // pre-fetched quote universe. Caching a decrypted-adjacent response by
+    // accident is a real risk, so the whole prefix is left to the network.
+    //
+    // The universe blob is the one /api/ response that IS cacheable, and it is
+    // still excluded on purpose: the handler below is cache-first, which is the
+    // code pin, so a cached blob would keep serving yesterday's closes until
+    // CACHE_VERSION next changed. It carries `Cache-Control: public, max-age` and
+    // an ETag, so the HTTP cache revalidates it correctly with no help from here
+    // — and offline valuation never needed it anyway, because every close it has
+    // ever produced is already in a `price` record.
     if (url.pathname.startsWith('/api/')) return;
     // Never cache the worker script. The browser's own update check bypasses
     // this handler, so caching it changes no behaviour — but a page-level

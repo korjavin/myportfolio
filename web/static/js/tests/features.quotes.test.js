@@ -334,13 +334,23 @@ describe('quotes — the wiring, guarded at the source', () => {
             'no timer and no retry loop belongs in the refresh path');
     });
 
-    test('the fetch is browser-direct and never touches our own origin', () => {
-        // The privacy differentiator (§7): the server must never learn a
-        // ticker. A path on our origin, or a URL built here at all, is the
-        // failure — the domain module owns every provider URL.
+    test('no URL is built here — the domain module owns every one of them', () => {
+        // The privacy differentiator (§7): the server must never learn a ticker.
+        // The domain module decides what is contacted (a provider host with the
+        // user's key, plus the parameterless universe blob on our own origin);
+        // this file only supplies the transport. A URL literal here — an origin,
+        // an /api/ path, anything — means the wiring started making that decision.
         assert.match(quotesSource, /http:\s*\(url,\s*init\)\s*=>\s*window\.fetch\(url,\s*init\)/);
         assert.doesNotMatch(quotesSource, /['"`]\/api\//);
         assert.doesNotMatch(quotesSource, /https?:\/\//);
+    });
+
+    test('demo mode switches the shared universe blob off', () => {
+        // Landmine 5 / §12: the demo fixture carries its own deterministic price
+        // history, so live prices would break the tests that pin it AND show real
+        // market prices against invented share counts. The gate is here rather
+        // than in boot.js because this module is loaded by the screens.
+        assert.match(quotesSource, /universe:\s*!new URLSearchParams\(globalThis\.location\?\.search[^)]*\)\.has\('demo'\)/);
     });
 
     test('the report survives the re-render its own write causes', () => {
