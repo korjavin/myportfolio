@@ -3,8 +3,11 @@ package server
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -14,10 +17,16 @@ import (
 
 // remoteFixture is a signed-up account plus a registry over its database, and
 // the pairing key the browser would have generated. No websockets: nothing in
-// this bead dials, so nothing here waits on one.
+// these tests dials, so nothing here waits on one — which is also why the route
+// tests at the bottom of this file live here and not next to the endpoint's.
+//
+// `registry` is a SECOND registry over the same database, for the tests that
+// drive enable/disable directly. The route tests deliberately go through
+// f.vault.api.mcpRemote instead — the one the served handler actually holds.
 type remoteFixture struct {
 	*vault
 	account  string
+	session  *http.Cookie
 	registry *mcpRemoteRegistry
 	key      []byte
 	pc       *mcpshim.PairingCode
@@ -26,11 +35,12 @@ type remoteFixture struct {
 func newRemoteFixture(t *testing.T) *remoteFixture {
 	t.Helper()
 	v := newVault(t)
-	account, _, _ := v.signup()
+	account, session, _ := v.signup()
 	key := testPairingKey(t)
 	return &remoteFixture{
 		vault:    v,
 		account:  account,
+		session:  session,
 		registry: newMCPRemoteRegistry(v.db, testSessionSecret),
 		key:      key,
 		pc:       &mcpshim.PairingCode{RelayURL: "wss://vault.localhost/api/mcp/relay", PairingID: "pairing-1", Key: key},
@@ -426,5 +436,192 @@ func TestMCPRemoteEnableRejectsAWrongLengthKey(t *testing.T) {
 	}
 	if _, ok := f.row(t); ok {
 		t.Error("the rejected enable persisted a row anyway")
+	}
+}
+
+// --- The Settings routes ----------------------------------------------------
+//
+// Over the SERVED handler, so the registry under test is the one /mcp/{token}
+// authenticates against. No websocket is opened anywhere below: whether a token
+// authenticates is observable from the endpoint's status code alone, and waiting
+// on a relay round trip is what makes a test in this package flake.
+
+// enableRoute posts a pairing to the real POST /api/mcp/remote, exactly as
+// Settings does. `key` is []byte, so encoding/json sends the standard-base64
+// string crypto.js's toBase64 produces — the same encoding the handler decodes.
+func (f *remoteFixture) enableRoute(pc *mcpshim.PairingCode, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	return f.do(http.MethodPost, "/api/mcp/remote", map[string]any{
+		"relay_url":  pc.RelayURL,
+		"pairing_id": pc.PairingID,
+		"key":        pc.Key,
+	}, cookies...)
+}
+
+func tokenFromBody(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body hostedConnectorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode the connector response: %v", err)
+	}
+	return body.Token
+}
+
+// The bead's acceptance, end to end over the routes: enabling yields a token that
+// authenticates at /mcp/<token>, Settings can read it back after a reload instead
+// of rotating a working connector, and revoking does all three things at once —
+// stops the URL, drops the live entry, and removes the sealed key from disk.
+//
+// They are one test on purpose. "Revoked" is a claim about all three at once, and
+// a revoked connector whose key is still on disk is not revoked.
+func TestHostedConnectorRoutesEnableShowAndRevoke(t *testing.T) {
+	f := newRemoteFixture(t)
+	logged := captureLog(t)
+
+	rec := f.enableRoute(f.pc, f.session)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/mcp/remote = %d, body %q", rec.Code, rec.Body.String())
+	}
+	token := tokenFromBody(t, rec)
+	if token == "" {
+		t.Fatal("enabling returned no token, so there is no URL to paste")
+	}
+
+	// The server now holds this account's pairing key, sealed. That IS Tier 2's
+	// trade (§11) rather than a leak, and pinning it is what makes the revoke
+	// assertion below mean anything.
+	row, ok := f.row(t)
+	if !ok {
+		t.Fatal("the enable route persisted no row")
+	}
+	opened, err := openPairingKey(testSessionSecret, row.PairingKeyCT, row.PairingKeyNonce)
+	if err != nil {
+		t.Fatalf("the stored pairing key does not open: %v", err)
+	}
+	if !bytes.Equal(opened, f.key) {
+		t.Error("the stored pairing key is not the one the browser sent")
+	}
+	if bytes.Contains(row.PairingKeyCT, f.key) {
+		t.Error("the pairing key was stored in the clear")
+	}
+
+	// A reload: Settings asks for the token again rather than making the user
+	// rotate a connector that is already configured in Claude.
+	if got := tokenFromBody(t, f.do(http.MethodGet, "/api/mcp/remote", nil, f.session)); got != token {
+		t.Error("GET /api/mcp/remote did not report the token that was just minted")
+	}
+
+	// The URL is live. Anything but 404 means the token authenticated — the
+	// endpoint answers every authentication failure with one uniform 404, so that
+	// is the whole signal, and it needs no device on the other end.
+	if rec := f.do(http.MethodGet, "/mcp/"+token, nil); rec.Code == http.StatusNotFound {
+		t.Fatal("the freshly minted connector URL 404s, so the token does not authenticate")
+	}
+
+	if rec := f.do(http.MethodDelete, "/api/mcp/remote", nil, f.session); rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE /api/mcp/remote = %d, body %q", rec.Code, rec.Body.String())
+	}
+	if _, ok := f.row(t); ok {
+		t.Error("revoking left the sealed pairing key on disk — a revoked connector whose key is still decryptable is not revoked")
+	}
+	if f.api.mcpRemote.lookup(token) != nil {
+		t.Error("revoking left the live entry, so the old token still authenticates until a restart")
+	}
+	if rec := f.do(http.MethodGet, "/mcp/"+token, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("the revoked connector URL still answers with %d", rec.Code)
+	}
+	if got := tokenFromBody(t, f.do(http.MethodGet, "/api/mcp/remote", nil, f.session)); got != "" {
+		t.Error("GET /api/mcp/remote still reports a token after revoking")
+	}
+
+	// The URL is a capability, and these three routes are the only place one is
+	// minted, read back and destroyed. Not one of them may put it in a log.
+	if strings.Contains(logged.String(), token) || strings.Contains(logged.String(), token[:12]) {
+		t.Errorf("the connector token reached the log:\n%s", logged.String())
+	}
+}
+
+// The revoke must NOT take the relay pairing with it. That pairing is SHARED with
+// Tier 1, so revoking it here would kill a cmd/mcpshim the user is still running
+// and never asked to disconnect. Turning the hosted connector off means the server
+// stops holding a key — nothing else.
+func TestHostedConnectorDisableLeavesTheSharedRelayPairingAlone(t *testing.T) {
+	f := newRemoteFixture(t)
+
+	// The pairing Tier 1's shim is using, minted through the route Settings mints
+	// from. Both tiers ride this one pairing.
+	rec := f.do(http.MethodPost, "/api/mcp/pairings", nil, f.session)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/mcp/pairings = %d", rec.Code)
+	}
+	var minted struct {
+		PairingID string `json:"pairing_id"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&minted); err != nil {
+		t.Fatalf("decode the mint response: %v", err)
+	}
+
+	pc := &mcpshim.PairingCode{RelayURL: f.pc.RelayURL, PairingID: minted.PairingID, Key: f.key}
+	if rec := f.enableRoute(pc, f.session); rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/mcp/remote = %d, body %q", rec.Code, rec.Body.String())
+	}
+	if rec := f.do(http.MethodDelete, "/api/mcp/remote", nil, f.session); rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE /api/mcp/remote = %d", rec.Code)
+	}
+
+	if _, ok := f.api.pairings.byAccountID(f.account); !ok {
+		t.Error("turning the hosted connector off revoked the shared relay pairing, which kills a running cmd/mcpshim the user never asked to disconnect")
+	}
+}
+
+// The SSRF guard reaches the route, and it reaches it because enable takes the
+// request — there is no second check in the handler to forget. A relay_url that is
+// not this server is the caller's own submission, so it is a 400, and nothing is
+// persisted.
+func TestHostedConnectorRouteRefusesAForeignRelayURL(t *testing.T) {
+	f := newRemoteFixture(t)
+
+	foreign := &mcpshim.PairingCode{RelayURL: "wss://169.254.169.254/api/mcp/relay", PairingID: "pairing-1", Key: f.key}
+	rec := f.enableRoute(foreign, f.session)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/mcp/remote with a foreign relay_url = %d, want 400", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "169.254.169.254") {
+		t.Error("the rejection echoes the host back, which reports what this server can reach")
+	}
+	if _, ok := f.row(t); ok {
+		t.Error("the refused enable persisted a row anyway")
+	}
+}
+
+// A wrong-length key is refused by enable's own guard and surfaces as a 400 rather
+// than a 500, because it is the caller's to fix.
+func TestHostedConnectorRouteRefusesAWrongLengthKey(t *testing.T) {
+	f := newRemoteFixture(t)
+
+	short := &mcpshim.PairingCode{RelayURL: f.pc.RelayURL, PairingID: "pairing-1", Key: f.key[:16]}
+	if rec := f.enableRoute(short, f.session); rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/mcp/remote with a 16-byte key = %d, want 400", rec.Code)
+	}
+	if _, ok := f.row(t); ok {
+		t.Error("the refused enable persisted a row anyway")
+	}
+}
+
+// All three routes are account-scoped by the session and nothing else, so a caller
+// without one gets 401 — including the GET, which would otherwise hand a
+// capability to anyone who asked for it.
+func TestHostedConnectorRoutesNeedASession(t *testing.T) {
+	f := newRemoteFixture(t)
+
+	if rec := f.enableRoute(f.pc); rec.Code != http.StatusUnauthorized {
+		t.Errorf("POST /api/mcp/remote without a session = %d, want 401", rec.Code)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		if rec := f.do(method, "/api/mcp/remote", nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s /api/mcp/remote without a session = %d, want 401", method, rec.Code)
+		}
+	}
+	if _, ok := f.row(t); ok {
+		t.Error("an unauthenticated enable persisted a row")
 	}
 }

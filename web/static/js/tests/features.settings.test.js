@@ -60,6 +60,7 @@ const {
     QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders,
     MCP_CODE_ENV_VAR, CONNECTOR_FACTS, relayEndpoint, shimEnvLine,
     mintPairing, savePairing, revokePairing,
+    HOSTED_CONSENT, hostedConnectorURL, readHostedConnector, enableHostedConnector, disableHostedConnector,
     sampleRecords, sampleLoaded, sampleConfirm, sampleRemoveConfirm, isSampleId, ownForeignCurrency,
 } = await import('../features/settings.js');
 
@@ -633,10 +634,208 @@ describe('Connect Claude — the card is wired to these functions', () => {
         // `electing` guard if its election is still in flight, and takes
         // Finish's call down with it: a saved pairing that answers nothing
         // until a reload. See the comment in onConnect.
+        //
+        // One of the two is inside adoptPairing, which is how BOTH tiers store a
+        // key and start answering with it — Finish and the hosted connector's
+        // enable. That is why enabling the hosted connector did not need a third.
         assert.equal(source.split('refreshResponder({ records })').length - 1, 2);
+        assert.match(source, /async function adoptPairing[\s\S]*?await savePairing\([\s\S]*?refreshResponder\(\{ records \}\)/);
         for (const fn of ['async function onDisconnect', 'busy(\'Storing the key…\')']) {
             assert.ok(source.includes(fn), `${fn} not found`);
         }
+    });
+});
+
+// ===========================================================================
+// The hosted connector (bd myportfolio-9f1.3, ARCHITECTURE.md §11 Tier 2)
+// ===========================================================================
+//
+// The URL a user pastes into claude.ai or ChatGPT. This tier is NOT zero
+// knowledge: the server holds the pairing key and sees questions and answers in
+// plaintext in transit. Everything below exists to keep two things true — the
+// user is told that at the moment they choose it, and the URL behaves like the
+// capability it is.
+
+describe('The hosted connector — the URL is the route the server actually serves', () => {
+    test('it is this origin plus the /mcp/<token> route from server.go', () => {
+        // Derived from the registered route, not from a copy of it here: moving
+        // the route then breaks this test rather than breaking every user's URL.
+        const route = fs.readFileSync(SERVER_PATH, 'utf8').match(/mux\.Handle\("POST (\/mcp)\/\{token\}"/);
+        assert.ok(route, 'no POST /mcp/{token} route found in internal/server/server.go');
+        assert.equal(
+            hostedConnectorURL({ origin: 'https://p.example' }, 'tok-123'),
+            `https://p.example${route[1]}/tok-123`
+        );
+    });
+
+    test('it uses the page\'s own origin, so a local http server gets an http URL', () => {
+        // The server cannot compose this: behind a TLS-terminating proxy it sees
+        // only http, and a URL with the wrong scheme is a connector that never
+        // connects.
+        assert.equal(hostedConnectorURL({ origin: 'http://localhost:8080' }, 'tok'), 'http://localhost:8080/mcp/tok');
+    });
+});
+
+describe('The hosted connector — the key crosses the wire exactly once, on enable', () => {
+    const PAIRING = { pairingId: 'prg-abc', key: toBase64(new Uint8Array(32).fill(9)) };
+
+    test('reading the state, enabling and revoking: only the enable carries the key', async () => {
+        const { http, calls } = recordingHttp((url, init) => (init?.method === 'DELETE'
+            ? { ok: true, status: 204 }
+            : { ok: true, status: 200, json: async () => ({ token: 'tok-123' }) }));
+
+        await readHostedConnector({ http });
+        await enableHostedConnector({ http, pairing: PAIRING, relayUrl: RELAY });
+        await disableHostedConnector({ http });
+
+        assert.deepEqual(
+            calls.map((c) => [c.url, c.init?.method ?? 'GET']),
+            [['/api/mcp/remote', 'GET'], ['/api/mcp/remote', 'POST'], ['/api/mcp/remote', 'DELETE']]
+        );
+        const carrying = calls.filter((c) => String(c.init?.body ?? '').includes(PAIRING.key));
+        assert.equal(carrying.length, 1, 'the pairing key crossed the wire more than once, or not at all');
+        assert.equal(carrying[0].init.method, 'POST');
+        // The other two have no body at all, so there is nothing in them to leak.
+        assert.equal(calls[0].init?.body, undefined);
+        assert.equal(calls[2].init.body, undefined);
+    });
+
+    test('the enable body is the pairing, unchanged, plus this origin\'s relay endpoint', async () => {
+        const { http, calls } = recordingHttp(() => ({ ok: true, status: 200, json: async () => ({ token: 'tok' }) }));
+        await enableHostedConnector({ http, pairing: PAIRING, relayUrl: RELAY });
+
+        // The field names the Go handler decodes (hostedConnectorRequest), and the
+        // key in the base64 the record already holds — nothing re-encodes it, so
+        // there is no second encoding to disagree about.
+        assert.deepEqual(JSON.parse(calls[0].init.body), {
+            relay_url: RELAY, pairing_id: 'prg-abc', key: PAIRING.key,
+        });
+    });
+
+    test('a server that returns no token is refused rather than shown as a URL', async () => {
+        // hostedConnectorURL would happily render "<origin>/mcp/", which 404s at
+        // the route and reads to the user as a broken connector.
+        const { http } = recordingHttp(() => ({ ok: true, status: 200, json: async () => ({}) }));
+        await assert.rejects(
+            enableHostedConnector({ http, pairing: PAIRING, relayUrl: RELAY }),
+            /no connector URL/
+        );
+    });
+
+    test('an expired session says so, on every one of the three', async () => {
+        const { http } = recordingHttp(() => ({ ok: false, status: 401 }));
+        await assert.rejects(readHostedConnector({ http }), /session has expired/);
+        await assert.rejects(enableHostedConnector({ http, pairing: PAIRING, relayUrl: RELAY }), /session has expired/);
+        await assert.rejects(disableHostedConnector({ http }), /would not revoke/);
+    });
+
+    test('off is an empty token, not an error', async () => {
+        const { http } = recordingHttp(() => ({ ok: true, status: 200, json: async () => ({ token: '' }) }));
+        assert.equal(await readHostedConnector({ http }), '');
+    });
+});
+
+describe('The hosted connector — revoking hits the route that drops the key', () => {
+    test('the DELETE goes to the route server.go wires to disableHostedConnector', async () => {
+        // The Go side proves that handler drops the row, the sealed key and the
+        // live entry (TestHostedConnectorRoutesEnableShowAndRevoke). This side
+        // proves the button reaches it — hiding the URL while the server kept the
+        // key would look identical in the browser.
+        const server = fs.readFileSync(SERVER_PATH, 'utf8');
+        const route = server.match(/mux\.HandleFunc\("DELETE (\/api\/mcp\/remote)"[\s\S]{0,200}?disableHostedConnector/);
+        assert.ok(route, 'no DELETE /api/mcp/remote route wired to disableHostedConnector in internal/server/server.go');
+
+        const { http, calls } = recordingHttp(() => ({ ok: true, status: 204 }));
+        await disableHostedConnector({ http });
+        assert.deepEqual(calls.map((c) => [c.url, c.init.method]), [[route[1], 'DELETE']]);
+    });
+
+    test('it does NOT touch the relay pairing, which the local shim shares', async () => {
+        // One request, and it is not /api/mcp/pairings. Revoking the shared
+        // pairing here would disconnect a cmd/mcpshim the user is still running
+        // and never asked to touch.
+        const { http, calls } = recordingHttp(() => ({ ok: true, status: 204 }));
+        await disableHostedConnector({ http });
+        assert.equal(calls.length, 1);
+        assert.equal(calls.some((c) => c.url.includes('/api/mcp/pairings')), false);
+    });
+});
+
+describe('The hosted connector — the consent names the trade AND the alternative', () => {
+    test('it says the server can read the traffic, in transit and in plaintext', () => {
+        assert.match(HOSTED_CONSENT, /pairing key/);
+        assert.match(HOSTED_CONSENT, /read your questions and their answers/);
+        assert.match(HOSTED_CONSENT, /in transit/);
+        assert.match(HOSTED_CONSENT, /plaintext/);
+    });
+
+    test('it says the key is stored sealed at rest', () => {
+        assert.match(HOSTED_CONSENT, /sealed at rest/);
+    });
+
+    test('it says this is weaker than the local shim, and is not end-to-end encrypted', () => {
+        // §11: not zero knowledge, "and must never be described as such".
+        assert.match(HOSTED_CONSENT, /weaker/);
+        assert.match(HOSTED_CONSENT, /NOT end-to-end encrypted/);
+        assert.doesNotMatch(HOSTED_CONSENT, /zero.knowledge/i);
+    });
+
+    test('it names Tier 1 as the alternative that keeps the guarantee', () => {
+        // "Weaker" without naming what it is weaker than is a shrug. The name has
+        // to be the one on the button above it in the same card.
+        assert.match(HOSTED_CONSENT, /Connect Claude/);
+        const settings = fs.readFileSync(SETTINGS_PATH, 'utf8');
+        assert.ok(settings.includes("'Connect Claude'"), 'the alternative names a button that is not there');
+    });
+});
+
+describe('The hosted connector — the card is wired to these functions', () => {
+    const source = fs.readFileSync(SETTINGS_PATH, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/[^\n]*$/gm, '');
+
+    test('the section is painted in both connected states', () => {
+        // Both, or a user who has connected the shim cannot find the hosted
+        // option at all.
+        assert.equal(source.split('...hostedSection(hostedToken)').length - 1, 2);
+        assert.match(source, /hostedToken = await readHostedConnector\(\{ http \}\)/);
+    });
+
+    test('a state read that failed shows as unknown, never as off', () => {
+        // Offline is an ordinary state for a PWA, and rendering it as "off" would
+        // invite a user to enable a connector that is already on — which rotates
+        // the token and silently breaks the URL they already pasted into Claude.
+        // It is also why the failed read is swallowed instead of taking the whole
+        // card down: the local connector needs no network to render.
+        assert.match(source, /if \(token === null\)/);
+        assert.match(source, /let hostedToken = null;\s*try \{[\s\S]*?\} catch \{\s*hostedToken = null;\s*\}/);
+    });
+
+    test('enabling is only reachable through the consent dialog', () => {
+        // The load-bearing one. onHostedEnable appears exactly twice — its own
+        // definition and the confirm's onConfirm — so there is no button that
+        // hands the key over without showing HOSTED_CONSENT first.
+        assert.equal(source.split('onHostedEnable').length - 1, 2);
+        assert.match(source, /function confirmHostedEnable\(\)[\s\S]*?message: HOSTED_CONSENT[\s\S]*?onConfirm: onHostedEnable/);
+    });
+
+    test('revoking is only reachable through its own confirm', () => {
+        assert.equal(source.split('onHostedDisable').length - 1, 2);
+        assert.match(source, /function confirmHostedDisable\(\)[\s\S]*?onConfirm: onHostedDisable/);
+    });
+
+    test('the URL is rendered as text, never as markup, and never logged', () => {
+        // It is a capability: ui.el sets textContent, and nothing in this file
+        // may put one in innerHTML or a console line.
+        assert.match(source, /ui\.el\('div', 'wg-code-block mt-md', url\)/);
+        assert.doesNotMatch(source, /innerHTML/);
+        assert.doesNotMatch(source, /console\./);
+    });
+
+    test('an existing pairing is reused rather than re-minted', () => {
+        // Re-minting revokes the pairing, so asking for a URL would stop a shim
+        // the user is running right now.
+        assert.match(source, /async function ensurePairing\(\)[\s\S]*?const existing = await readPairing\(records\);\s*if \(existing\) return existing;/);
     });
 });
 

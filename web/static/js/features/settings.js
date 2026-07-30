@@ -419,6 +419,108 @@ export async function revokePairing({ http }) {
     if (!res.ok) throw new Error(`The server would not revoke the pairing (HTTP ${res.status}).`);
 }
 
+// --- The hosted connector (§11 Tier 2) --------------------------------------
+//
+// A URL the user pastes into claude.ai or ChatGPT, with no local process. The
+// server holds the pairing key for them and therefore SEES THEIR QUESTIONS AND
+// ANSWERS IN PLAINTEXT while relaying. That is the trade, it is not zero
+// knowledge, it is not end-to-end encrypted, and nothing in this section may
+// imply otherwise.
+
+/**
+ * The URL the user pastes into their AI client.
+ *
+ * Composed here rather than returned by the server: this page knows the scheme it
+ * actually reached us over, while the process behind a TLS-terminating proxy sees
+ * only http. `/mcp/<token>` is internal/server/server.go's route.
+ *
+ * THE RESULT IS A CAPABILITY — anyone holding it can query the portfolio while a
+ * tab is unlocked. Never log it, never put it in an error message, and render it
+ * with textContent (ui.el does).
+ */
+export function hostedConnectorURL(loc, token) {
+    return `${loc.origin}/mcp/${token}`;
+}
+
+/**
+ * The account's connector token, or '' when the hosted connector is off.
+ *
+ * Read back on every paint rather than remembered, so a reload shows the URL that
+ * is actually live instead of making the user rotate a connector already
+ * configured in Claude.
+ */
+export async function readHostedConnector({ http }) {
+    const res = await http('/api/mcp/remote', { credentials: 'same-origin' });
+    if (!res.ok) {
+        throw new Error(res.status === 401
+            ? 'Your vault session has expired. Reload the app and unlock it, then try again.'
+            : `The server would not say whether the hosted connector is on (HTTP ${res.status}).`);
+    }
+    const body = await res.json();
+    return typeof body?.token === 'string' ? body.token : '';
+}
+
+/**
+ * Hand the pairing to the server and get the connector token back.
+ *
+ * THIS IS THE ONE REQUEST IN THE WHOLE APP THAT CARRIES THE PAIRING KEY, and it
+ * only happens because the user consented to it (HOSTED_CONSENT) at this exact
+ * moment. `pairing` is core/mcp-responder.js's shape, so `key` is already the
+ * base64 the record holds and the server's []byte field decodes — nothing
+ * re-encodes it on the way through.
+ *
+ * `relayUrl` must be this origin's own relay endpoint. The server checks that
+ * inside `enable` (internal/server/mcp_remote.go), which takes the request, so
+ * the check cannot be routed around from here and there is no second one to add.
+ */
+export async function enableHostedConnector({ http, pairing, relayUrl }) {
+    const res = await http('/api/mcp/remote', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relay_url: relayUrl, pairing_id: pairing.pairingId, key: pairing.key }),
+    });
+    if (!res.ok) {
+        throw new Error(res.status === 401
+            ? 'Your vault session has expired. Reload the app and unlock it, then try again.'
+            : `The server would not enable the hosted connector (HTTP ${res.status}).`);
+    }
+    const body = await res.json();
+    const token = typeof body?.token === 'string' ? body.token : '';
+    if (!token) throw new Error('The server returned no connector URL.');
+    return token;
+}
+
+/**
+ * Revoke the hosted connector: the server drops the row, the sealed key and the
+ * live entry, so the URL stops working now rather than at the next restart.
+ *
+ * It deliberately does NOT revoke the relay pairing, and must not start to. That
+ * pairing is SHARED with the local shim, so revoking it here would disconnect a
+ * shim the user is still running and never asked to touch.
+ */
+export async function disableHostedConnector({ http }) {
+    const res = await http('/api/mcp/remote', { method: 'DELETE', credentials: 'same-origin' });
+    if (!res.ok) throw new Error(`The server would not revoke the hosted connector (HTTP ${res.status}).`);
+}
+
+/**
+ * The consent, shown AT THE MOMENT the key leaves this browser — in the confirm
+ * before enabling — and not once in a document nobody reads.
+ *
+ * It is specific rather than a general caution, because a general one is a shrug:
+ * what the server can read, when, what it keeps, and that this is weaker than the
+ * local shim. It NAMES the alternative, which is the actionable half — Tier 1 is
+ * built, shipped and right above this in the same card, and it keeps the original
+ * guarantee. §11: "not zero knowledge and must never be described as such".
+ */
+export const HOSTED_CONSENT = 'Enabling this hands your pairing key to this server. It then sits '
+    + 'between the AI and this browser and can read your questions and their answers in transit, in '
+    + 'plaintext — the local connector above keeps that key on your own machine, where the server only '
+    + 'carries sealed frames it cannot read. The key is stored sealed at rest and the conversation is '
+    + 'not stored. This is NOT end-to-end encrypted and it is weaker than the local connector: if you '
+    + 'want the original guarantee, use "Connect Claude" above instead and skip this.';
+
 // The three product facts §11 requires the UI to state rather than let a user
 // discover. Each of them is the explanation for a support question this feature
 // would otherwise generate: "why did it stop working", "what does your server
@@ -463,6 +565,50 @@ function connectClaudeCard() {
         actions(retry)
     );
 
+    // One copy button for both tiers. Clipboard access is refused in plenty of
+    // ordinary situations (no permission, an insecure origin, an in-app browser),
+    // and every code block below selects itself in one click, so it says that
+    // instead of leaving a button that quietly does nothing.
+    const copyButton = (label, text) => {
+        const btn = ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', label, async () => {
+            try {
+                await navigator.clipboard.writeText(text);
+                btn.replaceChildren(ui.el('span', null, 'Copied'));
+            } catch {
+                btn.replaceChildren(ui.el('span', null, 'Select it and copy by hand'));
+            }
+        });
+        return btn;
+    };
+
+    // Store the key and make this tab answer with it — the two halves of "now
+    // connected", in the one place both tiers reach them. A second copy of the
+    // pair is how one of them ends up missing the election.
+    async function adoptPairing({ pairingId, key }) {
+        await savePairing({ records, pairingId, key });
+        refreshResponder({ records });
+    }
+
+    // The pairing both tiers ride, minting one if the account has none.
+    //
+    // The hosted tier exists for people who never install the shim, so enabling it
+    // is usually the first thing to need a pairing — and it needs no one-time code,
+    // so it mints and adopts in one step instead of running Tier 1's ceremony. An
+    // EXISTING pairing is reused untouched: re-minting would revoke it, and a shim
+    // the user is running right now would stop working because they asked for a URL.
+    async function ensurePairing() {
+        const existing = await readPairing(records);
+        if (existing) return existing;
+        const minted = await mintPairing({
+            http,
+            records,
+            randomBytes: (buf) => crypto.getRandomValues(buf),
+            relayUrl: relayEndpoint(window.location),
+        });
+        await adoptPairing(minted);
+        return { pairingId: minted.pairingId, key: toBase64(minted.key) };
+    }
+
     async function paint() {
         if (!syncState().connected) {
             body.replaceChildren(
@@ -481,6 +627,18 @@ function connectClaudeCard() {
             return;
         }
 
+        // null means "could not ask" — offline, which is an ordinary state for a
+        // PWA, or an expired session. It is swallowed rather than fatal: the local
+        // connector above needs no network to render, and taking the whole card
+        // down because one fetch failed would hide the tier that still works.
+        // hostedSection says so instead of guessing "off".
+        let hostedToken = null;
+        try {
+            hostedToken = await readHostedConnector({ http });
+        } catch {
+            hostedToken = null;
+        }
+
         const connect = ui.button(
             'wg-toolbar-btn wg-toolbar-btn--primary',
             pairing ? 'Replace with a new code' : 'Connect Claude',
@@ -493,7 +651,8 @@ function connectClaudeCard() {
                     + 'gives you a one-time code for the myportfolio MCP shim; the shim talks to this '
                     + 'browser through a relay that cannot read what it carries.'),
                 ...CONNECTOR_FACTS.map(note),
-                actions(connect)
+                actions(connect),
+                ...hostedSection(hostedToken)
             );
             return;
         }
@@ -516,8 +675,109 @@ function connectClaudeCard() {
             note('A pairing lasts 24 hours, and ends if the server restarts. When Claude says no '
                 + 'device is online and a tab is open and unlocked, connect again.'),
             ...CONNECTOR_FACTS.map(note),
-            actions(disconnect, connect)
+            actions(disconnect, connect),
+            ...hostedSection(hostedToken)
         );
+    }
+
+    // The hosted connector (§11 Tier 2), in the same card as the local one because
+    // it is the same question — let an AI read this portfolio — with a different
+    // trade, and a user choosing between them needs both in front of them.
+    //
+    // The facts above say the relay cannot read the conversation, and for this
+    // option the SERVER holds the key and can. HOSTED_CONSENT draws exactly that
+    // contrast rather than leaving the reader to notice it.
+    function hostedSection(token) {
+        const label = ui.sectionLabel('Or paste a URL into claude.ai');
+        if (token === null) {
+            return [
+                label,
+                note('Whether this is on is kept on the server, so it cannot be checked while you are '
+                    + 'offline or after a session expires. Reload when you are back online.'),
+            ];
+        }
+        if (!token) {
+            return [
+                label,
+                note('For claude.ai, the ChatGPT web app, or anything else that takes a remote MCP '
+                    + 'server URL: nothing to install and no local process to keep running. You get '
+                    + 'one URL to paste in.'),
+                note(HOSTED_CONSENT),
+                actions(ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Get a URL', confirmHostedEnable)),
+            ];
+        }
+        // textContent, via ui.el — this is a capability and must never be
+        // interpreted as markup, nor logged, nor put in an error string.
+        const url = hostedConnectorURL(window.location, token);
+        return [
+            label,
+            ui.messages(['This URL is a password. Anyone who has it can ask about this portfolio '
+                + 'while one of your tabs is open and unlocked, so paste it only into the client you '
+                + 'meant to — and revoke it here the moment it goes anywhere else.'], 'normal'),
+            ui.el('div', 'wg-code-block mt-md', url),
+            note('Add it in your AI client as a remote (custom) MCP server, with this as the URL. '
+                + 'There is nothing else to configure and no key to paste.'),
+            note(HOSTED_CONSENT),
+            actions(
+                ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Revoke the URL', confirmHostedDisable),
+                copyButton('Copy the URL', url)
+            ),
+        ];
+    }
+
+    // The consent is HERE, at the moment the key leaves this browser, and it names
+    // the alternative. A cheerful toggle with the explanation elsewhere is how this
+    // trade gets made by people who did not know they were making it.
+    function confirmHostedEnable() {
+        ui.confirm({
+            title: 'Let this server hold your key?',
+            message: HOSTED_CONSENT,
+            confirmLabel: 'Enable and show my URL',
+            onConfirm: onHostedEnable,
+        });
+    }
+
+    function confirmHostedDisable() {
+        ui.confirm({
+            title: 'Revoke the URL',
+            message: 'The URL stops working immediately and this server deletes its copy of your '
+                + 'pairing key. Whatever you pasted it into starts getting an error until you enable '
+                + 'a new one. The local connector above is untouched — this does not disconnect a '
+                + 'shim you are running.',
+            confirmLabel: 'Revoke',
+            onConfirm: onHostedDisable,
+        });
+    }
+
+    async function onHostedEnable() {
+        busy('Enabling the connector…');
+        try {
+            await enableHostedConnector({
+                http,
+                pairing: await ensurePairing(),
+                relayUrl: relayEndpoint(window.location),
+            });
+        } catch (err) {
+            fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Try again', paint));
+            return;
+        }
+        // paint() re-reads the token from the server rather than being handed the
+        // one enable just returned: what is shown is then what is actually live.
+        paint();
+    }
+
+    async function onHostedDisable() {
+        busy('Revoking the URL…');
+        try {
+            // The hosted connector and nothing else. The relay pairing is SHARED
+            // with the local shim, so revoking it here would disconnect a shim the
+            // user is still running and never asked to touch.
+            await disableHostedConnector({ http });
+        } catch (err) {
+            fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Try again', paint));
+            return;
+        }
+        paint();
     }
 
     function confirmReplace() {
@@ -568,23 +828,14 @@ function connectClaudeCard() {
 
     function paintCode({ pairingId, key, code }) {
         const envLine = shimEnvLine(code);
-        const copy = ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Copy the line', async () => {
-            try {
-                await navigator.clipboard.writeText(envLine);
-                copy.replaceChildren(ui.el('span', null, 'Copied'));
-            } catch {
-                // Clipboard access is refused in plenty of ordinary situations
-                // (no permission, an insecure origin, an in-app browser). The
-                // code block selects itself in one click, so say that instead of
-                // leaving a button that does nothing.
-                copy.replaceChildren(ui.el('span', null, 'Select it and copy by hand'));
-            }
-        });
+        const copy = copyButton('Copy the line', envLine);
 
         const finish = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'I saved it — finish', async () => {
             busy('Storing the key…');
             try {
-                await savePairing({ records, pairingId, key });
+                // Stores the key and starts this tab answering with it, without a
+                // reload.
+                await adoptPairing({ pairingId, key });
             } catch (err) {
                 // Nothing is connected and nothing was stored: the pairing is
                 // live server-side but no device holds its key, which is exactly
@@ -592,8 +843,6 @@ function connectClaudeCard() {
                 fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Start again', onConnect));
                 return;
             }
-            // Answer from this tab now, without a reload.
-            refreshResponder({ records });
             paint();
         });
 

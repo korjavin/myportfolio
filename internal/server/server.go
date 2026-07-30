@@ -140,7 +140,7 @@ type API struct {
 	// mcpRemote is the hosted connector's registry (§11 Tier 2, mcp_remote.go),
 	// restored at boot so a restart does not silently revoke a connector the user
 	// configured in Claude. /mcp/{token} (mcp_endpoint.go) authenticates against
-	// it; the Settings routes that enable and revoke it are a separate bead.
+	// it; /api/mcp/remote enables and revokes it from Settings.
 	mcpRemote *mcpRemoteRegistry
 	// mcpCallLimiter throttles authenticated hosted MCP calls per TOKEN and
 	// mcpFailLimiter failed token lookups per IP (mcp_endpoint.go). Fourth and
@@ -164,8 +164,9 @@ func New(staticFS fs.FS, db *store.DB, sessionSecret string, trustedProxies []ne
 }
 
 // newAPI builds the dependencies and restores persisted state. Split from New so
-// a test can hold the *API — the hosted connector has no enable route yet (H3),
-// so its tests reach the registry the served handler actually uses.
+// a test can hold the *API — the hosted connector's registry tests drive enable
+// and disable directly, and they must reach the registry the served handler
+// actually uses rather than a second one nothing serves.
 func newAPI(db *store.DB, sessionSecret string, trustedProxies []netip.Prefix) *API {
 	api := &API{
 		db:                 db,
@@ -246,6 +247,21 @@ func (a *API) registerRoutes(mux *http.ServeMux) {
 		limitByIP(a.limiter, a.trustedProxies, a.requireSession(http.HandlerFunc(a.createPairing)).ServeHTTP))
 	mux.HandleFunc("DELETE /api/mcp/pairings",
 		limitByIP(a.limiter, a.trustedProxies, a.requireSession(http.HandlerFunc(a.deletePairing)).ServeHTTP))
+
+	// The hosted connector's own three routes (§11 Tier 2, mcp_remote.go): read
+	// the token so Settings can show the URL again, enable, revoke. Session-authed
+	// and account-scoped by the session alone — no account id crosses the wire.
+	//
+	// Enable and revoke carry the ceremony limiter for the same reason mint and
+	// revoke above do. GET does not: Settings reads it on every paint, and putting
+	// that in the same bucket as logins would let opening a screen a few times
+	// spend someone's login budget. It is session-authed and returns only what the
+	// session holder could mint anyway.
+	mux.Handle("GET /api/mcp/remote", a.requireSession(http.HandlerFunc(a.getHostedConnector)))
+	mux.HandleFunc("POST /api/mcp/remote",
+		limitByIP(a.limiter, a.trustedProxies, a.requireSession(http.HandlerFunc(a.enableHostedConnector)).ServeHTTP))
+	mux.HandleFunc("DELETE /api/mcp/remote",
+		limitByIP(a.limiter, a.trustedProxies, a.requireSession(http.HandlerFunc(a.disableHostedConnector)).ServeHTTP))
 
 	// The two relay legs. The device leg is session-authed like every other
 	// account-scoped route; the shim leg has no cookie jar (a local Go process,

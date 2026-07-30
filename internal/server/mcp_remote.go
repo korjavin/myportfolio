@@ -5,10 +5,11 @@ package server
 // medicationtrackerbot's internal/cloudserver/mcp_remote.go.
 //
 // Nothing here is routed to the internet. The streamable-HTTP endpoint that
-// authenticates against this registry, and the Settings routes that enable and
-// revoke, are separate beads; this file is the state and the lifecycle they
-// both need, so that "enabled" has exactly one meaning and revoking has exactly
-// one place to be wrong.
+// authenticates against this registry lives in mcp_endpoint.go; the three
+// session-authed Settings routes that read, enable and revoke are at the bottom
+// of this file, next to the lifecycle they are a thin skin over, so that
+// "enabled" has exactly one meaning and revoking has exactly one place to be
+// wrong.
 //
 // Three rules the port carries and this file must not lose:
 //
@@ -39,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -335,6 +337,127 @@ func (r *mcpRemoteRegistry) stop(accountID string) {
 	delete(r.byAcc, accountID)
 	r.mu.Unlock()
 	closeEntry(entry)
+}
+
+// --- The Settings routes ----------------------------------------------------
+//
+// Three thin handlers over enable/disable/tokenFor. They are deliberately thin:
+// every rule worth getting wrong is already in the functions above, and a
+// "connector manager" layer here would only be somewhere for a second, different
+// idea of what "enabled" means to grow.
+//
+// All three are session-authed, and the session's account is the only account
+// they can touch — there is no account id on the wire, so there is nothing for a
+// caller to substitute.
+
+// hostedConnectorRequest is what Settings posts to enable: the pairing the
+// account's own browser already holds.
+//
+// THE KEY IS IN THIS BODY, and that is not an oversight — it is the whole Tier 2
+// trade (§11). Tier 1 exists precisely so a user who does not want to make it
+// does not have to. Consequences for this file: the body is never echoed, never
+// logged, and never quoted in an error, exactly like the token it produces.
+//
+// Key is []byte, so encoding/json decodes it from the standard-base64 string
+// crypto.js's toBase64 produces. Its length is not checked here on purpose:
+// enable checks it, that check is the one every caller inherits, and a second
+// copy here is a second thing to get out of step.
+type hostedConnectorRequest struct {
+	RelayURL  string `json:"relay_url"`
+	PairingID string `json:"pairing_id"`
+	Key       []byte `json:"key"`
+}
+
+// hostedConnectorResponse carries the connector token, or "" when the account has
+// none. The client composes the URL from its own origin rather than being handed
+// one: it knows the scheme it actually reached us over, while this process behind
+// a TLS-terminating proxy does not.
+//
+// Returning the token to a caller who already holds the account's session is
+// tokenFor's documented call — the same authority could mint a fresh one, so
+// withholding it would only force a user who lost their URL to rotate a
+// connector that is working.
+type hostedConnectorResponse struct {
+	Token string `json:"token"`
+}
+
+// getHostedConnector reports this account's connector token, so Settings can
+// show the URL again after a reload instead of making the user rotate it.
+func (a *API) getHostedConnector(w http.ResponseWriter, r *http.Request) {
+	session, ok := sessionFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// An enabled row whose sealed key restore could not open (a rotated session
+	// secret) has no live entry, so it reads as off here — which is honest: it
+	// cannot answer a call either. Enabling again replaces the row.
+	token, _ := a.mcpRemote.tokenFor(session.AccountID)
+	writeJSON(w, http.StatusOK, hostedConnectorResponse{Token: token})
+}
+
+// enableHostedConnector turns the hosted connector on and returns its token.
+//
+// r is handed to enable, which is what makes the SSRF check on relay_url
+// unbypassable — see enable's own comment. Do not add a second check here, and
+// do not stop passing r.
+func (a *API) enableHostedConnector(w http.ResponseWriter, r *http.Request) {
+	session, ok := sessionFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req hostedConnectorRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxCeremonyBodyBytes)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	token, err := a.mcpRemote.enable(r.Context(), session.AccountID, &mcpshim.PairingCode{
+		RelayURL:  req.RelayURL,
+		PairingID: req.PairingID,
+		Key:       req.Key,
+	}, r)
+	if err != nil {
+		// Two of enable's rejections are the caller's own submission to fix — a
+		// relay_url that is not this server, and a key of the wrong length — so
+		// they are 400. Anything left is the database, which is ours, so 500.
+		// Neither body quotes err: this is the one route whose payload is a
+		// secret, and an error string is the easiest place for one to escape.
+		status := http.StatusInternalServerError
+		if errors.Is(err, errRelayURLNotSelf) || len(req.Key) != mcpshim.PairingKeyBytes {
+			status = http.StatusBadRequest
+		} else {
+			// Safe to log: store's own errors deliberately carry no token (see
+			// UpsertMCPRemote), and a 500 nobody can see is a support call.
+			slog.Error("mcp remote: enable connector", "account_id", session.AccountID, "error", err)
+		}
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	writeJSON(w, http.StatusOK, hostedConnectorResponse{Token: token})
+}
+
+// disableHostedConnector revokes the connector: disable drops the row — and the
+// sealed pairing key with it — and tears the live entry down, so the URL stops
+// working now rather than at the next restart.
+//
+// It deliberately does NOT revoke the relay pairing. That pairing is SHARED with
+// Tier 1, so revoking it here would kill a cmd/mcpshim the user is still running
+// and never asked to disconnect. Turning the hosted connector off means the
+// server stops holding a key, nothing more.
+func (a *API) disableHostedConnector(w http.ResponseWriter, r *http.Request) {
+	session, ok := sessionFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// Idempotent: DeleteMCPRemote on an account with no row is success, because
+	// "no key on disk for this account" is what the caller asked for.
+	if err := a.mcpRemote.disable(r.Context(), session.AccountID); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // closeEntry revokes an entry and drops its connection, in that order: marking
