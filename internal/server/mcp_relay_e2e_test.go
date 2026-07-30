@@ -81,7 +81,11 @@ func (s *stdioShim) roundTrip(t *testing.T, msg string, id float64) map[string]a
 	if _, err := io.WriteString(s.stdin, msg+"\n"); err != nil {
 		t.Fatalf("write to mcpshim stdin: %v\nstderr:\n%s", err, s.stderr.String())
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	// testWait, not its own 30s: 30s is exactly mcpshim.CallTimeout, so the two
+	// deadlines raced and whichever won decided what the failure said. Losing
+	// meant "timed out waiting for id 2" — a message that names nothing —
+	// swallowing the shim's own sentence about WHY the call went unanswered.
+	deadline := time.Now().Add(testWait)
 	for time.Now().Before(deadline) {
 		line, err := s.stdout.ReadString('\n')
 		if err != nil {

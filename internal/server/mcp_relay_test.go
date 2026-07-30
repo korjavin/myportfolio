@@ -103,21 +103,74 @@ func (f *relayFixture) dial(t *testing.T, urlStr string, cookie *http.Cookie) (*
 	return conn, resp, err
 }
 
+// liveRecord is the pairing every leg-dial synchronises against. The relay's own
+// table is the only place that knows whether a leg is bridged yet.
+func (f *relayFixture) liveRecord(t *testing.T, pairingID string) *pairingRecord {
+	t.Helper()
+	rec, ok := f.api.pairings.byPairingID(pairingID)
+	if !ok {
+		t.Fatalf("pairing %s is not live at dial time", pairingID)
+	}
+	return rec
+}
+
+// awaitJoin waits until serveLeg has REGISTERED a just-dialed leg on the pairing
+// record, i.e. until record.join has swapped it into its slot.
+//
+// This is the whole reason the relay tests were a 1-in-4 flake under load, and it
+// is one bug wearing several test names. websocket.Dial returns as soon as the
+// CLIENT sees the 101 — the server's handler goroutine may not have reached
+// record.join yet — and losing that race is SILENT in both of the relay's
+// slot-keyed paths: serveLeg drops a frame whose peer slot is still empty (its
+// "Nobody home" branch, deliberately, so a reconnecting peer re-bridges), and
+// closeLegs/join close a slot that is still empty. Either way the test then waits
+// out a FULL deadline for a frame or a close nobody will ever send — 60s of
+// testWait on a read, or the shim's 30s CallTimeout arriving as ErrDeviceOffline
+// — instead of failing fast and naming what was actually missed. Measured on
+// master: TestRelayCarriesAFrameItCannotOpen at 60.08s,
+// TestADroppedLegClosesTheOther at 120.25s, TestShimStillReconnectsWhenThe-
+// DeviceLegDrops at 30.13s, all from this one gap.
+//
+// It waits for a CHANGE of occupant rather than merely a non-nil one: a
+// REPLACEMENT leg (TestEvictedDeviceLegIsClosedWith4409, and the reattach in
+// mcp_relay_shim_close_test.go) dials into a slot that is already full, and
+// "non-nil" is satisfied by the very leg it is about to evict.
+//
+// before must be read BEFORE the dial, or the replacement can slip in between.
+func awaitJoin(t *testing.T, rec *pairingRecord, isDevice bool, before *websocket.Conn) {
+	t.Helper()
+	what := "shim"
+	if isDevice {
+		what = "device"
+	}
+	waitUntil(t, "the "+what+" leg to register with its pairing", func() bool {
+		// peerConn(x) is the leg OPPOSITE x, so this leg's own slot is !isDevice.
+		got := rec.peerConn(!isDevice)
+		return got != nil && got != before
+	})
+}
+
 func (f *relayFixture) dialDevice(t *testing.T, pairingID string) *websocket.Conn {
 	t.Helper()
+	rec := f.liveRecord(t, pairingID)
+	before := rec.peerConn(false)
 	conn, _, err := f.dial(t, f.relayURL()+"/device?pairing="+url.QueryEscape(pairingID), f.session)
 	if err != nil {
 		t.Fatalf("dial device leg: %v", err)
 	}
+	awaitJoin(t, rec, true, before)
 	return conn
 }
 
 func (f *relayFixture) dialShim(t *testing.T, pairingID string) *websocket.Conn {
 	t.Helper()
+	rec := f.liveRecord(t, pairingID)
+	before := rec.peerConn(true)
 	conn, _, err := f.dial(t, f.relayURL()+"/shim?pairing="+url.QueryEscape(pairingID), nil)
 	if err != nil {
 		t.Fatalf("dial shim leg: %v", err)
 	}
+	awaitJoin(t, rec, false, before)
 	return conn
 }
 
@@ -452,6 +505,50 @@ func TestADroppedLegClosesTheOther(t *testing.T) {
 	})
 }
 
+// TestATeardownDoesNotBounceIntoAReconnectedLeg. A teardown is a PAIR coming
+// apart, and it must stop at the two legs that were bridged: the device drops, so
+// the relay closes the shim leg it was bridged to, and that is the end of it.
+//
+// The bounce this pins out is what a tab reconnecting looks like. The dying shim
+// leg's own read fails LAST — after the fresh device leg has registered — and
+// nothing had evicted it, so it used to close whatever occupied the device slot,
+// which by then was the new tab. The shim's next call then found an empty device
+// slot, had its frame dropped, and burned the full 30s CallTimeout to report "no
+// unlocked device is online" with a perfectly good tab open: §11's
+// looks-alive-and-times-out symptom, from the relay this time.
+//
+// Sequenced so the shim leg's teardown lands strictly after the reconnect, which
+// is the interleaving load produced by chance about one run in four.
+func TestATeardownDoesNotBounceIntoAReconnectedLeg(t *testing.T) {
+	f := newRelayFixture(t)
+	pairingID, shim, device := f.bridged(t)
+	rec := f.liveRecord(t, pairingID)
+
+	// The tab goes away. Its leg's teardown is what closes the shim leg.
+	device.CloseNow()
+	waitUntil(t, "the relay to retire the device leg that dropped", func() bool {
+		return rec.peerConn(false) == nil // the device slot, seen from the shim side
+	})
+
+	// The user opens a fresh tab, and only THEN does the old shim leg finish
+	// dying.
+	reconnected := f.dialDevice(t, pairingID)
+	shim.CloseNow()
+	waitUntil(t, "the old shim leg to leave the record", func() bool {
+		return rec.peerConn(true) == nil // the shim slot, seen from the device side
+	})
+
+	// The fresh tab is still bridged: a new shim leg reaches it.
+	frame, err := mcpshim.SealFrame(f.key, pairingID, []byte(`{"jsonrpc":"2.0","id":11}`))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	writeFrame(t, f.dialShim(t, pairingID), frame)
+	if got := readFrame(t, reconnected); !bytes.Equal(got, frame) {
+		t.Fatal("the reconnected device leg did not receive the frame")
+	}
+}
+
 // TestRevokeClosesTheLegsWith4404: after Disconnect the account has no pairing
 // at all, so the record really is a tombstone and the responder should purge.
 func TestRevokeClosesTheLegsWith4404(t *testing.T) {
@@ -679,15 +776,13 @@ func (f *expiryFixture) dialShimLeg(t *testing.T, pairingID string) *websocket.C
 	// before it does is asserting against a pairing with no legs to close, and
 	// waits out the full close deadline for a close nobody could send. Caught by
 	// -count=2 on the whole package, where the server goroutine lags enough to
-	// lose the race about half the time.
+	// lose the race about half the time. See awaitJoin: the relayFixture legs lose
+	// the same race, which is what made the whole package a 1-in-4 flake.
 	rec, ok := f.byPairingID(pairingID)
 	if !ok {
 		t.Fatalf("pairing %s is not live at dial time", pairingID)
 	}
-	waitUntil(t, "the shim leg to register with its pairing", func() bool {
-		// The shim slot, seen from the device side.
-		return rec.peerConn(true) != nil
-	})
+	awaitJoin(t, rec, false, nil)
 	return conn
 }
 

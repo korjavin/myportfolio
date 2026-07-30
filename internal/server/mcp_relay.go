@@ -219,15 +219,7 @@ func (a *API) serveLeg(ctx context.Context, conn *websocket.Conn, record *pairin
 	for {
 		typ, data, err := conn.Read(ctx)
 		if err != nil {
-			// Only tear the peer down if this conn is still the pairing's
-			// registered leg. If a newer connection evicted us, the replacement
-			// owns the bridge now and closing the peer would kill the live
-			// bridge, not just our dead half.
-			if record.current(isDevice, conn) {
-				if peer := record.peerConn(isDevice); peer != nil {
-					peer.Close(websocket.StatusNormalClosure, "peer disconnected")
-				}
-			}
+			record.retirePeer(isDevice, conn)
 			return
 		}
 		// A frame arrived, so this pairing is in use: push its idle expiry out.
@@ -314,6 +306,47 @@ func closeLeg(conn *websocket.Conn, code websocket.StatusCode, reason string) {
 	}
 }
 
+// retirePeer tears down the bridge conn was half of: it closes the opposite leg
+// and DEREGISTERS it, all under one lock.
+//
+// It does nothing unless conn is still the pairing's registered leg. If a newer
+// connection evicted us, the replacement owns the bridge now and closing the peer
+// would kill the live bridge, not just our dead half.
+//
+// Deregistering the peer is the load-bearing half, and it is what makes that
+// guard cover the CASCADE as well as eviction. Without it a teardown bounces
+// through a third leg: the device drops, so the relay closes the shim leg; the
+// browser tab reconnects and its fresh device leg registers; then the shim leg's
+// own read finally fails, it is still registered (nothing evicted it), and it
+// closes whatever is in the device slot — which is now the FRESH tab, not the
+// dead one it was bridged to. The shim's next call then finds an empty device
+// slot, its frame is dropped by the "Nobody home" branch below, and it burns the
+// full 30s CallTimeout to report "no unlocked device is online" while a perfectly
+// good tab sits there — the same unattributable symptom §11 keeps having to stamp
+// out. Clearing the peer as we close it means its own serveLeg finds itself no
+// longer registered and stops the bounce there: a leg the relay has already
+// retired owns nothing left to tear down.
+//
+// Pinned by TestATeardownDoesNotBounceIntoAReconnectedLeg, which sequences the
+// interleaving load used to produce by chance.
+func (p *pairingRecord) retirePeer(isDevice bool, conn *websocket.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if isDevice {
+		if p.device != conn {
+			return
+		}
+		closeLeg(p.shim, websocket.StatusNormalClosure, "peer disconnected")
+		p.shim = nil
+		return
+	}
+	if p.shim != conn {
+		return
+	}
+	closeLeg(p.device, websocket.StatusNormalClosure, "peer disconnected")
+	p.device = nil
+}
+
 // peerConn returns the opposite leg's live conn, or nil. Called per frame so a
 // peer reconnect is picked up transparently instead of writing a cached, evicted
 // conn.
@@ -324,17 +357,6 @@ func (p *pairingRecord) peerConn(isDevice bool) *websocket.Conn {
 		return p.shim
 	}
 	return p.device
-}
-
-// current reports whether conn is still this pairing's registered leg — i.e. it
-// has not been evicted and replaced by a newer connection on the same slot.
-func (p *pairingRecord) current(isDevice bool, conn *websocket.Conn) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if isDevice {
-		return p.device == conn
-	}
-	return p.shim == conn
 }
 
 // clear drops conn from whichever leg it occupies, unless a newer connection has

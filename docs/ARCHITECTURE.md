@@ -751,6 +751,14 @@ the same unattributable symptom the pairing-code checksum was added to eliminate
   evicted when a newer one takes the device slot. Two *legitimate* devices take turns evicting each
   other; an abrupt close reaches the browser as `1006`, which reads as a transient drop and gets
   retried — re-evicting its replacement forever. Closing with `4409` makes the loser step aside.
+- **A teardown closes the leg it was bridged to, and deregisters it in the same breath.** A dying leg
+  used to close whatever occupied the opposite slot, which is not the same thing: the device drops,
+  the relay closes the shim leg, the tab reconnects, and *then* the dead shim leg's own read fails and
+  takes the fresh tab down with it. Nothing had evicted that shim leg, so its "am I still registered"
+  guard passed. The shim's next call then found an empty device slot, had its frame dropped, and burned
+  the full `CallTimeout` to report "no unlocked device is online" with a good tab open — this section's
+  symptom, from the relay. `retirePeer` closes *and* clears the peer under one lock, so the retired leg
+  finds itself deregistered and the teardown stops at the pair.
 - One device leg per pairing is the standing limitation.
 
 ### The pairing TTL is an IDLE timeout, and the refresh deliberately excludes connecting
