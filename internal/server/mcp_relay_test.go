@@ -147,7 +147,13 @@ func readFrame(t *testing.T, conn *websocket.Conn) []byte {
 // WebSocket cannot see a handshake status — so the code IS the error channel.
 func expectClose(t *testing.T, conn *websocket.Conn, want websocket.StatusCode, what string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// A liveness assertion, not a latency one: nothing here measures how FAST
+	// the close arrives, only that it does and carries the right code. 5s lost
+	// under concurrent load on a busy machine (~1 run in 3), and an
+	// intermittently-red CI is worse than a slow one — people learn to re-run it
+	// without reading it. CI runs on shared runners with unpredictable
+	// neighbours, so the deadline is generous rather than tight.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	_, _, err := conn.Read(ctx)
 	if got := websocket.CloseStatus(err); got != want {
