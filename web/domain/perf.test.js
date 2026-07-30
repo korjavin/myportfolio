@@ -571,6 +571,21 @@ test('a foreign flow with no applicable rate is the same explicit gap, not a raw
   assert.equal(res.portfolio.closeValue, snap.totals.cash);
 });
 
+test('a transaction that can never be a flow does not manufacture an FX gap', async () => {
+  // portfolio.js rejects an unknown type before it looks up any rate, so a gap
+  // reported here would be one it never reports — pointing the user at FX data
+  // for a record that is ignored either way. Found by codex review.
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  f.put('transaction', tx({ type: 'wibble', date: '2024-01-10', amount: eur(1000), currency: 'USD' }), 'tx_bad');
+
+  const res = await f.performance();
+
+  const codes = res.issues.map((i) => i.code).sort();
+  assert.deepEqual(codes, ['unknown_transaction_type']);
+});
+
 test('a single-currency portfolio is unchanged by the FX path', async () => {
   // Most users hold one currency. Their numbers must not move at all — not by
   // a rounding step, not by an extra issue.

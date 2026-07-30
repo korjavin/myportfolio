@@ -451,6 +451,17 @@ export function createPerformanceDomain({ records }) {
       const raw = Number.isSafeInteger(tx.amount) ? tx.amount : 0;
       if (raw === 0) continue;
 
+      // A type neither map classifies can never become a flow here, so don't ask
+      // for a rate on its behalf: portfolio.js rejects an unknown type BEFORE its
+      // own FX lookup, and a gap raised here would be one it never raises —
+      // sending the user to fetch a rate for a record that is ignored either way.
+      // Own properties only, so a type of "toString" is not read off the
+      // prototype as a classification. Found by codex review.
+      // (`interest` is valid but internal to the portfolio boundary, so it is
+      // skipped here too; portfolio.js still converts it for cash, and its gap
+      // reaches this result through the merged snapshot issues below.)
+      if (!Object.hasOwn(PORTFOLIO_FLOW, tx.type) && !Object.hasOwn(SECURITY_FLOW, tx.type)) continue;
+
       // THE RATE IS THE ONE FOR `day`, THE TRANSACTION'S OWN DATE — see the
       // header. `convert` on the same raw integer portfolio.js converts, so both
       // engines round once, identically, and agree to the cent.
