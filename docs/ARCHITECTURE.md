@@ -663,7 +663,48 @@ registry — our domain surface is six small modules in `web/domain/`. So our ca
 and short**, and a drift test pins it against the domain modules' actual exports. Porting the
 generator would be building a machine to write ten lines.
 
-## 12. Tracks
+## 12. Demo mode — `?demo=1`
+
+A shareable, zero-signup demo so a visitor can see the whole product without entering data. Shipped;
+this section is the contract, because the isolation guarantee below otherwise lives only in code
+comments.
+
+**It is an in-memory records port** (§3), seeded with a deterministic fixture, adopted in `boot.js`
+when the URL carries `?demo=1`. In that branch `startSync()` and `watchFocus()` are never called, so
+**no IndexedDB operation happens at all**. That makes isolation *structural*: it does not depend on
+the per-account mirror namespacing (§3) being correct — it is strictly stronger. Reset is a reload.
+
+Two ordering rules that are the whole guarantee, both enforced by tests:
+
+- **The port is swapped to an empty in-memory one BEFORE the fixture import is attempted**, and the
+  banner goes up with it. Without that, a `?demo=1` load whose dynamic import failed — offline before
+  `demo.js` is cached — falls through to the pre-signup Dexie mirror and paints **the visitor's own
+  portfolio** under a demo URL, with the banner never unhidden because that line was also in the
+  success path. Isolation would have been conditional on the network.
+- **`demo.js` is imported dynamically and is deliberately absent from `PRECACHE`.** That keeps the
+  fixture out of the shell's module closure so real users never download it, and adding it fails the
+  precache guard's other direction. The residual is stated rather than hidden: an installed user who
+  goes offline having never opened the demo gets an empty one.
+
+**The data is labelled as fabricated** — *"Demo portfolio — the data below is made up."* with an Exit
+link. Fabricated financial data presented without a label is what gets screenshotted out of context.
+
+### Demo mode does NOT answer MCP calls, and must not
+
+`boot.js` never starts the responder in the demo branch. This is a safety property, not tidiness: a
+demo tab answering relayed calls would serve **fabricated trades to somebody's agent as if they were
+their portfolio**, and an agent has no way to tell. Both relay legs (§11) are session-authed anyway,
+and demo mode has no account, so making this work would mean an unauthenticated pairing endpoint —
+a fresh abuse surface on a public deployment, to serve invented numbers.
+
+**The supported path to "try the connector on demo data" is therefore: sign up, then load the sample
+portfolio into your own vault.** Signup is one biometric tap — no email, no password — so the cost is
+near zero, and `demoRecords()` already returns a plain record array that `store.js`'s
+`importRecords()` writes through the port. That gives a real session (the connector works unchanged,
+no server change at all) and real ownership of the data, so nothing is deceived: the user chose to
+put sample data in their own vault.
+
+## 13. Tracks
 
 Two tracks, disjoint file ownership, meeting only at §3.
 

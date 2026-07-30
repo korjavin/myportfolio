@@ -316,9 +316,21 @@ func closeReason(err error) error {
 // carrying 4404 or 4409 — the relay closes gracefully, but the two events race.
 // Treating that as "no reason given" throws the close code away and redials
 // into a pairing that cannot come back, which is the bug this whole change
-// exists to fix, reintroduced as a flake. One scheduler hop is all it takes;
-// this is generous, and invisible beside CallTimeout.
-const terminalCloseGrace = 250 * time.Millisecond
+// exists to fix, reintroduced as a flake.
+//
+// This wait is ONLY ever paid on a connection whose write just failed — the
+// socket is already gone — and ctx still bounds it, so a healthy call pays
+// nothing. That is what makes it safe to be genuinely generous.
+//
+// It was 250ms, and that comment claimed 250ms was generous. It is not, on a
+// loaded CI runner or a loaded laptop: losing this race throws the close code
+// away, the shim redials, and the call then burns the full 30s CallTimeout to
+// return ErrDeviceOffline. The user sees Claude hang for half a minute and then
+// say "no device online" when the truth was "another connection took over your
+// pairing" — a fourth source of the looks-alive-and-times-out symptom that the
+// pairing checksum, the dial URL and the close codes were each fixed to stop
+// producing. Being 200ms slower on a dead socket is free; being wrong is not.
+const terminalCloseGrace = 5 * time.Second
 
 // awaitTerminal waits for this connection to finish tearing down and reports
 // the terminal close it died of, or nil. Only ever called on a connection whose
