@@ -28,7 +28,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { QUOTE_HOSTS } from '../../../domain/quotes.js';
-import { RECORD, SETTINGS_ID } from '../../../domain/schema.js';
+import { RECORD, SETTINGS_ID, newRecordId } from '../../../domain/schema.js';
+import { createFxRates } from '../../../domain/fx.js';
 import { fromBase64, toBase64 } from '../core/crypto.js';
 import { MCP_PAIRING_TYPE, MCP_PAIRING_ID, readPairing, purgePairing } from '../core/mcp-responder.js';
 
@@ -59,7 +60,7 @@ const {
     QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders,
     MCP_CODE_ENV_VAR, CONNECTOR_FACTS, relayEndpoint, shimEnvLine,
     mintPairing, savePairing, revokePairing,
-    sampleRecords, sampleLoaded, sampleConfirm, sampleRemoveConfirm, SAMPLE_ID_PREFIX,
+    sampleRecords, sampleLoaded, sampleConfirm, sampleRemoveConfirm, isSampleId, ownForeignCurrency,
 } = await import('../features/settings.js');
 
 // The same module instance settings.js holds, so `useRecords` below swaps the
@@ -776,27 +777,107 @@ describe('sample portfolio — what gets written', () => {
         assert.deepEqual(written, SAMPLE_SEED.filter((r) => r.recordId !== SETTINGS_ID));
     });
 
-    test('every other fixture id is namespaced, so it can only collide with itself', () => {
-        // This is WHY only the settings record needs holding back, and it is
-        // also what makes a second load an update: an id that looked like an
-        // ordinary one would overwrite a real record instead.
+    test('every fixture id is one isSampleId claims, so removal can be exact', () => {
+        // Two things ride on this: a second load updates rather than duplicating
+        // (an id that looked ordinary would overwrite a real record instead), and
+        // the removal can find what was written without storing a manifest.
         for (const rec of sampleRecords(SAMPLE_SEED)) {
-            assert.match(
-                rec.recordId,
-                /(_demo_|^fx_eurusd_)/,
-                `${rec.recordId} is not namespaced as sample data`
-            );
+            assert.equal(isSampleId(rec.recordId), true, `${rec.recordId} is not claimed as sample data`);
         }
     });
 
-    test('sampleLoaded reads the real fixture, not a restated id', () => {
-        const securities = sampleRecords(SAMPLE_SEED).filter((r) => r.recordType === RECORD.security);
-        assert.ok(securities.length > 0);
-        assert.equal(sampleLoaded(securities), true);
-        assert.equal(sampleLoaded([]), false);
-        assert.equal(sampleLoaded(undefined), false);
-        assert.equal(sampleLoaded([{ recordId: 'security_1234', name: 'Mine' }]), false);
-        assert.ok(securities.every((s) => s.recordId.startsWith(SAMPLE_ID_PREFIX)));
+    test('isSampleId claims nothing the rest of the app mints', () => {
+        // §4 newRecordId, ppimport's derived ids, and — the one that matters —
+        // fx.js's own ECB rows, which cover the same PAIR-DAYS as the fixture's
+        // and would be deleted with it if the two shapes were confused.
+        assert.equal(isSampleId(newRecordId(RECORD.transaction, 1750000000000)), false);
+        assert.equal(isSampleId('security_pp_9f2c1a0b3d4e5f60'), false);
+        assert.equal(isSampleId('fx_EURUSD_2024-05-03'), false, 'the ECB fetcher\'s rows are not sample data');
+        assert.equal(isSampleId(SETTINGS_ID), false);
+        assert.equal(isSampleId(undefined), false);
+    });
+
+    test('sampleLoaded reads the real fixture off state, not a restated id', () => {
+        const rows = sampleRecords(SAMPLE_SEED);
+        const byType = (t) => rows.filter((r) => r.recordType === t);
+        assert.equal(sampleLoaded({ securities: byType(RECORD.security) }), true);
+        assert.equal(sampleLoaded({ accounts: byType(RECORD.account) }), true);
+        assert.equal(sampleLoaded({ transactions: byType(RECORD.transaction) }), true);
+        assert.equal(sampleLoaded({}), false);
+        assert.equal(sampleLoaded(), false);
+        assert.equal(sampleLoaded({ securities: [{ recordId: 'security_1234' }] }), false);
+    });
+});
+
+describe('sample portfolio — the fixture\'s invented FX must not reach real holdings', () => {
+    // The bug codex review found, and the reason the `fx` records are
+    // conditional. An `fx` record is looked up by (pair, date) and never by
+    // recordId, so the fixture's five years of EURUSD fixings are the one part of
+    // it that its id namespace does not isolate.
+
+    test('a fixture rate silently beats the real ECB fixing for the same day', () => {
+        // Not a claim about fx.js — a call into it. fx.js's refresh writes
+        // `fx_EURUSD_<iso>`; demo.js writes `fx_eurusd_<yyyymmdd>` for the same
+        // pair-day, so the ids differ and no re-fetch ever overwrites it.
+        const real = {
+            recordId: 'fx_EURUSD_2024-05-03', pair: 'EURUSD', date: '2024-05-03', rate: 107000000,
+        };
+        const fake = {
+            recordId: 'fx_eurusd_20240503', pair: 'EURUSD', date: '2024-05-03', rate: 119000000,
+        };
+        const issues = [];
+        const both = createFxRates([real, fake], (code, id, msg) => issues.push({ code, id, msg }));
+        assert.deepEqual(issues, [], 'a duplicate pair-day is not reported as a problem');
+        assert.notDeepEqual(
+            both.rate('USD', 'EUR', '2024-05-03'),
+            createFxRates([real]).rate('USD', 'EUR', '2024-05-03'),
+            'if a duplicate pair-day were harmless the fx conditional would be unnecessary'
+        );
+    });
+
+    test('the rates are withheld when the user holds a foreign currency', () => {
+        const mine = { securities: [{ recordId: 'security_pp_abc', name: 'Apple', currency: 'USD' }] };
+        assert.equal(ownForeignCurrency(mine, 'EUR'), 'USD');
+
+        const rows = sampleRecords(SAMPLE_SEED, { fx: !ownForeignCurrency(mine, 'EUR') });
+        assert.deepEqual(rows.filter((r) => r.recordType === RECORD.fx), []);
+        // And nothing else is dropped with them.
+        assert.deepEqual(rows, sampleRecords(SAMPLE_SEED).filter((r) => r.recordType !== RECORD.fx));
+    });
+
+    test('a pure-EUR vault keeps them, so the sample still demonstrates conversion', () => {
+        const mine = {
+            accounts: [{ recordId: 'account_pp_1', currency: 'EUR' }],
+            securities: [{ recordId: 'security_pp_1', currency: 'EUR' }],
+            transactions: [{ recordId: 'transaction_pp_1', currency: 'EUR' }],
+        };
+        assert.equal(ownForeignCurrency(mine, 'EUR'), null);
+        const rows = sampleRecords(SAMPLE_SEED, { fx: !ownForeignCurrency(mine, 'EUR') });
+        assert.ok(rows.some((r) => r.recordType === RECORD.fx));
+        assert.deepEqual(rows, sampleRecords(SAMPLE_SEED));
+    });
+
+    test('a previously loaded sample is not mistaken for the user\'s own USD holding', () => {
+        // The fixture itself holds a USD security. Counting it would make every
+        // reload drop the rates the first load wrote, and the sample would go
+        // unconverted for no reason at all.
+        const rows = sampleRecords(SAMPLE_SEED);
+        const asState = {
+            accounts: rows.filter((r) => r.recordType === RECORD.account),
+            securities: rows.filter((r) => r.recordType === RECORD.security),
+            transactions: rows.filter((r) => r.recordType === RECORD.transaction),
+        };
+        assert.ok(
+            asState.securities.some((s) => s.currency === 'USD'),
+            'the fixture no longer holds a foreign security — this test guards nothing'
+        );
+        assert.equal(ownForeignCurrency(asState, 'EUR'), null);
+    });
+
+    test('a non-EUR reporting currency counts the user\'s EUR records as foreign', () => {
+        // Correct, and deliberately blunt: the fixture can convert nothing into
+        // CHF anyway, so withholding is both safe and no loss.
+        assert.equal(ownForeignCurrency({ accounts: [{ recordId: 'account_pp_1', currency: 'EUR' }] }, 'CHF'), 'EUR');
     });
 });
 
@@ -813,6 +894,19 @@ describe('sample portfolio — the confirmation', () => {
         assert.match(message, /sync/i);
         assert.match(message, /remove/i);
         assert.match(message, /none of it is real/i);
+        // The rates are written in this branch, so the copy must not claim the
+        // sample will show unconverted.
+        assert.doesNotMatch(message, /unconverted/i);
+    });
+
+    test('withholding the rates is stated, not silent', () => {
+        const plain = sampleConfirm({ count: 10, hasData: true }).message;
+        const held = sampleConfirm({ count: 10, hasData: true, withheldFx: 'USD' }).message;
+        assert.notEqual(plain, held);
+        assert.match(held, /USD/);
+        assert.match(held, /unconverted/i);
+        // The reassurance that matters: their own numbers do not move.
+        assert.match(held, /nothing of yours changes value/i);
     });
 
     test('with data already in the vault it says so instead of staying quiet', () => {
@@ -923,20 +1017,55 @@ describe('sample portfolio — through the shipped importRecords and the real po
         });
     });
 
+    /** The card's remove ceremony: read the vault, tombstone what is claimed. */
+    async function removeSample(port) {
+        const lists = await Promise.all(Object.values(RECORD).map((t) => port.list(t)));
+        const rows = lists.flat().filter((r) => isSampleId(r.recordId));
+        for (const rec of rows) await port.del(rec.recordType, rec.recordId);
+        return rows.length;
+    }
+
     test('the removal takes the sample out and leaves the rest', async () => {
-        const want = sampleRecords(SAMPLE_SEED);
-        const mine = [{
-            recordId: 'tx_mine', recordType: RECORD.transaction, clientTs: 1, deleted: false,
-            type: 'deposit', accountId: 'account_mine', date: '2025-01-02',
-            amount: 500000, currency: 'EUR',
-        }];
+        const mine = [
+            {
+                recordId: SETTINGS_ID, recordType: RECORD.settings, clientTs: 1, deleted: false,
+                reportingCurrency: 'EUR',
+            },
+            {
+                recordId: 'tx_mine', recordType: RECORD.transaction, clientTs: 2, deleted: false,
+                type: 'deposit', accountId: 'account_mine', date: '2025-01-02',
+                amount: 500000, currency: 'EUR',
+            },
+            // The user's own ECB rate for a day the fixture also covers. It must
+            // survive: the fixture's row for the same pair-day is a different
+            // record, and confusing the two shapes would delete a real fixing.
+            {
+                recordId: 'fx_EURUSD_2024-05-03', recordType: RECORD.fx, clientTs: 3, deleted: false,
+                pair: 'EURUSD', date: '2024-05-03', rate: 107000000,
+            },
+        ];
         await withPort(mine, async (port) => {
+            const want = sampleRecords(SAMPLE_SEED);
             await store.importRecords(want);
-            // Exactly what the card's remove ceremony does: a tombstone per
-            // fixture record through the same port.
-            for (const rec of want) await port.del(rec.recordType, rec.recordId);
-            const live = await liveRows(port);
-            assert.deepEqual(idsOf(live), new Set(['tx_mine']));
+            assert.equal(await removeSample(port), want.length);
+            assert.deepEqual(idsOf(await liveRows(port)), idsOf(mine));
+        });
+    });
+
+    test('a sample loaded on one day and removed on a later one leaves nothing behind', async () => {
+        // The fixture's `fx` ids carry a date, so the five-year window moves with
+        // `today`. Rebuilding today's fixture to decide what to delete would leave
+        // the days that fell off the back behind — invented rates, permanently,
+        // with the Remove button gone because the securities went.
+        const march = sampleRecords(demoRecords({ today: '2026-03-17' }));
+        const june = sampleRecords(demoRecords({ today: '2026-06-30' }));
+        const stale = march.filter((r) => !june.some((s) => s.recordId === r.recordId));
+        assert.ok(stale.length > 0, 'the fixture is no longer date-derived — this test guards nothing');
+
+        await withPort([], async (port) => {
+            await store.importRecords(march);
+            assert.equal(await removeSample(port), march.length);
+            assert.deepEqual(await liveRows(port), []);
         });
     });
 });
@@ -948,7 +1077,7 @@ describe('sample portfolio — the card is wired to these functions', () => {
         .replace(/^\s*\/\/[^\n]*$/gm, '');
     // Just this card, so a match cannot be satisfied by some other card's code.
     const section = stripped.slice(
-        stripped.indexOf('export function sampleRecords'),
+        stripped.indexOf('export function isSampleId'),
         stripped.indexOf('function exportCard(')
     );
 
@@ -958,13 +1087,13 @@ describe('sample portfolio — the card is wired to these functions', () => {
     });
 
     test('nothing is written outside the confirmation', () => {
-        // Both write sites exist only as the `apply` argument of a ceremony(),
-        // and ceremony() calls apply() only from ui.confirm's onConfirm. Move
-        // either one out and these fail.
+        // Every write in this card happens inside an `apply`, and ceremony() calls
+        // apply() only from ui.confirm's onConfirm. Move either write out of its
+        // apply, or apply() out of onConfirm, and these fail.
         assert.equal(section.split('importRecords(').length - 1, 1);
         assert.equal(section.split('records.del(').length - 1, 1);
-        assert.match(section, /ceremony\(\s*\(count\)[\s\S]*?importRecords\(seed\)/);
-        assert.match(section, /ceremony\(sampleRemoveConfirm,[\s\S]*?records\.del\(/);
+        assert.match(section, /async \(rows\) => \(\{\s*\n\s*lines: \[`Wrote \$\{await importRecords\(rows\)\}/);
+        assert.match(section, /async \(rows\) => \{[\s\S]*?records\.del\(/);
 
         const ceremony = section.slice(
             section.indexOf('const ceremony ='),
@@ -978,12 +1107,23 @@ describe('sample portfolio — the card is wired to these functions', () => {
         );
         assert.ok(
             ceremony.indexOf('ui.confirm(') < ceremony.indexOf('apply('),
-            'the fixture must not be written before the dialog opens'
+            'the rows must not be written before the dialog opens'
         );
     });
 
-    test('the settings singleton is held back by the shipped filter', () => {
-        assert.match(section, /return sampleRecords\(demoRecords\(/);
+    test('the settings singleton and the FX conditional come from the shipped filter', () => {
+        assert.match(section, /sampleRecords\(seed, \{ fx: !foreign \}\)/);
+        assert.match(section, /ownForeignCurrency\(state, reportingCurrency\(\)\)/);
+        // The withheld-rate copy comes from sampleConfirm, not a second wording
+        // built here.
+        assert.match(section, /withheldFx: foreign/);
+    });
+
+    test('the removal reads the vault instead of rebuilding today\'s fixture', () => {
+        assert.match(section, /Object\.values\(RECORD\)\.map\(\(t\) => records\.list\(t\)\)/);
+        assert.match(section, /\.filter\(\(r\) => isSampleId\(r\.recordId\)\)/);
+        // The load path is the only place the fixture is built.
+        assert.equal(section.split('demoRecords(').length - 1, 1, 'the fixture is built in one place');
     });
 
     test('the fixture is a dynamic import and never a static one', () => {

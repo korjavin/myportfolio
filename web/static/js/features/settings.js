@@ -881,33 +881,73 @@ function importCard(rerender) {
 // layer picks it up on its own debounce. No bespoke upload path.
 
 /**
- * What a sample load writes: everything demoRecords() returns EXCEPT the
- * settings singleton.
+ * Is this one of the fixture's own ids? demoRecords() mints stable literals and
+ * every one of them is namespaced, which is what lets the sample be identified
+ * and removed without storing a manifest of what was written.
  *
- * §4 gives settings a FIXED recordId, which makes it the one record in the
- * fixture whose id collides with something the user already owns — and it is
- * the record carrying `quoteProviders`, i.e. their API keys. Writing it would
- * reset the reporting currency and delete every stored credential, silently,
- * as a side effect of pressing "load sample data". Every other id in the
- * fixture is namespaced (`*_demo_*`, `fx_eurusd_*`, `price_security_demo_*`),
- * so the only thing it can collide with is a previous sample load — which is
- * exactly what should happen, and is why a second press updates in place
- * instead of doubling the portfolio.
+ * Neither id shape the rest of the app produces can match: §4's newRecordId is
+ * `<type>_<ms>_<random>` with the random tail last, ppimport's are
+ * `<type>_pp_<hex>`, and fx.js's ECB refresh writes `fx_EURUSD_2024-05-03` —
+ * uppercase pair, dashed date — where the fixture writes `fx_eurusd_20240503`.
  */
-export function sampleRecords(seed) {
-    return seed.filter((r) => !(r.recordType === RECORD.settings && r.recordId === SETTINGS_ID));
+export function isSampleId(recordId) {
+    const id = String(recordId ?? '');
+    return id.includes('_demo_') || /^fx_eurusd_\d{8}$/.test(id);
+}
+
+/** Is a sample already in the vault? Read off `state`, so it costs no query. */
+export function sampleLoaded({ accounts = [], securities = [], transactions = [] } = {}) {
+    return [...accounts, ...securities, ...transactions].some((r) => isSampleId(r?.recordId));
 }
 
 /**
- * Is a sample already in the vault? demo.js's security ids are stable literals
- * under one prefix, and securities are already on `state`, so this needs no
- * extra read. features.settings.test.js checks it against the real fixture
- * rather than a restated id, so renaming them there fails here.
+ * The first currency in the user's OWN records that is not their reporting
+ * currency, or null. This decides whether the fixture's `fx` records may be
+ * written — see sampleRecords.
  */
-export const SAMPLE_ID_PREFIX = 'security_demo_';
+export function ownForeignCurrency({ accounts = [], securities = [], transactions = [] } = {}, home) {
+    const mine = String(home ?? '').toUpperCase();
+    for (const rec of [...accounts, ...securities, ...transactions]) {
+        if (isSampleId(rec?.recordId)) continue;
+        const ccy = String(rec?.currency ?? '').toUpperCase();
+        if (ccy && ccy !== mine) return ccy;
+    }
+    return null;
+}
 
-export function sampleLoaded(securities) {
-    return (securities ?? []).some((s) => String(s?.recordId ?? '').startsWith(SAMPLE_ID_PREFIX));
+/**
+ * What a sample load writes. Two things are held back, for two different
+ * reasons, and both of them are silent data corruption if they are not.
+ *
+ * THE SETTINGS SINGLETON, always. §4 gives it a FIXED recordId, which makes it
+ * the one record in the fixture whose id collides with something the user
+ * already owns — and it is the record carrying `quoteProviders`, i.e. their API
+ * keys. The §3 port replaces a body wholesale, so writing it would reset the
+ * reporting currency and delete every stored credential as a side effect of
+ * pressing "load sample data". ppimport.js declines to emit one for exactly this
+ * reason; this is the same decision on the same record.
+ *
+ * THE `fx` RECORDS, when `fx` is false. Every other id in the fixture is
+ * namespaced, so it can only collide with a previous sample load — but an `fx`
+ * record is not looked up by id. fx.js keys its series by (pair, date), so the
+ * fixture's five years of invented EURUSD fixings would be applied to the
+ * user's own dollar holdings; and createFxRates breaks a same-day tie by rate,
+ * so the invented one WINS over the real ECB fixing this app fetches (a probe
+ * with 1.07 stored and 1.19 invented returned the invented one, no issue
+ * raised). The ids differ from fx.js's, so a re-fetch never overwrites it: the
+ * contamination is permanent and unattributable. Found by codex review.
+ *
+ * The cost of holding them back is that the fixture's one dollar-priced holding
+ * shows as unconverted, which the UI already says out loud (§4). That is the
+ * right trade: a visible gap in invented data beats invented rates silently
+ * re-valuing a real portfolio.
+ */
+export function sampleRecords(seed, { fx = true } = {}) {
+    return seed.filter((r) => {
+        if (r.recordType === RECORD.settings && r.recordId === SETTINGS_ID) return false;
+        if (!fx && r.recordType === RECORD.fx) return false;
+        return true;
+    });
 }
 
 /**
@@ -917,7 +957,7 @@ export function sampleLoaded(securities) {
  * says the data is invented, says nothing existing is deleted, and says how to
  * take it back out.
  */
-export function sampleConfirm({ count, hasData }) {
+export function sampleConfirm({ count, hasData, withheldFx = null }) {
     return {
         title: 'Load the sample portfolio',
         confirmLabel: 'Load it',
@@ -927,6 +967,12 @@ export function sampleConfirm({ count, hasData }) {
             + (hasData
                 ? 'Nothing you already have is deleted, but your own holdings and the sample will be '
                 + 'mixed together on every screen until you remove it. '
+                : '')
+            + (withheldFx
+                ? `You hold ${withheldFx}, and an exchange rate is stored per currency pair and day `
+                + 'rather than per holding — so the sample\'s invented rates are left out entirely, '
+                + 'to keep them away from your own valuations. Its one dollar-priced holding will '
+                + 'show as unconverted; nothing of yours changes value. '
                 : '')
             + 'Use "Remove the sample portfolio" on this screen to undo it.',
     };
@@ -941,24 +987,6 @@ export function sampleRemoveConfirm(count) {
     };
 }
 
-// The fixture is a DYNAMIC import, the same way boot.js loads it: §12 keeps
-// demo.js out of sw.js's PRECACHE so a user who never presses this never
-// downloads it, and the precache guard fails if it is added.
-//
-// `today` is the same shape boot.js's demo branch passes — a fixture seeded
-// against a wrong "today" produces a portfolio whose performance range ends in
-// the past (bd myportfolio-cnd.5).
-//
-// ponytail: loading again on a later day updates every record in place (the ids
-// are derived, not minted) but leaves the handful of `fx` days that fell off the
-// back of the five-year window behind as unread rows. Harmless — fx.js looks a
-// rate up by date — and removing them would mean tracking what a previous load
-// wrote. Remove-then-load is the clean path if it ever matters.
-async function sampleSeed() {
-    const { demoRecords } = await import('./demo.js');
-    return sampleRecords(demoRecords({ today: new Date().toISOString().slice(0, 10) }));
-}
-
 // A report has to survive the re-render its own write causes — refresh() rebuilds
 // this screen and detaches the status slot — exactly as importCard's does.
 let lastSample = null;
@@ -969,25 +997,26 @@ function sampleCard(rerender) {
 
     const fail = (message) => status.replaceChildren(ui.messages([message]));
 
-    // The fixture is built BEFORE the dialog and written only inside onConfirm.
-    // That ordering is the safety property: pressing the button and then
-    // cancelling touches nothing, and the count in the dialog is the real one.
-    const ceremony = (ask, apply) => async () => {
-        status.replaceChildren(ui.emptyState('Building the sample portfolio…'));
-        let seed;
+    // The rows are gathered BEFORE the dialog and written only inside onConfirm.
+    // That ordering is the safety property: pressing a button and then cancelling
+    // touches nothing, and the count in the dialog is the real one rather than an
+    // estimate.
+    const ceremony = (plan, apply) => async () => {
+        status.replaceChildren(ui.emptyState('Reading the sample portfolio…'));
+        let step;
         try {
-            seed = await sampleSeed();
+            step = await plan();
         } catch (err) {
-            fail(`Could not build the sample portfolio: ${err?.message ?? err}`);
+            fail(`Could not read the sample portfolio: ${err?.message ?? err}`);
             return;
         }
         status.replaceChildren();
         ui.confirm({
-            ...ask(seed.length),
+            ...step.ask(step.rows.length),
             onConfirm: async () => {
                 status.replaceChildren(ui.emptyState('Writing to your vault…'));
                 try {
-                    lastSample = await apply(seed);
+                    lastSample = await apply(step.rows);
                 } catch (err) {
                     fail(`The sample portfolio was not written in full: ${err?.message ?? err}`);
                     return;
@@ -997,33 +1026,65 @@ function sampleCard(rerender) {
         });
     };
 
-    const loaded = sampleLoaded(state.securities);
+    const loaded = sampleLoaded(state);
 
     const load = ui.button(
         'wg-toolbar-btn wg-toolbar-btn--primary',
         loaded ? 'Reload the sample portfolio' : 'Load sample portfolio',
         ceremony(
-            (count) => sampleConfirm({ count, hasData: state.transactions.length > 0 && !loaded }),
-            async (seed) => ({
-                lines: [`Wrote ${await importRecords(seed)} sample records. They reach your other `
+            async () => {
+                const foreign = ownForeignCurrency(state, reportingCurrency());
+                // A DYNAMIC import, the same way boot.js loads it: §12 keeps
+                // demo.js out of sw.js's PRECACHE so a user who never presses
+                // this never downloads the fixture, and the precache guard fails
+                // in the other direction if it is added.
+                const { demoRecords } = await import('./demo.js');
+                // The same `today` boot.js's demo branch passes. A fixture seeded
+                // against a wrong "today" produces a portfolio whose performance
+                // range ends in the past (bd myportfolio-cnd.5).
+                const seed = demoRecords({ today: new Date().toISOString().slice(0, 10) });
+                return {
+                    rows: sampleRecords(seed, { fx: !foreign }),
+                    ask: (count) => sampleConfirm({
+                        count,
+                        hasData: state.transactions.length > 0 && !loaded,
+                        withheldFx: foreign,
+                    }),
+                };
+            },
+            async (rows) => ({
+                lines: [`Wrote ${await importRecords(rows)} sample records. They reach your other `
                     + 'devices on the usual sync delay.'],
                 tone: 'normal',
             })
         )
     );
 
+    // Removal reads what is IN the vault rather than rebuilding today's fixture.
+    // The fixture's `fx` ids carry a date, so the window it covers moves with
+    // `today` — a sample loaded in March and removed in April would otherwise
+    // leave behind the days that fell off the back of the five-year window, as
+    // invented rates, with this button gone because the securities went. Every
+    // fixture id is namespaced, which is what makes reading it back exact.
+    //
     // Tombstones through the same §3 port the load went through, so sync carries
-    // the removal exactly the way it carried the write. records.del + one
-    // refresh() rather than store.remove() per record, which would re-derive the
-    // whole world 1900 times.
+    // the removal the way it carried the write. records.del + one refresh()
+    // rather than store.remove() per record, which would re-derive the whole
+    // world 1900 times.
     const drop = !loaded ? null : ui.button(
         'wg-toolbar-btn wg-toolbar-btn--secondary',
         'Remove the sample portfolio',
-        ceremony(sampleRemoveConfirm, async (seed) => {
-            for (const rec of seed) await records.del(rec.recordType, rec.recordId);
-            await refresh();
-            return { lines: [`Removed ${seed.length} sample records.`], tone: 'normal' };
-        })
+        ceremony(
+            async () => {
+                const lists = await Promise.all(Object.values(RECORD).map((t) => records.list(t)));
+                return { rows: lists.flat().filter((r) => isSampleId(r.recordId)), ask: sampleRemoveConfirm };
+            },
+            async (rows) => {
+                for (const rec of rows) await records.del(rec.recordType, rec.recordId);
+                await refresh();
+                return { lines: [`Removed ${rows.length} sample records.`], tone: 'normal' };
+            }
+        )
     );
 
     const row = ui.el('div', 'flex-row flex-between gap-sm mt-md');
@@ -1038,9 +1099,8 @@ function sampleCard(rerender) {
             + 'any other import. This is the supported way to try the Claude connector — or the app '
             + 'itself — on data that is not yours: the demo at ?demo=1 never answers Claude, because '
             + 'a demo tab cannot tell an agent that the trades it is reading are made up. Nothing you '
-            + 'already have is deleted, and the sample can be removed again. It is denominated in '
-            + 'EUR and ships only EURUSD rates, so on a vault reporting in another currency its '
-            + 'values show as unconverted — your own reporting currency is never changed by this.'),
+            + 'already have is deleted or revalued, your reporting currency is never changed, and the '
+            + 'sample can be removed again.'),
         row,
         status
     );
