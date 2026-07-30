@@ -863,6 +863,28 @@ textarea.wg-input {
     color: var(--wg-fg-2);
 }
 
+/* A verbatim string the user has to copy: the one-time pairing code and the
+   environment line in Settings › Connect Claude (ARCHITECTURE.md §11).
+
+   Two properties are the whole point of the class. `overflow-wrap: anywhere`
+   because a code is one ~250-character base64url token with no space in it, so
+   normal wrapping would push the card sideways on a phone. `user-select: all`
+   so one click selects the entire code — the Copy button covers the common
+   case, but navigator.clipboard is refused often enough (no permission, an
+   in-app browser, an insecure origin) that selecting by hand must not mean
+   dragging across four wrapped lines of a secret. */
+.wg-code-block {
+    font-family: var(--wg-font-mono);
+    font-size: var(--font-size-sm);
+    color: var(--wg-fg-1);
+    background: var(--wg-bg-card-inset);
+    border: 1px solid var(--wg-border-hairline);
+    border-radius: var(--wg-radius-gloss);
+    padding: var(--space-md);
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
 /* ==========================================================================
    Wandergeek phone chrome — decorative iPhone frame.
    On desktop the chrome wraps the SPA in a 390×844 phone shell with status

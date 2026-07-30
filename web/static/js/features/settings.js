@@ -12,10 +12,14 @@ import * as fmt from './fmt.js';
 import { parsePP } from '../../../domain/ppimport.js';
 import { RECORD, ASSET_CLASSES } from '../../../domain/schema.js';
 import {
-    state, putSettings, putAccount, putSecurity, remove, refresh,
+    state, records, putSettings, putAccount, putSecurity, remove, refresh,
     importRecords, exportAll, reportingCurrency, DEFAULT_CURRENCY,
 } from './store.js';
 import { syncState, describeSync, syncNow, subscribeSync } from './sync.js';
+import { formatPairingCode, toBase64 } from '../core/crypto.js';
+import {
+    MCP_PAIRING_TYPE, MCP_PAIRING_ID, readPairing, purgePairing, refreshResponder,
+} from '../core/mcp-responder.js';
 
 function generalCard(rerender) {
     const currency = ui.input(reportingCurrency(), { placeholder: DEFAULT_CURRENCY });
@@ -305,6 +309,339 @@ function syncCard(rerender) {
     return card;
 }
 
+// --- Connect Claude --------------------------------------------------------
+//
+// The AI connector's only user-visible surface (ARCHITECTURE.md §11, bd
+// myportfolio-ybp.5). Everything else in the chain is already merged: the frame
+// crypto (core/crypto.js), the blind relay (internal/server/mcp_relay.go), the
+// shim (cmd/mcpshim) and the browser responder (core/mcp-responder.js). This
+// card is what makes them reachable.
+//
+// THE KEY NEVER TOUCHES THE SERVER, and that is the property the whole design
+// exists for. The mint request is a bare POST with no body; the 32 key bytes are
+// generated here afterwards and only ever go two places — into the one-time code
+// the user pastes into the shim, and into a vault record (which the server sees
+// only as ciphertext, like every other record). Nothing in this section may put
+// the key in a request, a URL or a log line.
+//
+// "Shown once" is a UX property, not a cryptographic one: the vault record holds
+// both halves of the code, deliberately, so a second unlocked device can answer
+// without re-pairing. It is not re-displayed all the same — a secret that can be
+// summoned again is a secret people leave lying around — and it does not need to
+// be, because re-connecting is one click.
+
+export const MCP_CODE_ENV_VAR = 'MYPORTFOLIO_MCP_CODE';
+
+/** How many random bytes the pairing key is. crypto.js rejects any other length. */
+const PAIRING_KEY_BYTES = 32;
+
+/**
+ * The §11 relay ENDPOINT — the full path, not the origin.
+ *
+ * This one line has 404'd the whole feature once already, in C3: the sibling
+ * project's `relay_url` is a bare origin and its shim therefore appends the
+ * whole "/api/mcp/relay/shim", so minting an origin here makes the shim dial
+ * ".../api/mcp/relay/api/mcp/relay/shim". It fails against every real pairing
+ * and passes every test that mints its own code, which is why the pinned vector
+ * in internal/mcpshim/testdata/mcp_frame_vectors.json — the file the Go suite
+ * reads — is what features.settings.test.js asserts this against, rather than a
+ * string this file and its test agree on.
+ */
+export function relayEndpoint(loc) {
+    return `${loc.protocol === 'https:' ? 'wss:' : 'ws:'}//${loc.host}/api/mcp/relay`;
+}
+
+/**
+ * The line the user pastes into the shim's environment. `codeEnvVar` in
+ * cmd/mcpshim/main.go is the name, and features.settings.test.js reads that file
+ * rather than restating it — a shim reading a variable Settings does not name
+ * fails as "MYPORTFOLIO_MCP_CODE is not set", which sends the user looking at
+ * their shell instead of at us.
+ *
+ * Unquoted on purpose: a code is PREFIX + base64url + "." + base64url, so its
+ * alphabet is [A-Za-z0-9._-] and holds nothing a shell would interpret. The test
+ * pins the alphabet, because the day it grows a "$" this line starts silently
+ * pasting an empty variable.
+ */
+export function shimEnvLine(code) {
+    return `${MCP_CODE_ENV_VAR}=${code}`;
+}
+
+/**
+ * Mint a pairing and the one-time code for it. Nothing is stored yet — see
+ * savePairing.
+ *
+ * `http` and `randomBytes` are ports so the test can assert what actually
+ * crossed the wire. The order is load-bearing: the id is minted first and the
+ * key generated after, so there is never a moment where a key exists that the
+ * request could have carried.
+ */
+export async function mintPairing({ http, records: port, randomBytes, relayUrl }) {
+    // No body, no query, no headers: the id is derived from the session cookie
+    // server-side (createPairing in internal/server/mcp_relay.go).
+    const res = await http('/api/mcp/pairings', { method: 'POST', credentials: 'same-origin' });
+    if (!res.ok) {
+        throw new Error(res.status === 401
+            ? 'Your vault session has expired. Reload the app and unlock it, then try again.'
+            : `The server would not start a pairing (HTTP ${res.status}).`);
+    }
+    const body = await res.json();
+    const pairingId = typeof body?.pairing_id === 'string' ? body.pairing_id : '';
+    if (!pairingId) throw new Error('The server returned no pairing id.');
+
+    const key = randomBytes(new Uint8Array(PAIRING_KEY_BYTES));
+    // The pairing the account held is already dead — the server keeps one per
+    // account and mint() replaced it — so the record naming it is a tombstone
+    // from this point on. Dropping it BEFORE the code is shown is what makes
+    // abandoning this screen safe: whatever the user does next, no device is
+    // left holding a key for a pairing that cannot answer. It also means that
+    // walking away leaves NOTHING stored, so the card honestly reads "not
+    // connected" rather than claiming a connection with no code behind it.
+    await purgePairing(port);
+    return { pairingId, key, code: await formatPairingCode({ relayUrl, pairingId, key }) };
+}
+
+/**
+ * Store the key where any unlocked device can answer with it (§11).
+ *
+ * The shape is core/mcp-responder.js's `readPairing`, which reads `pairingId`
+ * and `key` off a record at MCP_PAIRING_ID and expects the key base64-encoded.
+ * That file is pinned; this is the side that has to match it.
+ */
+export function savePairing({ records: port, pairingId, key }) {
+    return port.put(MCP_PAIRING_TYPE, MCP_PAIRING_ID, { pairingId, key: toBase64(key) });
+}
+
+/** Revoke server-side. Idempotent: DELETE on an account with no pairing is a no-op 204. */
+export async function revokePairing({ http }) {
+    const res = await http('/api/mcp/pairings', { method: 'DELETE', credentials: 'same-origin' });
+    if (!res.ok) throw new Error(`The server would not revoke the pairing (HTTP ${res.status}).`);
+}
+
+// The three product facts §11 requires the UI to state rather than let a user
+// discover. Each of them is the explanation for a support question this feature
+// would otherwise generate: "why did it stop working", "what does your server
+// see", "can it trade for me".
+export const CONNECTOR_FACTS = [
+    'Answers come from this browser, so a question only works while a tab of this app is '
+    + 'open and unlocked. There is no server-side fallback, by design — the server holds '
+    + 'only ciphertext and cannot answer a single query. If no device is unlocked and '
+    + 'online, Claude is told so instead of waiting.',
+    'The relay in the middle cannot read the conversation: every message is encrypted to a '
+    + 'key it never receives. It does see the size and timing of each message and the '
+    + 'pairing id — so it learns that you asked something and roughly how big the answer '
+    + 'was, never what.',
+    'The connector is read-only. It can look at the portfolio — holdings, valuation, '
+    + 'performance, prices, transactions — and cannot add, change or delete anything.',
+];
+
+const note = (text) => ui.el('p', 'wg-muted text-sm m-0 mt-md', text);
+
+function connectClaudeCard() {
+    const card = ui.card(ui.sectionLabel('Connect Claude'));
+    const body = ui.el('div');
+    card.appendChild(body);
+
+    // This card repaints its own body and never calls the screen's rerender():
+    // the one-time code lives in nothing but the DOM node below and the closure
+    // that made it, so a full re-render would destroy it. Rebuilding the screen
+    // mid-ceremony would leave a minted pairing with no code on screen — the
+    // exact state the mint's purge exists to keep harmless, but still a dead end
+    // the user has to notice and restart.
+
+    const http = (url, init) => window.fetch(url, init);
+    const actions = (...buttons) => {
+        const row = ui.el('div', 'flex-row flex-between gap-sm mt-md');
+        row.appendChild(ui.el('span', 'flex-1'));
+        for (const b of buttons) row.appendChild(b);
+        return row;
+    };
+    const busy = (message) => body.replaceChildren(ui.emptyState(message));
+    const fail = (err, retry) => body.replaceChildren(
+        ui.messages([String(err?.message ?? err)]),
+        actions(retry)
+    );
+
+    async function paint() {
+        if (!syncState().connected) {
+            body.replaceChildren(
+                note('Connecting Claude needs a vault: the pairing lives on your account, so every '
+                    + 'device you unlock can answer. Set one up first.'),
+                ...CONNECTOR_FACTS.map(note)
+            );
+            return;
+        }
+
+        let pairing = null;
+        try {
+            pairing = await readPairing(records);
+        } catch (err) {
+            body.replaceChildren(ui.messages([`Could not read the pairing: ${err.message}`]));
+            return;
+        }
+
+        const connect = ui.button(
+            'wg-toolbar-btn wg-toolbar-btn--primary',
+            pairing ? 'Replace with a new code' : 'Connect Claude',
+            () => (pairing ? confirmReplace() : onConnect())
+        );
+
+        if (!pairing) {
+            body.replaceChildren(
+                note('Ask Claude about this portfolio from Claude Desktop or Claude Code. Connecting '
+                    + 'gives you a one-time code for the myportfolio MCP shim; the shim talks to this '
+                    + 'browser through a relay that cannot read what it carries.'),
+                ...CONNECTOR_FACTS.map(note),
+                actions(connect)
+            );
+            return;
+        }
+
+        const disconnect = ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Disconnect', () => ui.confirm({
+            title: 'Disconnect Claude',
+            message: 'Claude stops being able to read this portfolio, on every device. The stored key '
+                + 'is deleted and the code you saved stops working — connecting again gives you a new one.',
+            confirmLabel: 'Disconnect',
+            onConfirm: onDisconnect,
+        }));
+
+        body.replaceChildren(
+            ui.messages([`Connected · pairing ${pairing.pairingId}`], 'normal'),
+            note('This device answers whenever it is open and unlocked. The code is not shown again — '
+                + 'if you have lost it, replace it with a new one.'),
+            // internal/server/mcp_relay.go ages a pairing out 24 hours after it
+            // was minted and keeps the table in memory, so a server restart ends
+            // it too. Both are cheap to recover from and baffling if unstated.
+            note('A pairing lasts 24 hours, and ends if the server restarts. When Claude says no '
+                + 'device is online and a tab is open and unlocked, connect again.'),
+            ...CONNECTOR_FACTS.map(note),
+            actions(disconnect, connect)
+        );
+    }
+
+    function confirmReplace() {
+        ui.confirm({
+            title: 'Replace the pairing',
+            message: 'The code you are using now stops working immediately, on every device, and you '
+                + 'get a new one to paste into the shim.',
+            confirmLabel: 'Replace',
+            onConfirm: onConnect,
+        });
+    }
+
+    async function onConnect() {
+        busy('Starting a pairing…');
+        let minted;
+        try {
+            minted = await mintPairing({
+                http,
+                records,
+                // The one place these 32 bytes come from. Not Math.random, and
+                // not derived from anything the server has ever seen.
+                randomBytes: (buf) => crypto.getRandomValues(buf),
+                relayUrl: relayEndpoint(window.location),
+            });
+        } catch (err) {
+            fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Try again', paint));
+            return;
+        }
+        // Deliberately NOT refreshResponder() here, and the reason is a race
+        // codex found: refreshResponder returns early while an election is still
+        // in flight (`electing`), so a reconcile whose readPairing landed before
+        // the user pressed Finish releases the lock with no responder — and the
+        // Finish call is the one that gets dropped. The result is a saved pairing
+        // that answers nothing until a reload, i.e. "no device online" with an
+        // unlocked tab open, which is the least attributable symptom this whole
+        // feature can produce.
+        //
+        // Awaiting it instead is worse: the promise settles only once the lock is
+        // GRANTED, so a tab queued behind another tab's responder would sit on
+        // "Starting a pairing…" forever.
+        //
+        // Nothing is needed here anyway. The relay closed the old device leg with
+        // 4409 the moment mint() replaced the pairing, and mcp-responder's
+        // onStalePairing stops that responder and releases the election on its
+        // own; a leg that was offline for it takes the same 4409 on its next dial.
+        // Finish's refreshResponder is then the only election in play.
+        paintCode(minted);
+    }
+
+    function paintCode({ pairingId, key, code }) {
+        const envLine = shimEnvLine(code);
+        const copy = ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Copy the line', async () => {
+            try {
+                await navigator.clipboard.writeText(envLine);
+                copy.replaceChildren(ui.el('span', null, 'Copied'));
+            } catch {
+                // Clipboard access is refused in plenty of ordinary situations
+                // (no permission, an insecure origin, an in-app browser). The
+                // code block selects itself in one click, so say that instead of
+                // leaving a button that does nothing.
+                copy.replaceChildren(ui.el('span', null, 'Select it and copy by hand'));
+            }
+        });
+
+        const finish = ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'I saved it — finish', async () => {
+            busy('Storing the key…');
+            try {
+                await savePairing({ records, pairingId, key });
+            } catch (err) {
+                // Nothing is connected and nothing was stored: the pairing is
+                // live server-side but no device holds its key, which is exactly
+                // the state minting leaves behind and it ages out on its own.
+                fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Start again', onConnect));
+                return;
+            }
+            // Answer from this tab now, without a reload.
+            refreshResponder({ records });
+            paint();
+        });
+
+        const cancel = ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Cancel', async () => {
+            busy('Cancelling…');
+            try {
+                await revokePairing({ http });
+            } catch (err) {
+                fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Back', paint));
+                return;
+            }
+            paint();
+        });
+
+        body.replaceChildren(
+            ui.messages(['This code is shown once. It carries the encryption key, so it is not stored '
+                + 'anywhere you can read it back — save it now, or connect again for a new one.'], 'normal'),
+            note('Install the myportfolio MCP shim, then put this line in the environment you start it '
+                + `from (Claude Desktop calls it "env"). It is the shim's only setting.`),
+            ui.el('div', 'wg-code-block mt-md', envLine),
+            note('The code itself, if you need it on its own:'),
+            ui.el('div', 'wg-code-block mt-md', code),
+            note('Nothing is connected yet. This device starts answering when you finish below — so if '
+                + 'you close this screen instead, no device is left holding a code you do not have.'),
+            actions(cancel, copy, finish)
+        );
+    }
+
+    async function onDisconnect() {
+        busy('Disconnecting…');
+        try {
+            // Server first. The other order would delete the only copy of the
+            // key while the relay still routed the pairing, leaving a shim that
+            // connects to a pairing nothing can answer.
+            await revokePairing({ http });
+            await purgePairing(records);
+        } catch (err) {
+            fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Try again', paint));
+            return;
+        }
+        refreshResponder({ records });
+        paint();
+    }
+
+    paint();
+    return card;
+}
+
 // --- Accounts --------------------------------------------------------------
 
 function accountModal(record, rerender) {
@@ -568,6 +905,7 @@ export function render(container) {
         syncCard(rerender),
         generalCard(rerender),
         quotesCard(rerender),
+        connectClaudeCard(),
         recordsCard({
             label: 'Accounts',
             noun: 'account',

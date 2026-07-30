@@ -21,14 +21,25 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import nodeCrypto from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { QUOTE_HOSTS } from '../../../domain/quotes.js';
+import { fromBase64, toBase64 } from '../core/crypto.js';
+import { MCP_PAIRING_TYPE, MCP_PAIRING_ID, readPairing, purgePairing } from '../core/mcp-responder.js';
+
+globalThis.crypto ??= nodeCrypto.webcrypto;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const SETTINGS_PATH = path.join(REPO_ROOT, 'web/static/js/features/settings.js');
+const SHIM_MAIN_PATH = path.join(REPO_ROOT, 'cmd/mcpshim/main.go');
+const SERVER_PATH = path.join(REPO_ROOT, 'internal/server/server.go');
+const VECTORS_PATH = path.join(REPO_ROOT, 'internal/mcpshim/testdata/mcp_frame_vectors.json');
 
 // settings.js reaches store.js → core/localdb.js, which opens the real Dexie
 // handle at import time and there is no IndexedDB under node. A chainable no-op
@@ -43,8 +54,11 @@ function chainableNoop() {
 }
 globalThis.Dexie = chainableNoop();
 
-const { QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders } =
-    await import('../features/settings.js');
+const {
+    QUOTE_PROVIDERS, quoteProviderRows, mergeQuoteProviders,
+    MCP_CODE_ENV_VAR, CONNECTOR_FACTS, relayEndpoint, shimEnvLine,
+    mintPairing, savePairing, revokePairing,
+} = await import('../features/settings.js');
 
 /** What the card's Save handler builds from the rendered rows, untouched. */
 const editsFrom = (rows) => rows.map((row) => ({
@@ -270,5 +284,425 @@ describe('settings — the card is wired to the merge', () => {
         assert.doesNotMatch(source, /providerSel/);
         assert.match(source, /row\.keyField\s*\n?\s*\?\s*ui\.input\(row\.apiKey/);
         assert.match(source, /apiKey:\s*key\s*\?\s*key\.value\.trim\(\)\s*:\s*''/);
+    });
+});
+
+// ===========================================================================
+// Connect Claude (bd myportfolio-ybp.5, ARCHITECTURE.md §11)
+// ===========================================================================
+//
+// Everything below drives the SHIPPED functions out of settings.js. Where a fact
+// is owned by the Go side — the relay's route, the shim's environment variable,
+// the pinned pairing-code vector — the assertion reads that file rather than
+// restating its value here, because a test carrying its own copy of the contract
+// passes exactly as happily when the shipped code drifts away from it. Four
+// tests in this repo have already been caught doing that.
+
+/** The §3 port, in memory: same three methods, same field ownership. */
+function memoryRecords() {
+    const rows = new Map();
+    let clock = 1;
+    return {
+        async list(recordType) {
+            return [...rows.values()].filter((r) => r.recordType === recordType && r.deleted !== true);
+        },
+        async put(recordType, recordId, body) {
+            rows.set(recordId, { ...body, recordId, recordType, deleted: false, clientTs: clock++ });
+        },
+        async del(recordType, recordId) {
+            rows.set(recordId, { recordId, recordType, deleted: true, clientTs: clock++ });
+        },
+        _raw: rows,
+    };
+}
+
+/**
+ * An `http` port that records everything it was asked to send. `calls` is what
+ * the key must not appear anywhere inside.
+ */
+function recordingHttp(handler) {
+    const calls = [];
+    return {
+        calls,
+        http: async (url, init) => {
+            calls.push({ url, init });
+            return handler(url, init);
+        },
+    };
+}
+
+const mintResponse = (pairingId) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ pairing_id: pairingId }),
+});
+
+const RELAY = 'wss://p.example/api/mcp/relay';
+const realRandom = (buf) => crypto.getRandomValues(buf);
+
+/** Everything the key could plausibly be smuggled as, in one place. */
+function keyEncodings(key) {
+    const b64 = toBase64(key);
+    return [
+        b64,
+        b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), // base64url
+        Buffer.from(key).toString('hex'),
+        [...key].join(','), // the shape JSON.stringify gives a Uint8Array-turned-array
+    ];
+}
+
+describe('Connect Claude — relay_url is the ENDPOINT, not the origin', () => {
+    // The bug this pins 404'd every real pairing in C3 while passing every test
+    // that minted its own code from a bare listener address. §11 names it, and
+    // pins the shim's half against this same vector file.
+    const vectors = JSON.parse(fs.readFileSync(VECTORS_PATH, 'utf8'));
+
+    test('minting for the pinned vector\'s host reproduces the pinned relay_url', () => {
+        const { host, pathname } = new URL(vectors.relay_url.replace(/^wss:/, 'https:'));
+        assert.equal(relayEndpoint({ protocol: 'https:', host }), vectors.relay_url);
+        // Stated separately so a failure says which half is wrong.
+        assert.equal(pathname, '/api/mcp/relay');
+    });
+
+    test('the path is the one the server actually routes', () => {
+        // internal/server/server.go owns it. Deriving from the shim route means
+        // moving the route breaks this test rather than breaking pairing.
+        const route = fs.readFileSync(SERVER_PATH, 'utf8')
+            .match(/mux\.HandleFunc\("GET (\/api\/mcp\/relay)\/shim"/);
+        assert.ok(route, 'no GET /api/mcp/relay/shim route found in internal/server/server.go');
+        assert.equal(relayEndpoint({ protocol: 'https:', host: 'p.example' }), `wss://p.example${route[1]}`);
+    });
+
+    test('the relay path appears exactly once — the doubling is the failure mode', () => {
+        const url = relayEndpoint({ protocol: 'https:', host: 'p.example' });
+        assert.equal(url.split('/api/mcp/relay').length - 1, 1);
+    });
+
+    test('a plain-http origin gets ws:, not wss:', () => {
+        // Local development is served over http, and a wss: URL there fails as a
+        // bare onclose — which reads identically to "no device online".
+        assert.equal(
+            relayEndpoint({ protocol: 'http:', host: 'localhost:8080' }),
+            'ws://localhost:8080/api/mcp/relay'
+        );
+    });
+});
+
+describe('Connect Claude — the environment line names the variable the shim reads', () => {
+    test('the variable is cmd/mcpshim/main.go\'s own codeEnvVar', () => {
+        const declared = fs.readFileSync(SHIM_MAIN_PATH, 'utf8').match(/const codeEnvVar = "([^"]+)"/);
+        assert.ok(declared, 'codeEnvVar not found in cmd/mcpshim/main.go');
+        assert.equal(MCP_CODE_ENV_VAR, declared[1]);
+    });
+
+    test('the line is NAME=code, and the code needs no shell quoting', async () => {
+        const records = memoryRecords();
+        const { http } = recordingHttp(() => mintResponse('prg-abc'));
+        const { code } = await mintPairing({ http, records, randomBytes: realRandom, relayUrl: RELAY });
+        // The unquoted form in shimEnvLine is only safe while this holds.
+        assert.match(code, /^[A-Za-z0-9._-]+$/);
+        assert.equal(shimEnvLine(code), `${MCP_CODE_ENV_VAR}=${code}`);
+    });
+});
+
+describe('Connect Claude — THE KEY NEVER TOUCHES THE SERVER', () => {
+    test('the mint request carries no body, no query and no key', async () => {
+        const records = memoryRecords();
+        const { http, calls } = recordingHttp(() => mintResponse('prg-abc'));
+        const { key } = await mintPairing({ http, records, randomBytes: realRandom, relayUrl: RELAY });
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].url, '/api/mcp/pairings');
+        assert.equal(calls[0].init.method, 'POST');
+        assert.equal(calls[0].init.body, undefined, 'the mint request must have no body at all');
+
+        const wire = JSON.stringify(calls);
+        for (const encoded of keyEncodings(key)) {
+            assert.equal(wire.includes(encoded), false, 'the pairing key reached the server');
+        }
+        // And nothing key-shaped got in there by some other route.
+        assert.doesNotMatch(wire, /[A-Za-z0-9+/_-]{40,}/);
+    });
+
+    test('revoking carries no key either', async () => {
+        const { http, calls } = recordingHttp(() => ({ ok: true, status: 204 }));
+        await revokePairing({ http });
+        assert.deepEqual(calls.map((c) => [c.url, c.init.method]), [['/api/mcp/pairings', 'DELETE']]);
+        assert.equal(calls[0].init.body, undefined);
+    });
+
+    test('the key is 32 fresh bytes from the injected CSPRNG', async () => {
+        const records = memoryRecords();
+        const { http } = recordingHttp(() => mintResponse('prg-abc'));
+        const seen = [];
+        const mint = () => mintPairing({
+            http,
+            records,
+            randomBytes: (b) => { crypto.getRandomValues(b); seen.push(b); return b; },
+            relayUrl: RELAY,
+        });
+        const a = await mint();
+        const b = await mint();
+        assert.equal(a.key.length, 32);
+        assert.equal(seen.length, 2, 'the key must come from the injected randomness, not from elsewhere');
+        assert.notEqual(toBase64(a.key), toBase64(b.key));
+    });
+});
+
+describe('Connect Claude — the stored record is the one mcp-responder.js reads', () => {
+    test('readPairing (the shipped responder function) finds what savePairing wrote', async () => {
+        const records = memoryRecords();
+        const { http } = recordingHttp(() => mintResponse('prg-7f3c'));
+        const { pairingId, key } = await mintPairing({
+            http, records, randomBytes: realRandom, relayUrl: RELAY,
+        });
+        await savePairing({ records, pairingId, key });
+
+        const stored = await readPairing(records);
+        assert.ok(stored, 'the responder cannot see the record the card wrote');
+        assert.equal(stored.pairingId, 'prg-7f3c');
+        // The responder hands `key` straight to fromBase64 and then to the AEAD,
+        // so the encoding is part of the contract, not an implementation detail.
+        assert.deepEqual([...fromBase64(stored.key)], [...key]);
+        // At the type and id the responder looks under, and nowhere else.
+        assert.equal(records._raw.get(MCP_PAIRING_ID).recordType, MCP_PAIRING_TYPE);
+    });
+
+    test('the pairing type is outside schema.js\'s RECORD map, so exports cannot carry the key', async () => {
+        // store.exportAll() enumerates Object.values(RECORD). The one secret the
+        // server never sees must not land in a plaintext export file.
+        const { RECORD } = await import('../../../domain/schema.js');
+        assert.equal(Object.values(RECORD).includes(MCP_PAIRING_TYPE), false);
+    });
+});
+
+describe('Connect Claude — an abandoned code leaves nothing behind', () => {
+    test('minting drops the record for the pairing it just replaced', async () => {
+        // The server keeps one pairing per account, so minting kills the old one
+        // — the record naming it is a tombstone from that moment. Dropping it
+        // before the code is shown is what makes closing the screen safe: no
+        // device is left holding a key for a pairing that cannot answer, and the
+        // card honestly reads "not connected".
+        const records = memoryRecords();
+        await savePairing({ records, pairingId: 'prg-old', key: new Uint8Array(32).fill(7) });
+        assert.ok(await readPairing(records));
+
+        const { http } = recordingHttp(() => mintResponse('prg-new'));
+        await mintPairing({ http, records, randomBytes: realRandom, relayUrl: RELAY });
+        assert.equal(await readPairing(records), null, 'the replaced pairing is still stored');
+    });
+
+    test('nothing is stored until the user says they saved the code', async () => {
+        const records = memoryRecords();
+        const { http } = recordingHttp(() => mintResponse('prg-new'));
+        const minted = await mintPairing({ http, records, randomBytes: realRandom, relayUrl: RELAY });
+        assert.equal(await readPairing(records), null);
+        await savePairing({ records, pairingId: minted.pairingId, key: minted.key });
+        assert.equal((await readPairing(records)).pairingId, 'prg-new');
+    });
+
+    test('a refused mint stores nothing and says which failure it was', async () => {
+        const records = memoryRecords();
+        const { http } = recordingHttp(() => ({ ok: false, status: 401 }));
+        await assert.rejects(
+            mintPairing({ http, records, randomBytes: realRandom, relayUrl: RELAY }),
+            /session has expired/
+        );
+        assert.equal(await readPairing(records), null);
+    });
+
+    test('a mint response with no pairing id is refused rather than coded around', async () => {
+        const records = memoryRecords();
+        const { http } = recordingHttp(() => ({ ok: true, status: 200, json: async () => ({}) }));
+        await assert.rejects(
+            mintPairing({ http, records, randomBytes: realRandom, relayUrl: RELAY }),
+            /no pairing id/
+        );
+    });
+});
+
+describe('Connect Claude — disconnect revokes server-side AND drops the record', () => {
+    test('the DELETE goes out and the stored key stops being readable', async () => {
+        const records = memoryRecords();
+        const mintHttp = recordingHttp(() => mintResponse('prg-abc'));
+        const { pairingId, key } = await mintPairing({
+            http: mintHttp.http, records, randomBytes: realRandom, relayUrl: RELAY,
+        });
+        await savePairing({ records, pairingId, key });
+
+        // The two halves of onDisconnect, in its order.
+        const delHttp = recordingHttp(() => ({ ok: true, status: 204 }));
+        await revokePairing({ http: delHttp.http });
+        await purgePairing(records);
+
+        assert.deepEqual(delHttp.calls.map((c) => c.init.method), ['DELETE']);
+        assert.equal(await readPairing(records), null);
+        // A tombstone, not a hard delete — §3, or the next merge resurrects it —
+        // and the body, which is where the key was, is gone with it.
+        const row = records._raw.get(MCP_PAIRING_ID);
+        assert.equal(row.deleted, true);
+        assert.equal(row.key, undefined, 'the tombstone still carries the pairing key');
+    });
+
+    test('a server that refuses the revoke throws, so the card keeps the key', async () => {
+        // Purging first would delete the only copy of the key while the relay
+        // still routed the pairing: a shim that connects to a pairing nothing can
+        // answer, which reaches the user as the design's own "no device online".
+        const { http } = recordingHttp(() => ({ ok: false, status: 500 }));
+        await assert.rejects(revokePairing({ http }), /would not revoke/);
+    });
+});
+
+describe('Connect Claude — the copy states the three product facts', () => {
+    // §11: these are not implementation details, and a user who discovers them
+    // by being confused has been failed by this card.
+    const all = () => CONNECTOR_FACTS.join(' ');
+
+    test('answers need a live unlocked tab, and there is no fallback', () => {
+        assert.match(all(), /open and unlocked/);
+        assert.match(all(), /no server-side fallback/);
+    });
+
+    test('the relay sees size and timing but not content', () => {
+        assert.match(all(), /cannot read/);
+        assert.match(all(), /size and timing/);
+    });
+
+    test('the connector is read-only', () => {
+        assert.match(all(), /read-only/);
+        assert.match(all(), /cannot add, change or delete/);
+    });
+});
+
+describe('Connect Claude — the card is wired to these functions', () => {
+    // DOM-bound, and this project has no jsdom: the handlers are pinned at the
+    // source, the way the quote-provider card's are above.
+    const source = fs.readFileSync(SETTINGS_PATH, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/[^\n]*$/gm, '');
+
+    test('the card is rendered', () => {
+        assert.match(source, /connectClaudeCard\(\),/);
+    });
+
+    test('the code is minted with the endpoint form of the relay URL', () => {
+        assert.match(source, /relayUrl:\s*relayEndpoint\(window\.location\)/);
+    });
+
+    test('the key comes from crypto.getRandomValues', () => {
+        assert.match(source, /randomBytes:\s*\(buf\)\s*=>\s*crypto\.getRandomValues\(buf\)/);
+        assert.doesNotMatch(source, /Math\.random/);
+    });
+
+    test('the code is never stored anywhere but the DOM', () => {
+        // A module-level variable holding it (the shape importCard uses for its
+        // report) would survive the screen and defeat "shown once"; localStorage
+        // would put the key outside the vault entirely.
+        assert.doesNotMatch(source, /localStorage|sessionStorage/);
+        assert.doesNotMatch(source, /^(let|var)\s+\w*[Cc]ode\b/m);
+    });
+
+    test('the code is never re-displayed from the stored record', () => {
+        // formatPairingCode appears twice — the import and the one call inside
+        // mintPairing. A third would be a "show it again" button, and the stored
+        // record holds everything needed to build one.
+        assert.equal(source.split('formatPairingCode').length - 1, 2);
+    });
+
+    test('disconnect revokes server-side and purges, in that order', () => {
+        const disconnect = source.match(/async function onDisconnect\(\)[\s\S]*?\n {4}\}/);
+        assert.ok(disconnect, 'onDisconnect not found');
+        assert.match(disconnect[0], /await revokePairing\(\{ http \}\);\s*await purgePairing\(records\);/);
+    });
+
+    test('finish and disconnect re-run the responder without a reload, and nothing else does', () => {
+        // Exactly two calls, and the count is the assertion. A third — the
+        // obvious one, right after minting — is dropped by mcp-responder's
+        // `electing` guard if its election is still in flight, and takes
+        // Finish's call down with it: a saved pairing that answers nothing
+        // until a reload. See the comment in onConnect.
+        assert.equal(source.split('refreshResponder({ records })').length - 1, 2);
+        for (const fn of ['async function onDisconnect', 'busy(\'Storing the key…\')']) {
+            assert.ok(source.includes(fn), `${fn} not found`);
+        }
+    });
+});
+
+// --- The real Go parser ----------------------------------------------------
+//
+// The strongest evidence available from this side: a code minted by the shipped
+// mintPairing, handed to the REAL cmd/mcpshim binary through the REAL
+// environment variable, and accepted by the REAL Go parser. Nothing about the
+// format is restated here — if the JS encoder and the Go decoder disagree by one
+// byte, the shim refuses to start and this fails.
+//
+// The negative control is what makes the positive result mean anything: a
+// one-character corruption of the same code must be REJECTED. Without it, a shim
+// that accepted any string at all would pass just as well.
+//
+// Skipped where there is no Go toolchain, like mcp-shim-e2e.test.mjs.
+const HAVE_GO = spawnSync('go', ['version'], { stdio: 'ignore' }).status === 0;
+
+describe('Connect Claude — the minted code parses in the real shim', { skip: !HAVE_GO }, () => {
+    /**
+     * Start the real binary with `code` in the environment and report how far it
+     * got: 'started' means the parser accepted it and the stdio server came up,
+     * 'rejected' means it exited on the code itself.
+     */
+    function runShim(binary, code) {
+        return new Promise((resolve, reject) => {
+            const child = spawn(binary, [], { env: { ...process.env, [MCP_CODE_ENV_VAR]: code } });
+            let stderr = '';
+            const settle = (outcome) => {
+                clearTimeout(timer);
+                child.kill('SIGKILL');
+                resolve({ outcome, stderr });
+            };
+            const timer = setTimeout(() => settle('hung'), 20000);
+            child.stdout.on('data', () => {});
+            child.stderr.on('data', (chunk) => {
+                stderr += chunk;
+                if (stderr.includes('starting stdio MCP server')) settle('started');
+            });
+            child.on('error', reject);
+            child.on('exit', () => { clearTimeout(timer); resolve({ outcome: 'rejected', stderr }); });
+        });
+    }
+
+    test('the real binary accepts it, and rejects it one character wrong', async (t) => {
+        const dir = mkdtempSync(path.join(tmpdir(), 'mcpshim-c5-'));
+        t.after(() => rmSync(dir, { recursive: true, force: true }));
+        const binary = path.join(dir, 'mcpshim');
+        const build = spawnSync('go', ['build', '-o', binary, './cmd/mcpshim'], {
+            cwd: REPO_ROOT, encoding: 'utf8',
+        });
+        assert.equal(build.status, 0, `go build failed: ${build.stderr}`);
+
+        const records = memoryRecords();
+        // Shaped like a real one: generatePairingID (internal/server/mcp_relay.go)
+        // returns base64url over 16 bytes, so "-" and "_" are ordinary in an id.
+        const { http } = recordingHttp(() => mintResponse('a-_9ZmQrS1tuVwx2Y3Z0Aw'));
+        const { code, key } = await mintPairing({
+            http,
+            records,
+            randomBytes: realRandom,
+            // Exactly what this card would mint for an https origin.
+            relayUrl: relayEndpoint({ protocol: 'https:', host: 'portfolio.example' }),
+        });
+
+        const ok = await runShim(binary, code);
+        assert.equal(ok.outcome, 'started', `the real shim rejected a code this card minted:\n${ok.stderr}`);
+        // And it echoed neither the code nor the key into its diagnostics.
+        for (const encoded of keyEncodings(key)) {
+            assert.equal(ok.stderr.includes(encoded), false, 'the shim logged the pairing key');
+        }
+        assert.equal(ok.stderr.includes(code), false, 'the shim logged the pairing code');
+
+        // Negative control: flip one character inside the body.
+        const at = code.length - 12;
+        const flipped = code.slice(0, at) + (code[at] === 'A' ? 'B' : 'A') + code.slice(at + 1);
+        const bad = await runShim(binary, flipped);
+        assert.equal(bad.outcome, 'rejected', 'the shim started on a corrupted code');
+        assert.match(bad.stderr, new RegExp(`invalid ${MCP_CODE_ENV_VAR}`));
     });
 });
