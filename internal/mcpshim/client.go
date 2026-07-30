@@ -70,13 +70,20 @@ func NewClientFromPairing(pc *PairingCode, opts *websocket.DialOptions) *Client 
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	core, err := c.connected(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("mcpshim: connect to relay: %w", err)
+		return nil, connectErr("connect to", err)
 	}
 	result, err := core.Call(ctx, method, params)
 	if errors.Is(err, errConnectionDropped) {
+		// This core is dead; whether that is worth a redial depends on WHY,
+		// and the why can still be in flight (the write fails, then readLoop
+		// reads the close frame). Ask the connection that actually failed —
+		// c.core may already be a newer one dialed by a concurrent Call.
+		if terminal := core.awaitTerminal(ctx); terminal != nil {
+			return nil, terminal
+		}
 		core, err = c.redial(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("mcpshim: reconnect to relay: %w", err)
+			return nil, connectErr("reconnect to", err)
 		}
 		return core.Call(ctx, method, params)
 	}
@@ -102,6 +109,19 @@ func (c *Client) redial(ctx context.Context) (*ShimCore, error) {
 // gives up and returns the last error wrapped with the attempt count. It never
 // loops unbounded and it never swallows the cause.
 func (c *Client) redialLocked(ctx context.Context) (*ShimCore, error) {
+	// Unless the relay already said redialing is pointless. 4404 (no pairing at
+	// all) and 4409 (a live pairing this leg is not serving) are terminal: the
+	// attempts would burn on a dial that can only 401, or on the same lost
+	// race, and the user would get a transport error instead of the one
+	// sentence that tells them to re-pair. c.core is left in place on purpose —
+	// it makes every later Call answer with the same terminal error rather than
+	// starting the pointless dialing over.
+	if c.core != nil {
+		if err := c.core.terminalErr(); err != nil {
+			return nil, err
+		}
+	}
+
 	var lastErr error
 	for attempt := 1; attempt <= dialAttempts; attempt++ {
 		if attempt > 1 {
@@ -120,6 +140,18 @@ func (c *Client) redialLocked(ctx context.Context) (*ShimCore, error) {
 	}
 	c.core = nil
 	return nil, fmt.Errorf("mcpshim: gave up reconnecting after %d attempts: %w", dialAttempts, lastErr)
+}
+
+// connectErr wraps a failure to reach the relay, EXCEPT for the two terminal
+// pairing errors. Those are finished, user-facing sentences meant to be read by
+// the model exactly as written (like ErrDeviceOffline, which Call also returns
+// unwrapped); a "mcpshim: reconnect to relay:" prefix would only bury the
+// instruction the user has to act on behind a transport-sounding one.
+func connectErr(what string, err error) error {
+	if isTerminalClose(err) {
+		return err
+	}
+	return fmt.Errorf("mcpshim: %s relay: %w", what, err)
 }
 
 // Close tears down the underlying connection, if one was ever dialed (Call
