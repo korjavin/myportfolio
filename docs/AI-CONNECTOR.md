@@ -174,14 +174,15 @@ it is not in your plaintext exports either.
 
 ## 6. When it says nothing is online
 
-The shim returns one of three messages, and they are kept mutually distinguishable on purpose,
-because *"the connector looks alive and every call times out"* is a symptom that points nowhere.
+Four shapes, kept mutually distinguishable on purpose, because *"the connector looks alive and every
+call times out"* is a symptom that points nowhere.
 
 | What Claude is told | What it means | What to do |
 |---|---|---|
 | *No unlocked device is online to answer. Your pairing code is valid…* | The pairing is fine; no tab is open and unlocked. Returned after 30s. | Open the app, unlock it, retry. |
-| *This pairing no longer exists…* | The relay has no pairing for this account: revoked, expired, or lost to a server restart. | Re-pair in Settings, restart the shim with the new code. |
+| *This pairing no longer exists…* | The relay closed a **live** connection because the account's pairing went away under it — you pressed Disconnect, or it aged out while the shim was attached. | Re-pair in Settings, restart the shim with the new code. |
 | *Another connection took over this pairing…* | A newer shim, or a newer pairing minted from Settings, replaced this one. | Keep one shim; if you re-paired, restart it with the new code. |
+| *mcpshim: connect to relay: … gave up reconnecting after 3 attempts … dial relay …* | The shim could not get a socket at all: the relay is unreachable, **or** it answered `401 unknown or expired pairing` because the pairing is already gone. This is what a shim started *after* a pairing expired or a server restart sees — there is no live connection left for the relay to close with a nicer message. | Check the app loads at all; if it does, re-pair and restart the shim. |
 
 Startup failures are separate and loud — the shim refuses to run rather than pairing with a key that
 would make every call time out. Both go to stderr, which is where your client's MCP logs will show
@@ -206,9 +207,15 @@ Stated as the code behaves at the time of writing (`internal/server/mcp_relay.go
 - **The pairing table is in memory, so a server restart ends every pairing** — and this deployment
   redeploys on every green push to master, so that is not a rare event.
 
-Either way the shim tells you the pairing no longer exists, and re-pairing is one click plus a
-restart of the client. This is a known defect rather than a design property (bd
-`myportfolio-ybp.10`); the 4404 close-code machinery that reports it *is* the design, and works.
+Recovery is the same either way — re-pair in Settings, restart the client — but **which of the two
+messages above you get depends on whether the shim was connected at the time**. Aged out while
+attached: the relay closes the leg with `4404` and you get *"This pairing no longer exists"*, which is
+the sentence you want. Killed by a restart, or first call from a shim started later: there is no live
+leg to close, the redial 401s, and you get the transport-flavoured *"gave up reconnecting"* error
+instead. Same cause, worse label — worth knowing, since the restart case is the common one here.
+
+This is a known defect rather than a design property (bd `myportfolio-ybp.10`). The `4404` machinery
+that reports it *is* the design, and works.
 
 If you have several tabs or devices open, exactly one of them answers — one device leg per pairing is
 a standing limitation. The tabs elect an answerer between themselves; you do not have to pick.
