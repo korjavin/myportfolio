@@ -52,7 +52,7 @@ func shimClient(t *testing.T, f *relayFixture, pairingID string) (*mcpshim.Clien
 // test instead of the package timeout.
 func call(t *testing.T, client *mcpshim.Client) (err error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	_, err = client.Call(ctx, "mcp_help", mcpshim.HelpInput{Topic: "performance"})
 	return err
@@ -100,7 +100,7 @@ func waitDeviceClosed(t *testing.T, closed <-chan struct{}, what string) {
 // delivered but never answered leaves one queued ahead of the close.
 func waitClose(t *testing.T, conn *websocket.Conn, want websocket.StatusCode, what string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	for {
 		if _, _, err := conn.Read(ctx); err != nil {

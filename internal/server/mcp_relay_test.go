@@ -37,6 +37,20 @@ type relayFixture struct {
 	key     []byte
 }
 
+// testWait is the deadline for every "did the thing happen" wait in this
+// package's relay tests. It is deliberately generous.
+//
+// Nothing here measures how FAST anything happens — only that a frame arrives,
+// or a leg closes, and with the right code. These tests bind real websockets and
+// run on shared CI runners with unpredictable neighbours, so tight deadlines
+// bought nothing and lost: master went red on a beads-only commit and on a
+// docs-only commit, neither of which touches Go. An intermittently-red CI is
+// worse than a slow one, because people learn to re-run it without reading it.
+//
+// If a test ever needs to assert a latency BOUND, it should say so with its own
+// named deadline rather than tightening this one.
+const testWait = 60 * time.Second
+
 func newRelayFixture(t *testing.T) *relayFixture {
 	t.Helper()
 	v := newVault(t)
@@ -80,7 +94,7 @@ func (f *relayFixture) dial(t *testing.T, urlStr string, cookie *http.Cookie) (*
 	if cookie != nil {
 		opts.HTTPHeader = http.Header{"Cookie": {cookie.Name + "=" + cookie.Value}}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	conn, resp, err := websocket.Dial(ctx, urlStr, opts)
 	if conn != nil {
@@ -121,7 +135,7 @@ func (f *relayFixture) bridged(t *testing.T) (pairingID string, shim, device *we
 
 func writeFrame(t *testing.T, conn *websocket.Conn, frame []byte) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
 		t.Fatalf("write frame: %v", err)
@@ -130,7 +144,7 @@ func writeFrame(t *testing.T, conn *websocket.Conn, frame []byte) {
 
 func readFrame(t *testing.T, conn *websocket.Conn) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	typ, data, err := conn.Read(ctx)
 	if err != nil {
@@ -153,7 +167,7 @@ func expectClose(t *testing.T, conn *websocket.Conn, want websocket.StatusCode, 
 	// intermittently-red CI is worse than a slow one — people learn to re-run it
 	// without reading it. CI runs on shared runners with unpredictable
 	// neighbours, so the deadline is generous rather than tight.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	_, _, err := conn.Read(ctx)
 	if got := websocket.CloseStatus(err); got != want {
@@ -326,7 +340,7 @@ func TestRelayRejectsAnOversizedFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	// The write itself may or may not error depending on when the relay's close
 	// lands; what matters is that the frame is refused and never forwarded.
@@ -658,7 +672,7 @@ func TestEndToEndThroughTheRealShimClient(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
 	raw, err := client.Call(ctx, "mcp_help", mcpshim.HelpInput{Topic: "performance"})
 	if err != nil {
