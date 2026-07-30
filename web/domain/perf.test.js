@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createPerformanceDomain, xirr } from './perf.js';
+import { createPortfolioDomain } from './portfolio.js';
 
 // An in-memory stand-in for the §3 records port, same shape as portfolio.test.js.
 function fixture() {
@@ -14,7 +15,13 @@ function fixture() {
     return id;
   };
   const records = { async list(recordType) { return (byType.get(recordType) || []).slice(); } };
-  return { put, performance: (opts) => createPerformanceDomain({ records }).performance(opts) };
+  return {
+    put,
+    performance: (opts) => createPerformanceDomain({ records }).performance(opts),
+    // The FX tests below assert the two engines agree on what moved, so they
+    // need portfolio.js's own answer rather than a number retyped from it.
+    snapshot: (opts) => createPortfolioDomain({ records }).snapshot(opts),
+  };
 }
 
 function basics(f, { currency = 'EUR' } = {}) {
@@ -490,4 +497,108 @@ test('days are UTC calendar days, unaffected by the machine timezone', async () 
   assert.deepEqual(east, west);
   assert.equal(east[0], '2023-12-31');
   assert.ok(Math.abs(east[1] - 0.1) < 1e-12);
+});
+
+// --- Currency --------------------------------------------------------------
+//
+// Valuations arrive from portfolio.js already in settings.reportingCurrency.
+// A flow read in the transaction's own currency and netted against one of those
+// is two different units in one fraction, and TTWROR prints the difference as a
+// return. These pin the rule that closes it: convert at the transaction's OWN
+// day, exactly as portfolio.js does.
+
+test('a foreign flow converts at its own day before it nets against a converted valuation', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  // €1 = $1.25 in January, €1 = $2.00 in June. Two rates far enough apart that
+  // using the wrong DAY is a different number, not a rounding difference —
+  // which is the whole failure mode being pinned here.
+  f.put('fx', { pair: 'EURUSD', date: '2024-01-10', rate: 125000000 }, 'fx_jan');
+  f.put('fx', { pair: 'EURUSD', date: '2024-06-10', rate: 200000000 }, 'fx_jun');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-10', amount: eur(1000) }), 'tx_eur');
+  f.put('transaction', tx({
+    type: 'deposit', date: '2024-01-10', amount: eur(1000), currency: 'USD',
+  }), 'tx_usd');
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-06-30' });
+  const snap = await f.snapshot({ asOf: '2024-06-30' });
+
+  assert.deepEqual(res.issues, []);
+  // $1000.00 on 2024-01-10 is €800.00 at that day's fixing. The two engines are
+  // compared against each other, not against a number retyped here: the flow
+  // perf.js counts must be the cash portfolio.js booked.
+  assert.equal(snap.totals.cash, eur(1800));
+  assert.equal(res.portfolio.flowIn, snap.totals.cash);
+  assert.equal(res.portfolio.closeValue, snap.totals.cash);
+  assert.equal(res.portfolio.flowOut, 0);
+
+  // The bug's signature. Raw $1000.00 counted as €1000.00 makes the denominator
+  // €2000.00 against a €1800.00 close, so a portfolio that did nothing at all
+  // reports losing 10%.
+  assert.equal(res.portfolio.ttwror.ok, true);
+  assert.ok(Math.abs(res.portfolio.ttwror.value) < 1e-12,
+    `nothing happened, so TTWROR is 0, got ${res.portfolio.ttwror.value}`);
+  // And it is the JANUARY rate. At June's €1 = $2.00 the deposit would be
+  // €500.00, for a €1500.00 flow — this is what a "newest stored rate" lookup
+  // returns, and it must not be what comes out.
+  assert.notEqual(res.portfolio.flowIn, eur(1500));
+  assert.notEqual(res.portfolio.flowIn, eur(2000));
+});
+
+test('a foreign flow with no applicable rate is the same explicit gap, not a raw amount', async () => {
+  const f = fixture();
+  basics(f);
+  f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+  // A rate exists, but 2023 is far outside the carry-forward window, so none is
+  // applicable to the transaction's day. Not a fallback: an unknown flow.
+  f.put('fx', { pair: 'EURUSD', date: '2023-01-10', rate: 125000000 }, 'fx_old');
+  f.put('transaction', tx({ type: 'deposit', date: '2024-01-10', amount: eur(1000) }), 'tx_eur');
+  f.put('transaction', tx({
+    type: 'deposit', date: '2024-01-10', amount: eur(1000), currency: 'USD',
+  }), 'tx_usd');
+
+  const res = await f.performance({ from: '2024-01-01', to: '2024-06-30' });
+  const snap = await f.snapshot({ asOf: '2024-06-30' });
+
+  const gaps = res.issues.filter((i) => i.code === 'currency_not_converted');
+  assert.equal(gaps.length, 1, `one gap per pair, got ${JSON.stringify(res.issues)}`);
+  assert.match(gaps[0].message, /no USDEUR rate applicable to 2024-01-10/);
+  // The dollars are left out of the flow, exactly as portfolio.js leaves them
+  // out of cash. Booking the raw 100000 as euros is the number this forbids.
+  assert.equal(snap.totals.cash, eur(1000));
+  assert.equal(res.portfolio.flowIn, snap.totals.cash);
+  assert.equal(res.portfolio.closeValue, snap.totals.cash);
+});
+
+test('a single-currency portfolio is unchanged by the FX path', async () => {
+  // Most users hold one currency. Their numbers must not move at all — not by
+  // a rounding step, not by an extra issue.
+  const build = (withFx) => {
+    const f = fixture();
+    basics(f);
+    if (withFx) {
+      f.put('settings', { reportingCurrency: 'EUR' }, 'settings');
+      // A rate that would be catastrophic if it were ever applied.
+      f.put('fx', { pair: 'EURUSD', date: '2024-01-01', rate: 900000000 }, 'fx_1');
+    }
+    f.put('transaction', tx({ type: 'deposit', date: '2024-01-01', amount: eur(10000) }));
+    f.put('transaction', tx({
+      type: 'buy', securityId: 'sec_1', date: '2024-01-01', shares: sh(100), amount: eur(10000),
+    }));
+    f.put('transaction', tx({ type: 'dividend', securityId: 'sec_1', date: '2024-07-01', amount: eur(200) }));
+    f.put('transaction', tx({ type: 'sell', securityId: 'sec_1', date: '2024-12-01', shares: sh(40), amount: eur(4800) }));
+    f.put('transaction', tx({ type: 'removal', date: '2024-12-02', amount: eur(1000) }));
+    f.put('price', {
+      securityId: 'sec_1', year: 2024,
+      closes: { '01-01': px(100), '07-01': px(115), '12-01': px(120), '12-31': px(130) },
+    });
+    return f.performance({ from: '2024-01-01', to: '2024-12-31' });
+  };
+
+  const plain = await build(false);
+  const fxed = await build(true);
+  assert.deepEqual(fxed.portfolio, plain.portfolio);
+  assert.deepEqual(fxed.securities, plain.securities);
+  assert.deepEqual(fxed.issues, plain.issues);
 });

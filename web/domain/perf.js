@@ -45,9 +45,21 @@
 // ordinary daily-TWR practice: nothing in the records resolves intraday
 // ordering, so a day carries one net flow. See netFlow() for why applying them
 // gross gets a same-day internal transfer wrong.
+//
+// FLOWS ARE IN THE REPORTING CURRENCY, CONVERTED AT THE TRANSACTION'S OWN DAY.
+// Valuations arrive from snapshot() already in `settings.reportingCurrency`, so
+// a flow left in the transaction's own currency would put two different units in
+// one fraction and TTWROR would print the difference as a return. The rule is
+// portfolio.js's, not a second one: the applicable fixing for the transaction's
+// date — never the newest stored rate, never today's — and where none applies
+// the flow is left out entirely under the same `currency_not_converted` issue,
+// because an unknown flow is not a zero one and is certainly not a foreign
+// number pretending to be a local one.
 
-import { RECORD } from './schema.js';
+import { RECORD, SETTINGS_ID } from './schema.js';
 import { createPortfolioDomain } from './portfolio.js';
+import { createFxRates } from './fx.js';
+import { convert } from './money.js';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MS_PER_DAY = 86400000;
@@ -345,10 +357,39 @@ export function createPerformanceDomain({ records }) {
   async function performance({ from, to } = {}) {
     const port = cacheLists(records);
     const { snapshot } = createPortfolioDomain({ records: port });
-    const txRecs = await port.list(RECORD.transaction);
 
     const issues = [];
     const issue = (code, recordId, message) => issues.push({ code, recordId, message });
+
+    // Read through the same cache snapshot() uses, so this costs no extra port
+    // reads. Settings and rates are needed BEFORE the first snapshot because the
+    // flow fold below runs first.
+    const [txRecs, fxRecs, settingsRecs] = await Promise.all([
+      port.list(RECORD.transaction),
+      port.list(RECORD.fx),
+      port.list(RECORD.settings),
+    ]);
+
+    const settings = settingsRecs.find((r) => r.recordId === SETTINGS_ID) || {};
+    const reportingCurrency = settings.reportingCurrency || null;
+    // Case-insensitive for portfolio.js's reason: "eur" and "EUR" are one
+    // currency, and treating them as two invents a conversion.
+    const reportingCcy = reportingCurrency ? String(reportingCurrency).toUpperCase() : null;
+    const fxRates = createFxRates(fxRecs, issue);
+
+    // Once per pair, not per transaction — an unfetched currency misses every
+    // one of its days at once and the user's fix is one action. Same wording as
+    // portfolio.js so the two engines report one gap, not two dialects of it;
+    // duplicated rather than exported, since portfolio.js is not ours to change.
+    const missingRates = new Set();
+    const fxGap = (from, day, recordId) => {
+      const pair = `${from}${reportingCcy}`;
+      if (missingRates.has(pair)) return;
+      missingRates.add(pair);
+      issue('currency_not_converted', recordId,
+        `no ${pair} rate applicable to ${day}; ${from} amounts are left out of the `
+        + `${reportingCurrency} totals until one is stored`);
+    };
 
     const txDays = txRecs.map((tx) => dayOf(tx.date)).filter((d) => DAY_RE.test(d)).sort();
     const rangeTo = to ?? txDays[txDays.length - 1] ?? null;
@@ -407,8 +448,26 @@ export function createPerformanceDomain({ records }) {
       // A non-integer amount is a §5 violation; portfolio.js books it as 0 and
       // raises non_integer_units, so this must agree or the two disagree on
       // what moved.
-      const amount = Number.isSafeInteger(tx.amount) ? tx.amount : 0;
-      if (amount === 0) continue;
+      const raw = Number.isSafeInteger(tx.amount) ? tx.amount : 0;
+      if (raw === 0) continue;
+
+      // THE RATE IS THE ONE FOR `day`, THE TRANSACTION'S OWN DATE — see the
+      // header. `convert` on the same raw integer portfolio.js converts, so both
+      // engines round once, identically, and agree to the cent.
+      const txCcy = tx.currency ? String(tx.currency).toUpperCase() : null;
+      let amount = raw;
+      if (reportingCcy && txCcy && txCcy !== reportingCcy) {
+        const applicable = fxRates.rate(txCcy, reportingCcy, day);
+        if (!applicable) {
+          // No rate, so no reporting-currency flow — unknown, not zero. Left out
+          // of every flow total rather than netted against a valuation it shares
+          // no unit with, which is what portfolio.js does to the cash leg.
+          fxGap(txCcy, day, tx.recordId);
+          continue;
+        }
+        amount = convert(raw, applicable.rate);
+        if (amount === 0) continue;
+      }
       // portfolio.js refuses a securities transfer outright — neither cash nor
       // shares move — so it is not a flow either.
       if ((tx.type === 'transfer_in' || tx.type === 'transfer_out') && tx.securityId) continue;
