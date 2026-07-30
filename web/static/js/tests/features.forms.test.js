@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
     buildTxBody, txToForm, emptyTxForm, todayLocal, buildPriceChunk, defaultPortfolioId,
-    SECURITY_TYPES, SHARE_TYPES, SIGNED_TYPES,
+    deriveTxField, SECURITY_TYPES, SHARE_TYPES, SIGNED_TYPES,
 } from '../features/forms.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -136,6 +136,70 @@ describe('forms — the money round trip', () => {
         });
         assert.equal(body.amount, 1001); // half away from zero, money.js's rule
         assert.equal(buildTxBody(txToForm({ ...body, type: 'deposit', date: '2024-01-01', accountId: 'a' })).body.amount, 1001);
+    });
+});
+
+describe('forms — shares x price = amount', () => {
+    // A broker states shares and a price per share; `amount` is what we store.
+    // The multiplication crosses §5's scales (1e8 x 1e8 -> 1e2), which is the
+    // one place in this form where a wrong number is not a typo the user can
+    // see — it is a cost basis that is quietly wrong forever.
+
+    test('a four-decimal price keeps the cent a float multiply drops', () => {
+        // 1310.9216 x 9754.6875 is exactly 12787630.545 — a half-cent TIE, and
+        // money.js rounds half away from zero, so the answer is ...55. The
+        // naive path a form would otherwise take (multiply the two as doubles,
+        // toFixed(2)) computes 12787630.544999999925 and answers ...54. One
+        // cent, on one trade, in the direction of an understated cost basis,
+        // and nothing on screen says so.
+        assert.equal(
+            (1310.9216 * 9754.6875).toFixed(2), '12787630.54',
+            'the float path this test exists to catch changed'
+        );
+
+        assert.equal(
+            deriveTxField('amount', { type: 'buy', shares: '1310.9216', price: '9754.6875' }),
+            '12787630.55'
+        );
+    });
+
+    test('fees and taxes are INSIDE the derived amount, on the side the type puts them', () => {
+        // portfolio.js: `amount` is the cash that moved — gross + fees + taxes
+        // on a buy, gross - fees - taxes on a sell. Deriving the gross alone
+        // would understate every commission-bearing buy.
+        const trade = { shares: '1310.9216', price: '9754.6875', fees: '9.99', taxes: '1.50' };
+        assert.equal(deriveTxField('amount', { ...trade, type: 'buy' }), '12787642.04');
+        assert.equal(deriveTxField('amount', { ...trade, type: 'sell' }), '12787619.06');
+    });
+
+    test('shares + amount shows the implied price, fees taken back out', () => {
+        // 200 shares of a 41.235 stock, 8.00 commission: 8247.00 gross, 8255.00
+        // out of the account. The price the user is owed back is the gross one.
+        const shares = '200';
+        assert.equal(deriveTxField('price', { type: 'buy', shares, amount: '8247' }), '41.235');
+        assert.equal(deriveTxField('price', { type: 'buy', shares, amount: '8255', fees: '8' }), '41.235');
+        assert.equal(deriveTxField('price', { type: 'sell', shares, amount: '8239', fees: '8' }), '41.235');
+    });
+
+    test('the derived amount is the one that round-trips, not the derived price', () => {
+        // Deriving back is NOT the identity when the product has a sub-cent
+        // remainder, and that is correct: the stored amount is the rounded one
+        // the user saw, so the price it implies is the price that actually
+        // produced it. Nothing rounds twice, and nothing is stored unseen.
+        const amount = deriveTxField('amount', { type: 'buy', shares: '1310.9216', price: '9754.6875' });
+        assert.equal(amount, '12787630.55');
+        assert.equal(
+            deriveTxField('price', { type: 'buy', shares: '1310.9216', amount }),
+            '9754.68750381'
+        );
+    });
+
+    test('a half-typed form derives nothing rather than a wrong number', () => {
+        assert.equal(deriveTxField('amount', { type: 'buy', shares: '', price: '10' }), '');
+        assert.equal(deriveTxField('amount', { type: 'buy', shares: '10', price: '' }), '');
+        assert.equal(deriveTxField('amount', { type: 'buy', shares: '10', price: '.' }), '');
+        assert.equal(deriveTxField('price', { type: 'buy', shares: '0', amount: '100' }), '');
+        assert.equal(deriveTxField('price', { type: 'buy', shares: '10', amount: '' }), '');
     });
 });
 

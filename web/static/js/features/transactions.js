@@ -4,12 +4,14 @@
 //
 // No arithmetic happens here. Strings become §5 integers in forms.js
 // (parseFixed) and integers become strings in fmt.js (formatFixed); this file
-// only moves the resulting record through the port.
+// only moves the resulting record through the port. The shares x price = amount
+// derivation is likewise forms.js's (deriveTxField) — this file decides only
+// WHICH of the two derived fields to refresh, never what the number is.
 
 import * as ui from './ui.js';
 import * as fmt from './fmt.js';
 import {
-    buildTxBody, emptyTxForm, txToForm, defaultPortfolioId,
+    buildTxBody, emptyTxForm, txToForm, defaultPortfolioId, deriveTxField,
     SECURITY_TYPES, SHARE_TYPES,
 } from './forms.js';
 import { TX_TYPES, RECORD } from '../../../domain/schema.js';
@@ -128,6 +130,7 @@ export function openTxModal(record, defaults) {
     });
 
     const sharesInput = ui.input(values.shares, { inputMode: 'decimal', placeholder: '0' });
+    const priceInput = ui.input('', { inputMode: 'decimal', placeholder: '0.00' });
     const amountInput = ui.input(values.amount, { inputMode: 'decimal', placeholder: '0.00' });
     const feesInput = ui.input(values.fees, { inputMode: 'decimal', placeholder: '0.00' });
     const taxesInput = ui.input(values.taxes, { inputMode: 'decimal', placeholder: '0.00' });
@@ -135,14 +138,53 @@ export function openTxModal(record, defaults) {
 
     const securityBlock = ui.el('div', 'wg-field-group');
     for (const node of [...security.nodes, ...portfolio.nodes]) securityBlock.appendChild(node);
-    const sharesField = ui.field('Shares', sharesInput);
+    // Shares and price share a row and a fate: a deposit has neither.
+    const tradeRow = ui.fieldRow(
+        ui.field('Shares', sharesInput),
+        ui.field(`Price / share (${values.currency || reportingCurrency()})`, priceInput),
+    );
+
+    // Which of {amount, price} is the COMPUTED one. Last-edited-wins with no
+    // mode toggle: typing in one makes the other the derived one, so the field
+    // under the cursor is never rewritten mid-keystroke.
+    let derived = 'price';
+
+    function recompute() {
+        // A deposit has no price, and nothing may touch its amount.
+        if (!SHARE_TYPES.has(typeSel.value)) return;
+        const out = deriveTxField(derived, {
+            type: typeSel.value,
+            shares: sharesInput.value,
+            price: priceInput.value,
+            amount: amountInput.value,
+            fees: feesInput.value,
+            taxes: taxesInput.value,
+        });
+        // Not enough typed yet — leave what the user has rather than blanking it.
+        if (out === '') return;
+        // Store what is displayed: this rounded string is what buildTxBody
+        // parses on save, so the record can never hold a number never shown.
+        (derived === 'amount' ? amountInput : priceInput).value = out;
+    }
+
+    amountInput.addEventListener('input', () => { derived = 'price'; recompute(); });
+    priceInput.addEventListener('input', () => { derived = 'amount'; recompute(); });
+    // Shares, fees and taxes feed both directions, so they only refresh whichever
+    // field is currently the derived one.
+    for (const node of [sharesInput, feesInput, taxesInput]) {
+        node.addEventListener('input', recompute);
+    }
 
     // Which fields a type may carry is §4's, not this screen's. Show only the
     // ones that mean something so a cash deposit is a two-field form.
     function applyType() {
         const type = typeSel.value;
         securityBlock.classList.toggle('hidden', !SECURITY_TYPES.has(type));
-        sharesField.classList.toggle('hidden', !SHARE_TYPES.has(type));
+        tradeRow.classList.toggle('hidden', !SHARE_TYPES.has(type));
+        // buy and sell put fees on opposite sides of the gross value, and the
+        // opening call fills in the implied price of a stored transaction —
+        // price is derived on read, it is not a column on the record.
+        recompute();
     }
     typeSel.addEventListener('change', applyType);
     applyType();
@@ -154,9 +196,10 @@ export function openTxModal(record, defaults) {
         ui.fieldRow(ui.field('Type', typeSel), ui.field('Date', dateInput)),
         ...account.nodes,
         securityBlock,
+        tradeRow,
         // Label with the transaction's own currency so a preserved foreign
         // currency is visible rather than merely un-erased.
-        ui.fieldRow(sharesField, ui.field(`Amount (${values.currency || reportingCurrency()})`, amountInput)),
+        ui.field(`Amount (${values.currency || reportingCurrency()})`, amountInput),
         ui.fieldRow(ui.field('Fees', feesInput), ui.field('Taxes', taxesInput)),
         ui.field('Note', noteInput),
     ];
