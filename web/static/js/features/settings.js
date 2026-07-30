@@ -248,10 +248,8 @@ function quotesCard(rerender) {
     return ui.card(
         ui.sectionLabel('Quote providers'),
         ui.el('p', 'wg-muted text-sm m-0',
-            'Configure every provider your portfolio needs — each security is priced by its own, so '
-            + 'crypto and equities do not compete for one slot. Credentials stay on this device (and, '
-            + 'once you sign up, inside the vault); quotes are fetched browser-direct so the server '
-            + 'never learns your symbols.'),
+            'Each security is priced by its own provider, and your keys stay on this device — quotes are '
+            + 'fetched browser-direct, so the server never learns your symbols.'),
         ...nodes,
         actionRow(save)
     );
@@ -506,39 +504,54 @@ export async function disableHostedConnector({ http }) {
 
 /**
  * The consent, shown AT THE MOMENT the key leaves this browser — in the confirm
- * before enabling — and not once in a document nobody reads.
+ * before enabling.
  *
- * It is specific rather than a general caution, because a general one is a shrug:
- * what the server can read, when, what it keeps, and that this is weaker than the
- * local shim. It NAMES the alternative, which is the actionable half — Tier 1 is
- * built, shipped and right above this in the same card, and it keeps the original
- * guarantee. §11: "not zero knowledge and must never be described as such".
+ * ONE SENTENCE, deliberately: the six-sentence version this replaced was not
+ * buying informed consent, because nobody read it. What survives the cut is the
+ * only part a reader can act on — the server can read the traffic, and the
+ * option above does not. "Involves risks" would be worse than nothing: a warning
+ * that names no risk cannot be weighed against anything.
+ *
+ * Everything else (sealed at rest, what the relay sees, why the shape is this
+ * shape) lives in docs/AI-CONNECTOR.md, which is linked next to the button and
+ * is allowed to be long.
+ *
+ * §11: this tier is not end-to-end encrypted and "not zero knowledge and must
+ * never be described as such" — so nothing here may claim either, and "can read
+ * your questions and answers" is that fact in words a user already has.
  */
-export const HOSTED_CONSENT = 'Enabling this hands your pairing key to this server. It then sits '
-    + 'between the AI and this browser and can read your questions and their answers in transit, in '
-    + 'plaintext — the local connector above keeps that key on your own machine, where the server only '
-    + 'carries sealed frames it cannot read. The key is stored sealed at rest and the conversation is '
-    + 'not stored. This is NOT end-to-end encrypted and it is weaker than the local connector: if you '
-    + 'want the original guarantee, use "Connect Claude" above instead and skip this.';
+export const HOSTED_CONSENT = 'This server holds your pairing key and can read your questions and '
+    + 'answers in transit — weaker than "Connect Claude" above, which keeps the key on your own machine.';
+
+// The essay belongs in the doc, not on this screen. web/embed.go embeds
+// web/static only, so docs/ is not served by the app and the link goes to the
+// repo copy.
+export const CONNECTOR_DOCS = 'https://github.com/korjavin/myportfolio/blob/master/docs/AI-CONNECTOR.md';
 
 // The three product facts §11 requires the UI to state rather than let a user
-// discover. Each of them is the explanation for a support question this feature
-// would otherwise generate: "why did it stop working", "what does your server
-// see", "can it trade for me".
+// discover — one sentence each. Each is the answer to a support question this
+// feature would otherwise generate: "why did it stop working", "what does your
+// server see", "can it trade for me".
 export const CONNECTOR_FACTS = [
-    'Answers come from this browser, so a question only works while a tab of this app is '
-    + 'open and unlocked. There is no server-side fallback, by design — the server holds '
-    + 'only ciphertext and cannot answer a single query. If no device is unlocked and '
-    + 'online, Claude is told so instead of waiting.',
-    'The relay in the middle cannot read the conversation: every message is encrypted to a '
-    + 'key it never receives. It does see the size and timing of each message and the '
-    + 'pairing id — so it learns that you asked something and roughly how big the answer '
-    + 'was, never what.',
-    'The connector is read-only. It can look at the portfolio — holdings, valuation, '
-    + 'performance, prices, transactions — and cannot add, change or delete anything.',
+    'Answers come from this browser, so a question only works while a tab is open and unlocked — '
+    + 'there is no server-side fallback.',
+    'The relay in the middle cannot read the conversation, but it does see the size and timing of '
+    + 'every message.',
+    'The connector is read-only: it cannot add, change or delete anything.',
 ];
 
 const note = (text) => ui.el('p', 'wg-muted text-sm m-0 mt-md', text);
+
+// An anchor wearing the button primitive — ui.demoLink's pattern, and the case
+// `a.wg-toolbar-btn` in styles.css already exists for. No new CSS, no inline
+// style, and it sits in the same action row as the button it explains.
+const docsLink = (label) => {
+    const link = ui.el('a', 'wg-toolbar-btn wg-toolbar-btn--secondary', label);
+    link.href = CONNECTOR_DOCS;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    return link;
+};
 
 function connectClaudeCard() {
     const card = ui.card(ui.sectionLabel('Connect Claude'));
@@ -612,8 +625,8 @@ function connectClaudeCard() {
     async function paint() {
         if (!syncState().connected) {
             body.replaceChildren(
-                note('Connecting Claude needs a vault: the pairing lives on your account, so every '
-                    + 'device you unlock can answer. Set one up first.'),
+                note('Connecting Claude needs a vault, because the pairing lives on your account — set '
+                    + 'one up first.'),
                 ...CONNECTOR_FACTS.map(note)
             );
             return;
@@ -647,11 +660,10 @@ function connectClaudeCard() {
 
         if (!pairing) {
             body.replaceChildren(
-                note('Ask Claude about this portfolio from Claude Desktop or Claude Code. Connecting '
-                    + 'gives you a one-time code for the myportfolio MCP shim; the shim talks to this '
-                    + 'browser through a relay that cannot read what it carries.'),
+                note('Ask Claude about this portfolio from Claude Desktop or Claude Code, through a '
+                    + 'small shim you run on your own machine.'),
                 ...CONNECTOR_FACTS.map(note),
-                actions(connect),
+                actions(docsLink('How it works'), connect),
                 ...hostedSection(hostedToken)
             );
             return;
@@ -659,23 +671,22 @@ function connectClaudeCard() {
 
         const disconnect = ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Disconnect', () => ui.confirm({
             title: 'Disconnect Claude',
-            message: 'Claude stops being able to read this portfolio, on every device. The stored key '
-                + 'is deleted and the code you saved stops working — connecting again gives you a new one.',
+            message: 'Claude stops reading this portfolio on every device, and the code you saved stops '
+                + 'working.',
             confirmLabel: 'Disconnect',
             onConfirm: onDisconnect,
         }));
 
         body.replaceChildren(
             ui.messages([`Connected · pairing ${pairing.pairingId}`], 'normal'),
-            note('This device answers whenever it is open and unlocked. The code is not shown again — '
-                + 'if you have lost it, replace it with a new one.'),
+            note('This device answers while it is open and unlocked, and the code is not shown again.'),
             // internal/server/mcp_relay.go ages a pairing out 24 hours after it
             // was minted and keeps the table in memory, so a server restart ends
             // it too. Both are cheap to recover from and baffling if unstated.
-            note('A pairing lasts 24 hours, and ends if the server restarts. When Claude says no '
-                + 'device is online and a tab is open and unlocked, connect again.'),
+            note('A pairing lasts 24 hours and ends if the server restarts — connect again when Claude '
+                + 'says no device is online.'),
             ...CONNECTOR_FACTS.map(note),
-            actions(disconnect, connect),
+            actions(docsLink('How it works'), disconnect, connect),
             ...hostedSection(hostedToken)
         );
     }
@@ -692,18 +703,19 @@ function connectClaudeCard() {
         if (token === null) {
             return [
                 label,
-                note('Whether this is on is kept on the server, so it cannot be checked while you are '
-                    + 'offline or after a session expires. Reload when you are back online.'),
+                note('The server did not say whether this is on, so reload when you are back online.'),
             ];
         }
         if (!token) {
             return [
                 label,
-                note('For claude.ai, the ChatGPT web app, or anything else that takes a remote MCP '
-                    + 'server URL: nothing to install and no local process to keep running. You get '
-                    + 'one URL to paste in.'),
+                note('For claude.ai, ChatGPT, or anything else that takes a remote MCP server URL — '
+                    + 'nothing to install.'),
                 note(HOSTED_CONSENT),
-                actions(ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Get a URL', confirmHostedEnable)),
+                actions(
+                    docsLink('What this costs you'),
+                    ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Get a URL', confirmHostedEnable)
+                ),
             ];
         }
         // textContent, via ui.el — this is a capability and must never be
@@ -711,14 +723,13 @@ function connectClaudeCard() {
         const url = hostedConnectorURL(window.location, token);
         return [
             label,
-            ui.messages(['This URL is a password. Anyone who has it can ask about this portfolio '
-                + 'while one of your tabs is open and unlocked, so paste it only into the client you '
-                + 'meant to — and revoke it here the moment it goes anywhere else.'], 'normal'),
+            ui.messages(['Treat this URL like a password: anyone who has it can ask about this '
+                + 'portfolio, so revoke it if it goes anywhere you did not mean.'], 'normal'),
             ui.el('div', 'wg-code-block mt-md', url),
-            note('Add it in your AI client as a remote (custom) MCP server, with this as the URL. '
-                + 'There is nothing else to configure and no key to paste.'),
+            note('Add it in your AI client as a remote (custom) MCP server.'),
             note(HOSTED_CONSENT),
             actions(
+                docsLink('What this costs you'),
                 ui.button('wg-toolbar-btn wg-toolbar-btn--secondary', 'Revoke the URL', confirmHostedDisable),
                 copyButton('Copy the URL', url)
             ),
@@ -740,10 +751,8 @@ function connectClaudeCard() {
     function confirmHostedDisable() {
         ui.confirm({
             title: 'Revoke the URL',
-            message: 'The URL stops working immediately and this server deletes its copy of your '
-                + 'pairing key. Whatever you pasted it into starts getting an error until you enable '
-                + 'a new one. The local connector above is untouched — this does not disconnect a '
-                + 'shim you are running.',
+            message: 'The URL stops working immediately and this server deletes its copy of your pairing '
+                + 'key; a local shim you are running is untouched.',
             confirmLabel: 'Revoke',
             onConfirm: onHostedDisable,
         });
@@ -858,16 +867,13 @@ function connectClaudeCard() {
         });
 
         body.replaceChildren(
-            ui.messages(['This code is shown once. It carries the encryption key, so it is not stored '
-                + 'anywhere you can read it back — save it now, or connect again for a new one.'], 'normal'),
-            note('Install the myportfolio MCP shim, then put this line in the environment you start it '
-                + `from (Claude Desktop calls it "env"). It is the shim's only setting.`),
+            ui.messages(['Save this code now — it carries the encryption key and is never shown again.'], 'normal'),
+            note('Put this line in the environment you start the shim from (Claude Desktop calls it "env").'),
             ui.el('div', 'wg-code-block mt-md', envLine),
             note('The code itself, if you need it on its own:'),
             ui.el('div', 'wg-code-block mt-md', code),
-            note('Nothing is connected yet. This device starts answering when you finish below — so if '
-                + 'you close this screen instead, no device is left holding a code you do not have.'),
-            actions(cancel, copy, finish)
+            note('Nothing is connected until you finish below.'),
+            actions(docsLink('Setup steps'), cancel, copy, finish)
         );
     }
 
@@ -1371,12 +1377,8 @@ function sampleCard(rerender) {
     return ui.card(
         ui.sectionLabel('Sample portfolio'),
         ui.el('p', 'wg-muted text-sm m-0',
-            'Five years of invented trades, dividends and prices, written into your own vault like '
-            + 'any other import. This is the supported way to try the Claude connector — or the app '
-            + 'itself — on data that is not yours: the demo at ?demo=1 never answers Claude, because '
-            + 'a demo tab cannot tell an agent that the trades it is reading are made up. Nothing you '
-            + 'already have is deleted or revalued, your reporting currency is never changed, and the '
-            + 'sample can be removed again.'),
+            'Five years of invented trades written into your own vault — the supported way to try the '
+            + 'Claude connector on data that is not yours, and removable again.'),
         row,
         status
     );
