@@ -27,8 +27,11 @@ that only ever sees ciphertext.
 - **Your holdings stay yours.** Common symbols are priced from a shared daily list the server
   pre-fetches — one blob, byte-identical for everyone, filtered on your device — so it needs **no API
   key at all** and still cannot learn what you hold, because every request to it is the same request.
-  Anything outside that list is fetched browser-direct with your own key. A proxy exists for the
-  remainder, off by default and behind an explicit consent screen that says exactly what it leaks.
+  Anything outside that list is fetched browser-direct with your own key, which is the supported path
+  and the one to configure if you want quotes you can rely on: the upstream the shared list is built
+  from is undocumented and rate-limits us, so it can go stale. When it does, the last good prices keep
+  serving with an honest date rather than disappearing. (A consented server-side proxy for the
+  remainder is designed but **not built** — `bd myportfolio-18h.8`.)
 
 ## Ask an AI about your portfolio
 
