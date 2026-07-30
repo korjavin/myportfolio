@@ -311,7 +311,9 @@ func TestCallsCorrelateByID(t *testing.T) {
 	// two are genuinely in flight together.
 	select {
 	case <-arrived:
-	case <-time.After(5 * time.Second):
+	// Generous on purpose: this asserts that the thing HAPPENS, not how fast.
+	// A tight deadline here reddens CI on a loaded runner and measures nothing.
+	case <-time.After(60 * time.Second):
 		t.Fatal("first request never reached the relay")
 	}
 
