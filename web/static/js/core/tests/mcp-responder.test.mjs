@@ -429,6 +429,12 @@ describe('close codes, end to end through the controller', () => {
             await new Promise((r) => setTimeout(r, 10));
             assert.equal(await R.readPairing(s.port), null);
             assert.equal(s.port.map.get(R.MCP_PAIRING_ID).deleted, true);
+            // The lock is held IFF `active` is a live responder. 4404 is terminal
+            // too, so it must step aside like 4409 does — a stopped responder that
+            // keeps the lock queues every other tab behind a dead holder. Codex
+            // caught this on the 4409 path and then again here; only the 4409 half
+            // was asserted, so the 4404 half could regress silently.
+            assert.equal(s.released, true, 'a terminal close must release the election, whichever code it was');
         } finally {
             s.teardown();
         }

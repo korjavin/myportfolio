@@ -493,18 +493,23 @@ async function reconcile() {
             key: fromBase64(pairing.key),
             run: createRunner({ records }),
             onStalePairing: (code) => {
-                if (code === STATUS_PAIRING_REPLACED) {
-                    // The account still HAS a pairing; the vault record names it, or
-                    // will once this device syncs. Purging here would delete the live
-                    // pairing on every synced device. Step aside instead: dropping the
-                    // election lets the tab that re-paired — already queued on the
-                    // lock — take over with the right key.
-                    stopResponder();
-                    return;
+                // BOTH codes are terminal for this leg, so both step aside first.
+                // That is what keeps the invariant this whole controller rests on:
+                // THE LOCK IS HELD IF AND ONLY IF `active` IS A LIVE RESPONDER.
+                // Leaving a stopped responder holding it queues every other tab
+                // behind a dead holder — codex found that on the 4409 path and
+                // then again on the 4404 one, which is why it is now unconditional
+                // rather than a branch that can be forgotten a third time.
+                stopResponder();
+                // Only THEN does the difference between the two codes matter, and
+                // it is the whole of the difference. 4409 means the account still
+                // HAS a pairing — the vault record names it, or will once this
+                // device syncs — so purging would delete the live pairing on every
+                // synced device. 4404 means there is no pairing at all, so the
+                // record is a tombstone pointing at nothing and it goes.
+                if (code === STATUS_NO_PAIRING) {
+                    purgePairing(records).catch((e) => console.error('[mcp] pairing purge failed', e));
                 }
-                // 4404 only: no pairing at all. The record is a tombstone pointing at
-                // nothing, so it goes.
-                purgePairing(records).catch((e) => console.error('[mcp] pairing purge failed', e));
             },
         });
         active = { pairingId: pairing.pairingId, responder };
