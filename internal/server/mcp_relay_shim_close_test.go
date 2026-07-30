@@ -177,9 +177,27 @@ func TestShimStopsDialingWhenAnotherLegTakesThePairing(t *testing.T) {
 func TestShimStillReconnectsWhenTheDeviceLegDrops(t *testing.T) {
 	f := newRelayFixture(t)
 	pairingID, device, deviceClosed, client, dials := liveShim(t, f)
+	rec := f.liveRecord(t, pairingID)
 
 	device.CloseNow()
 	waitDeviceClosed(t, deviceClosed, "after the device leg dropped")
+
+	// deviceClosed is not an edge here, unlike in the two tests above: THIS test
+	// closed the device leg itself, so the channel fires on its own CloseNow and
+	// says nothing about what the relay has done yet. What has to happen before a
+	// redial can be asserted is the relay retiring the shim leg its device went
+	// away from — so wait for that rather than for a side effect of our own call.
+	//
+	// Without this the test raced its own subject twice, and BOTH outcomes were
+	// measured under load: the call went through on the still-live old shim leg
+	// and "the shim dialed 1 times" failed at 0.03s, or the old shim leg's
+	// teardown landed after the fresh device leg had registered and took it down
+	// with it — which cost the full 30s CallTimeout and reported ErrDeviceOffline.
+	// retirePeer fixes the second one for real users; this wait is what makes the
+	// dial-count assertion mean what it says.
+	waitUntil(t, "the relay to retire the shim leg whose device went away", func() bool {
+		return rec.peerConn(true) == nil // the shim slot, seen from the device side
+	})
 
 	// A fresh tab comes back on the device leg, which is what the user does.
 	reconnected := f.dialDevice(t, pairingID)
