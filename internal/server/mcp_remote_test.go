@@ -282,6 +282,30 @@ func TestMCPRemoteRotatedSessionSecretOrphansTheConnector(t *testing.T) {
 	}
 }
 
+// One corrupt row must cost one account a re-pair, not the server's startup.
+// restore is a boot path and New calls it, so a row it cannot handle has to be
+// logged and skipped — and a wrong-length nonce is the case that does not merely
+// fail to decrypt: cipher.AEAD.Open panics on it.
+func TestMCPRemoteRestoreSurvivesACorruptRow(t *testing.T) {
+	f := newRemoteFixture(t)
+	token, err := f.registry.enable(t.Context(), f.account, f.pc)
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if _, err := f.vault.db.ExecContext(t.Context(),
+		`UPDATE mcp_remote SET pairing_key_nonce = ? WHERE account_id = ?`, []byte{1, 2, 3}, f.account); err != nil {
+		t.Fatalf("corrupt the nonce: %v", err)
+	}
+
+	// Panics here fail the test; that is the assertion.
+	restored := f.restart(t, testSessionSecret)
+	if restored.lookup(token) != nil {
+		t.Error("a connector whose sealed key could not be read was restored anyway")
+	}
+	// And a fresh server boots rather than crashing on the same row.
+	_ = New(testFS(), f.vault.db, testSessionSecret, defaultTrustedProxies)
+}
+
 // Deleting the account takes the key with it (the schema's ON DELETE CASCADE),
 // so no restore can bring the connector back. There is no server-side
 // account-delete path yet; when one lands it must ALSO call disable, because the

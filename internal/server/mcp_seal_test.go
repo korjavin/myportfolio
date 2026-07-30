@@ -100,6 +100,13 @@ func TestOpenPairingKey_RejectsTamperedCiphertextAndNonce(t *testing.T) {
 			return ct, bad
 		},
 		"truncated ciphertext": func() ([]byte, []byte) { return ct[:len(ct)-1], nonce },
+		// cipher.AEAD.Open PANICS on a wrong-length nonce rather than returning an
+		// error, and this nonce comes off disk. restore runs at boot, so a
+		// truncated nonce column has to cost one account a re-pair, not the whole
+		// server's startup.
+		"truncated nonce": func() ([]byte, []byte) { return ct, nonce[:len(nonce)-1] },
+		"empty nonce":     func() ([]byte, []byte) { return ct, nil },
+		"overlong nonce":  func() ([]byte, []byte) { return ct, append(bytes.Clone(nonce), 0) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			badCT, badNonce := mutate()

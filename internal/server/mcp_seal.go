@@ -25,6 +25,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
 )
 
 // mcpPairingKeyInfo is the HKDF domain-separation label for the pairing-key
@@ -77,6 +78,15 @@ func openPairingKey(sessionSecret string, ct, nonce []byte) ([]byte, error) {
 	gcm, err := mcpSealGCM(sessionSecret)
 	if err != nil {
 		return nil, err
+	}
+	// The nonce comes off disk, and cipher.AEAD.Open PANICS on a wrong-length one
+	// rather than returning an error (crypto/cipher/gcm.go). restore runs at boot
+	// and is built to log and skip a row it cannot open, so without this check a
+	// single truncated nonce column — corruption, a hand-repaired row, a partial
+	// backup restored — takes the whole server down at startup instead of costing
+	// one account a re-pair. Found by codex review.
+	if len(nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("server: sealed pairing key nonce is %d bytes, want %d", len(nonce), gcm.NonceSize())
 	}
 	return gcm.Open(nil, nonce, ct, nil)
 }
