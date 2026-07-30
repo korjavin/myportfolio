@@ -971,8 +971,9 @@ export function sampleConfirm({ count, hasData, withheldFx = null }) {
             + (withheldFx
                 ? `You hold ${withheldFx}, and an exchange rate is stored per currency pair and day `
                 + 'rather than per holding — so the sample\'s invented rates are left out entirely, '
-                + 'to keep them away from your own valuations. Its one dollar-priced holding will '
-                + 'show as unconverted; nothing of yours changes value. '
+                + 'and any an earlier load left behind are deleted, to keep them away from your own '
+                + 'valuations. The sample\'s one dollar-priced holding will show as unconverted; '
+                + 'nothing of yours changes value. '
                 : '')
             + 'Use "Remove the sample portfolio" on this screen to undo it.',
     };
@@ -990,6 +991,18 @@ export function sampleRemoveConfirm(count) {
 // A report has to survive the re-render its own write causes — refresh() rebuilds
 // this screen and detaches the status slot — exactly as importCard's does.
 let lastSample = null;
+
+/**
+ * The sample rows currently in the vault, across `types`. Reading what is THERE
+ * rather than rebuilding today's fixture is what makes both the removal and the
+ * rate purge exact: the fixture's `fx` ids carry a date, so the five-year window
+ * it covers moves with `today` — a sample loaded in March and reasoned about in
+ * June would otherwise miss the days that fell off the back.
+ */
+async function loadedSampleRows(types) {
+    const lists = await Promise.all(types.map((t) => records.list(t)));
+    return lists.flat().filter((r) => isSampleId(r.recordId));
+}
 
 function sampleCard(rerender) {
     const status = ui.el('div', 'wg-error-slot');
@@ -1016,7 +1029,7 @@ function sampleCard(rerender) {
             onConfirm: async () => {
                 status.replaceChildren(ui.emptyState('Writing to your vault…'));
                 try {
-                    lastSample = await apply(step.rows);
+                    lastSample = await apply(step);
                 } catch (err) {
                     fail(`The sample portfolio was not written in full: ${err?.message ?? err}`);
                     return;
@@ -1045,6 +1058,16 @@ function sampleCard(rerender) {
                 const seed = demoRecords({ today: new Date().toISOString().slice(0, 10) });
                 return {
                     rows: sampleRecords(seed, { fx: !foreign }),
+                    // Leaving the rates out of the seed is not enough on its own,
+                    // and codex found the hole: a load that happened while the
+                    // vault was still pure-EUR already wrote them, so acquiring a
+                    // dollar holding afterwards puts them straight back in the
+                    // path of real valuations. A withholding load therefore also
+                    // tombstones the sample rates already there, which is what
+                    // makes "nothing of yours changes value" true rather than
+                    // aspirational — and makes pressing this button the cure for
+                    // a vault that was already contaminated.
+                    purge: foreign ? await loadedSampleRows([RECORD.fx]) : [],
                     ask: (count) => sampleConfirm({
                         count,
                         hasData: state.transactions.length > 0 && !loaded,
@@ -1052,21 +1075,26 @@ function sampleCard(rerender) {
                     }),
                 };
             },
-            async (rows) => ({
-                lines: [`Wrote ${await importRecords(rows)} sample records. They reach your other `
-                    + 'devices on the usual sync delay.'],
-                tone: 'normal',
-            })
+            async ({ rows, purge }) => {
+                // Before the write, so one importRecords-driven refresh() sees the
+                // finished state rather than a moment with both in it.
+                for (const rec of purge) await records.del(rec.recordType, rec.recordId);
+                const written = await importRecords(rows);
+                return {
+                    lines: [
+                        `Wrote ${written} sample records. They reach your other devices on the usual `
+                        + 'sync delay.',
+                        ...(purge.length > 0
+                            ? [`Deleted ${purge.length} invented exchange rates an earlier load had `
+                                + 'left in your vault.']
+                            : []),
+                    ],
+                    tone: 'normal',
+                };
+            }
         )
     );
 
-    // Removal reads what is IN the vault rather than rebuilding today's fixture.
-    // The fixture's `fx` ids carry a date, so the window it covers moves with
-    // `today` — a sample loaded in March and removed in April would otherwise
-    // leave behind the days that fell off the back of the five-year window, as
-    // invented rates, with this button gone because the securities went. Every
-    // fixture id is namespaced, which is what makes reading it back exact.
-    //
     // Tombstones through the same §3 port the load went through, so sync carries
     // the removal the way it carried the write. records.del + one refresh()
     // rather than store.remove() per record, which would re-derive the whole
@@ -1075,11 +1103,11 @@ function sampleCard(rerender) {
         'wg-toolbar-btn wg-toolbar-btn--secondary',
         'Remove the sample portfolio',
         ceremony(
-            async () => {
-                const lists = await Promise.all(Object.values(RECORD).map((t) => records.list(t)));
-                return { rows: lists.flat().filter((r) => isSampleId(r.recordId)), ask: sampleRemoveConfirm };
-            },
-            async (rows) => {
+            async () => ({
+                rows: await loadedSampleRows(Object.values(RECORD)),
+                ask: sampleRemoveConfirm,
+            }),
+            async ({ rows }) => {
                 for (const rec of rows) await records.del(rec.recordType, rec.recordId);
                 await refresh();
                 return { lines: [`Removed ${rows.length} sample records.`], tone: 'normal' };

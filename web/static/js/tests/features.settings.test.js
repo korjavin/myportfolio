@@ -907,6 +907,10 @@ describe('sample portfolio — the confirmation', () => {
         assert.match(held, /unconverted/i);
         // The reassurance that matters: their own numbers do not move.
         assert.match(held, /nothing of yours changes value/i);
+        // …which is only true because a withholding load also cleans up rates an
+        // earlier load wrote. The copy has to promise that, because it is the
+        // difference between a protection and a wish.
+        assert.match(held, /an earlier load left behind are deleted/i);
     });
 
     test('with data already in the vault it says so instead of staying quiet', () => {
@@ -1052,6 +1056,38 @@ describe('sample portfolio — through the shipped importRecords and the real po
         });
     });
 
+    test('reloading after acquiring a foreign holding purges the rates already written', async () => {
+        // The hole codex found in the first fix: withholding the rates from the
+        // new seed does nothing about the ones a pure-EUR load already wrote, and
+        // those are exactly the rows that revalue the holding the user just
+        // acquired. The load path is the cure, not just a non-cause.
+        const withFx = sampleRecords(SAMPLE_SEED);
+        const withoutFx = sampleRecords(SAMPLE_SEED, { fx: false });
+        assert.ok(withFx.length > withoutFx.length, 'the fixture ships no fx records to withhold');
+
+        await withPort([], async (port) => {
+            // Day one: a pure-EUR vault, so the rates are written.
+            await store.importRecords(withFx);
+            assert.ok((await port.list(RECORD.fx)).length > 0);
+
+            // Day two: the user imports a dollar holding, then presses reload.
+            // What the card's plan + apply do, in that order.
+            const mine = { securities: [{ recordId: 'security_pp_abc', currency: 'USD' }] };
+            const foreign = ownForeignCurrency(mine, 'EUR');
+            assert.equal(foreign, 'USD');
+            const purge = (await Promise.all([RECORD.fx].map((t) => port.list(t))))
+                .flat().filter((r) => isSampleId(r.recordId));
+            assert.ok(purge.length > 0, 'nothing to purge — the setup did not write the rates');
+            for (const rec of purge) await port.del(rec.recordType, rec.recordId);
+            await store.importRecords(sampleRecords(SAMPLE_SEED, { fx: !foreign }));
+
+            // No invented rate is left anywhere in the vault.
+            assert.deepEqual(await port.list(RECORD.fx), []);
+            // …and nothing else of the sample was collateral damage.
+            assert.deepEqual(idsOf(await liveRows(port)), idsOf(withoutFx));
+        });
+    });
+
     test('a sample loaded on one day and removed on a later one leaves nothing behind', async () => {
         // The fixture's `fx` ids carry a date, so the five-year window moves with
         // `today`. Rebuilding today's fixture to decide what to delete would leave
@@ -1091,9 +1127,9 @@ describe('sample portfolio — the card is wired to these functions', () => {
         // apply() only from ui.confirm's onConfirm. Move either write out of its
         // apply, or apply() out of onConfirm, and these fail.
         assert.equal(section.split('importRecords(').length - 1, 1);
-        assert.equal(section.split('records.del(').length - 1, 1);
-        assert.match(section, /async \(rows\) => \(\{\s*\n\s*lines: \[`Wrote \$\{await importRecords\(rows\)\}/);
-        assert.match(section, /async \(rows\) => \{[\s\S]*?records\.del\(/);
+        assert.equal(section.split('records.del(').length - 1, 2, 'the purge and the removal');
+        assert.match(section, /async \(\{ rows, purge \}\) => \{[\s\S]*?records\.del\([\s\S]*?importRecords\(rows\)/);
+        assert.match(section, /async \(\{ rows \}\) => \{[\s\S]*?records\.del\(/);
 
         const ceremony = section.slice(
             section.indexOf('const ceremony ='),
@@ -1119,8 +1155,16 @@ describe('sample portfolio — the card is wired to these functions', () => {
         assert.match(section, /withheldFx: foreign/);
     });
 
-    test('the removal reads the vault instead of rebuilding today\'s fixture', () => {
-        assert.match(section, /Object\.values\(RECORD\)\.map\(\(t\) => records\.list\(t\)\)/);
+    test('withholding the rates also purges the ones already in the vault', () => {
+        assert.match(section, /purge: foreign \? await loadedSampleRows\(\[RECORD\.fx\]\) : \[\]/);
+        // The purge is a WRITE, so it must sit inside apply with the rest — not in
+        // the plan, which runs before the user has confirmed anything.
+        const plan = section.slice(section.indexOf('const foreign ='), section.indexOf('async ({ rows, purge })'));
+        assert.doesNotMatch(plan, /records\.del\(/, 'the plan must not delete anything');
+    });
+
+    test('both paths read the vault instead of rebuilding today\'s fixture', () => {
+        assert.match(section, /await loadedSampleRows\(Object\.values\(RECORD\)\)/);
         assert.match(section, /\.filter\(\(r\) => isSampleId\(r\.recordId\)\)/);
         // The load path is the only place the fixture is built.
         assert.equal(section.split('demoRecords(').length - 1, 1, 'the fixture is built in one place');
