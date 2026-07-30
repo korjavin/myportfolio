@@ -467,15 +467,58 @@ export function createResponder({
 
 let controllerRecords = null;
 let electing = false;
+let electionPending = null; // the promise queued callers get while we wait for the lock
 let releaseLock = null;
 let active = null; // { pairingId, responder }
+let reconciling = null; // the in-flight reconcile loop, or null
+let reconcileDirty = false; // a reconcile was asked for while one was running
 
 function releaseElection() {
     if (releaseLock) { releaseLock(); releaseLock = null; }
     electing = false;
+    electionPending = null;
 }
 
-async function reconcile() {
+/**
+ * Reconcile, coalesced. Never overlapping, never dropped — both failure modes
+ * are real and they are opposites, so neither a bare call nor an `if (busy)
+ * return` is correct here.
+ *
+ * NEVER OVERLAPPING: reconcileOnce awaits readPairing, so two runs interleave,
+ * and then the loser's `finally` can release the lock a microtask after the
+ * winner stored `active`. That breaks the one invariant this whole controller
+ * rests on — THE LOCK IS HELD IF AND ONLY IF `active` IS A LIVE RESPONDER — and
+ * leaves a connected responder holding no lock, so a second tab elects itself,
+ * opens a second device leg, and the relay 4409s them in turn.
+ *
+ * NEVER DROPPED: returning early while one is in flight loses the later write.
+ * That is the bug settings.js's Finish handler documents and routes around: a
+ * boot reconcile that read "no pairing" swallowed the refresh for the pairing
+ * the user had just saved, and the tab then answered nothing until a reload.
+ *
+ * So: coalesce. The last write always gets a reconcile that STARTED after it,
+ * and callers get a promise that settles once that reconcile has finished.
+ */
+function reconcile() {
+    reconcileDirty = true;
+    if (reconciling) return reconciling;
+    reconciling = (async () => {
+        try {
+            // Re-runs while another call landed during the previous pass. The
+            // flag is cleared BEFORE awaiting, so a write that arrives mid-pass
+            // sets it again and earns its own pass rather than being absorbed.
+            while (reconcileDirty) {
+                reconcileDirty = false;
+                await reconcileOnce();
+            }
+        } finally {
+            reconciling = null;
+        }
+    })();
+    return reconciling;
+}
+
+async function reconcileOnce() {
     try {
         if (!controllerRecords) {
             if (active) { active.responder.stop(); active = null; }
@@ -546,13 +589,17 @@ export function refreshResponder({ records }) {
         // and better than no connector.
         return reconcile();
     }
-    if (electing) return Promise.resolve(); // an election is in flight; its reconcile reads the latest port
+    if (electing) return electionPending ?? Promise.resolve(); // queued for the lock; its reconcile reads the latest state
     electing = true;
     // The lock is held for the tab's lifetime, so locks.request()'s own promise
     // does not settle until release — awaiting it would hang forever. Settle on
     // the reconcile instead.
     let settle;
     const reconciled = new Promise((resolve) => { settle = resolve; });
+    // Handed to callers that arrive while we are still queued, so their refresh
+    // settles on the election's reconcile instead of resolving immediately on a
+    // reconcile that has not happened yet.
+    electionPending = reconciled;
     navigator.locks.request('mcp-responder', () => new Promise((release) => {
         releaseLock = release;
         // reconcile() never rejects and releases the lock itself when there is
@@ -560,6 +607,7 @@ export function refreshResponder({ records }) {
         settle(reconcile());
     })).catch((e) => {
         electing = false;
+        electionPending = null;
         console.error('[mcp] responder lock failed', e);
         settle();
     });
