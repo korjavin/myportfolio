@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createQuotesDomain, QUOTE_HOSTS } from './quotes.js';
+import { createQuotesDomain, QUOTE_HOSTS, UNIVERSE_PATH } from './quotes.js';
 
 // ---------------------------------------------------------------------------
 // Recorded provider payloads
@@ -113,6 +113,12 @@ function transport(handler) {
 }
 
 const json = (body, status = 200) => ({ status, body });
+
+// The provider requests only. Every refresh now also asks our own origin for the
+// pre-fetched universe blob (§7, myportfolio-18h.19), which is a relative path
+// rather than an absolute URL — so a test counting how many times a PROVIDER was
+// contacted has to say so.
+const providerCalls = (http) => http.calls.filter((u) => /^https:/.test(u));
 
 // Every test runs with minIntervalMs 0 so the pacing never costs wall time.
 const noPace = { coingecko: { minIntervalMs: 0 }, twelvedata: { apiKey: 'k', minIntervalMs: 0 } };
@@ -295,7 +301,7 @@ test('a rejected API key stops the provider instead of burning the quota', async
   const http = transport(() => json(TWELVEDATA_ERROR, 401));
   const report = await createQuotesDomain({ records: f.records, http }).refresh();
 
-  assert.equal(http.calls.length, 1, 'the second batch is never sent');
+  assert.equal(providerCalls(http).length, 1, 'the second batch is never sent');
   assert.equal(report.errors.length, 9, 'every affected security is still reported');
   assert.ok(report.errors.every((e) => e.code === 'bad_api_key'));
   assert.match(report.errors[0].message, /apikey/);
@@ -309,7 +315,7 @@ test('an exhausted credit budget reported inside a 200 body is still a stop', as
   const http = transport(() => json({ code: 429, message: 'You have run out of API credits', status: 'error' }));
   const report = await createQuotesDomain({ records: f.records, http }).refresh();
 
-  assert.equal(http.calls.length, 1);
+  assert.equal(providerCalls(http).length, 1);
   assert.ok(report.errors.every((e) => e.code === 'rate_limited'));
 });
 
@@ -367,9 +373,15 @@ test('the API key never appears in an error, and only the two known hosts are co
   // Every hostname this module contacts is one of the exported constants, which
   // is what the CSP connect-src allowlist is derived from. Nothing is built out
   // of user input.
-  const hosts = new Set(http.calls.map((u) => new URL(u).host));
+  const absolute = providerCalls(http);
+  const hosts = new Set(absolute.map((u) => new URL(u).host));
   assert.deepEqual([...hosts].sort(), Object.values(QUOTE_HOSTS).sort());
-  for (const u of http.calls) assert.equal(new URL(u).protocol, 'https:');
+  for (const u of absolute) assert.equal(new URL(u).protocol, 'https:');
+
+  // And the only request that is NOT to one of those hosts is the parameterless
+  // universe blob on our own origin — a relative path, so it cannot be pointed
+  // anywhere else, and it carries no symbol (that is the privacy property).
+  assert.deepEqual(http.calls.filter((u) => !/^https:/.test(u)), [UNIVERSE_PATH]);
 });
 
 test('a hostile provider value cannot be resolved off Object.prototype', async () => {
@@ -442,4 +454,167 @@ test('the http port is required, and the CoinGecko request is built from the sec
   assert.equal(url.searchParams.get('vs_currency'), 'chf');
   assert.equal(url.searchParams.get('days'), '365', 'clamped to what the public tier serves');
   assert.equal(url.pathname, '/api/v3/coins/bitcoin/market_chart');
+});
+
+// ---------------------------------------------------------------------------
+// The pre-fetched universe (myportfolio-18h.19)
+// ---------------------------------------------------------------------------
+//
+// The shape the server serves: no per-caller anything, one close per symbol, and
+// the close as a decimal STRING so it reaches parseFixed digit-wise — the same
+// way Twelve Data's already does. `date` is the exchange's calendar day.
+const UNIVERSE_BLOB = {
+  asOf: '2026-07-29T06:12:00Z',
+  quotes: {
+    AAPL: { date: '2026-07-28', close: '340.079987', currency: 'USD' },
+    'SAP.DE': { date: '2026-07-28', close: '251.55', currency: 'EUR' },
+  },
+};
+
+// A transport that answers the universe path from the blob and everything else
+// from `handler`, so a test can see which of the two paths served a security.
+function withUniverse(blob, handler = () => json({})) {
+  return transport((url, init, n) => (String(url) === UNIVERSE_PATH ? json(blob) : handler(url, init, n)));
+}
+
+test('the universe prices a stock with NO api key, and never contacts the provider', async () => {
+  // The whole point of the bead: no key in the vault, none in the deployment
+  // environment, and the position is still valued.
+  const f = setup({ securities: { sec_aapl: AAPL }, quoteProviders: {} });
+  const http = withUniverse(UNIVERSE_BLOB);
+  const report = await createQuotesDomain({ records: f.records, http }).refresh();
+
+  assert.deepEqual(report.skipped, [], 'no_api_key must not fire for a symbol the universe covers');
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.updated.map((u) => [u.securityId, u.provider]), [['sec_aapl', 'universe']]);
+  assert.deepEqual(providerCalls(http), [], 'the provider was contacted anyway');
+  assert.deepEqual(f.all('price')[0].closes, { '07-28': 34007998700 });
+});
+
+test('the request carries no symbol — that IS the privacy property', async () => {
+  const f = setup({ securities: { sec_aapl: AAPL, sec_btc: BTC } });
+  const http = withUniverse(UNIVERSE_BLOB, () => json(COINGECKO_MARKET_CHART));
+  await createQuotesDomain({ records: f.records, http }).refresh();
+
+  // Exactly the bare path, once. A query string here would make this the
+  // consented on-demand proxy (18h.8) without the consent.
+  assert.deepEqual(http.calls.filter((u) => String(u).startsWith('/api/')), [UNIVERSE_PATH]);
+  assert.ok(!UNIVERSE_PATH.includes('?'));
+});
+
+// LANDMINE 6 / §5. The acceptance criterion: the blob crosses the float boundary
+// at the SAME place a provider payload does, so the stored integer is identical.
+test('a universe close normalises to the same 1e8 units as the provider path', async () => {
+  const viaUniverse = setup({ securities: { sec_aapl: AAPL }, quoteProviders: {} });
+  await createQuotesDomain({ records: viaUniverse.records, http: withUniverse(UNIVERSE_BLOB) }).refresh();
+
+  // Twelve Data's recorded payload carries the same close for the same day.
+  const viaProvider = setup({ securities: { sec_aapl: AAPL } });
+  await createQuotesDomain({
+    records: viaProvider.records,
+    http: transport(() => json(TWELVEDATA_SINGLE)),
+  }).refresh({ days: 2 });
+
+  assert.equal(UNIVERSE_BLOB.quotes.AAPL.close, TWELVEDATA_SINGLE.values[0].close, 'the fixtures must agree first');
+  assert.equal(
+    viaUniverse.all('price')[0].closes['07-28'],
+    viaProvider.all('price')[0].closes['07-28'],
+    'the same decimal must produce the same fixed-point integer whichever path carried it'
+  );
+  assert.equal(viaUniverse.all('price')[0].closes['07-28'], 34007998700);
+});
+
+test('a currency mismatch is a fallthrough, not a 100x error', async () => {
+  // The instrument matched by ticker but is quoted in something else — Yahoo
+  // prices London lines in pence. Applying that to a GBP position would be wrong
+  // by a factor of 100, so the universe declines and the user's provider answers.
+  const f = setup({ securities: { sec_aapl: { ...AAPL, currency: 'GBP' } } });
+  const http = withUniverse(UNIVERSE_BLOB, () => json(TWELVEDATA_SINGLE));
+  const report = await createQuotesDomain({ records: f.records, http }).refresh();
+
+  assert.deepEqual(report.updated.map((u) => u.provider), ['twelvedata']);
+  assert.equal(providerCalls(http).length, 1);
+});
+
+test('a symbol outside the universe still resolves through the user\'s own provider', async () => {
+  const f = setup({ securities: { sec_aapl: AAPL, sec_msft: MSFT } });
+  const http = withUniverse(UNIVERSE_BLOB, () => json(TWELVEDATA_MULTI));
+  const report = await createQuotesDomain({ records: f.records, http }).refresh();
+
+  assert.deepEqual(
+    report.updated.map((u) => [u.securityId, u.provider]).sort(),
+    [['sec_aapl', 'universe'], ['sec_msft', 'twelvedata']],
+  );
+  // Only the symbol the universe missed was sent to the provider — the point of
+  // trying the universe first is that it does not spend the user's quota.
+  assert.equal(new URL(providerCalls(http)[0]).searchParams.get('symbol'), 'MSFT');
+});
+
+test('an unavailable or empty universe is a fallthrough, never a reported error', async () => {
+  for (const answer of [json({}, 503), json({ quotes: {} }), json('nonsense'), new Error('offline')]) {
+    const f = setup({ securities: { sec_aapl: AAPL } });
+    const http = transport((url) => (String(url) === UNIVERSE_PATH ? answer : json(TWELVEDATA_SINGLE)));
+    const report = await createQuotesDomain({ records: f.records, http }).refresh();
+
+    assert.deepEqual(report.errors, [], 'a universe failure is not the user\'s problem to fix');
+    assert.deepEqual(report.updated.map((u) => u.provider), ['twelvedata']);
+  }
+});
+
+test('a malformed universe entry is dropped, not stored as a price', async () => {
+  const blobs = [
+    { quotes: { AAPL: { date: '2026-7-28', close: '340.07', currency: 'USD' } } }, // unpadded day
+    { quotes: { AAPL: { date: '2026-07-28', close: '0', currency: 'USD' } } },     // not a price
+    { quotes: { AAPL: { date: '2026-07-28', close: 'oops', currency: 'USD' } } },
+    { quotes: { AAPL: { date: '2026-07-28', close: '-5', currency: 'USD' } } },
+    { quotes: { AAPL: 'not an object' } },
+  ];
+  for (const blob of blobs) {
+    const f = setup({ securities: { sec_aapl: AAPL }, quoteProviders: {} });
+    const report = await createQuotesDomain({ records: f.records, http: withUniverse(blob) }).refresh();
+    assert.deepEqual(report.updated, [], `stored a price from ${JSON.stringify(blob)}`);
+    assert.deepEqual(report.skipped.map((s) => s.reason), ['no_api_key'], 'it must fall through to the provider');
+  }
+});
+
+test('a hostile universe key cannot be resolved off Object.prototype', async () => {
+  const f = setup({
+    securities: { sec_x: { ...AAPL, quote: { provider: 'twelvedata', symbol: 'constructor' } } },
+    quoteProviders: {},
+  });
+  const report = await createQuotesDomain({ records: f.records, http: withUniverse(UNIVERSE_BLOB) }).refresh();
+  assert.deepEqual(report.skipped.map((s) => s.reason), ['no_api_key']);
+  assert.deepEqual(report.updated, []);
+});
+
+test('`universe: false` never asks — the switch ?demo=1 uses', async () => {
+  // ARCHITECTURE.md §12: the demo fixture carries its own deterministic price
+  // history. Live prices would break its tests and show real market prices
+  // against invented share counts.
+  const f = setup({ securities: { sec_aapl: AAPL } });
+  const http = withUniverse(UNIVERSE_BLOB);
+  await createQuotesDomain({ records: f.records, http, universe: false }).refresh();
+  assert.deepEqual(http.calls.filter((u) => String(u).startsWith('/api/')), []);
+});
+
+test('a history backfill goes to the provider, because the blob has one close', async () => {
+  const f = setup({ securities: { sec_aapl: AAPL } });
+  const http = withUniverse(UNIVERSE_BLOB, () => json(TWELVEDATA_SINGLE));
+  const report = await createQuotesDomain({ records: f.records, http }).refresh({ days: 30 });
+
+  assert.deepEqual(http.calls.filter((u) => String(u).startsWith('/api/')), [],
+    'the universe cannot answer a history request, so it must not suppress one');
+  assert.deepEqual(report.updated.map((u) => u.provider), ['twelvedata']);
+});
+
+test('a universe close merges into an existing chunk rather than replacing it', async () => {
+  const f = setup({
+    securities: { sec_aapl: AAPL },
+    quoteProviders: {},
+    prices: [{ recordId: 'price_sec_aapl_2026', securityId: 'sec_aapl', year: '2026', closes: { '01-02': 1_000_000_000 } }],
+  });
+  await createQuotesDomain({ records: f.records, http: withUniverse(UNIVERSE_BLOB) }).refresh();
+
+  assert.equal(f.all('price').length, 1, 'a second chunk for the same security-year is a lost merge');
+  assert.deepEqual(f.all('price')[0].closes, { '01-02': 1_000_000_000, '07-28': 34007998700 });
 });

@@ -24,9 +24,9 @@ RUN mkdir -p /out/data /out/tmp
 
 FROM scratch
 
-# The server makes no outbound calls today. The opt-in quote proxy
-# (ARCHITECTURE.md 7) will, and on scratch its first HTTPS request would fail
-# x509 with no hint why. One layer, ~200KB, buys that out.
+# The server DOES make outbound calls: the pre-fetched quote universe
+# (ARCHITECTURE.md 7) fetches daily closes on a timer, and on scratch its first
+# HTTPS request would fail x509 with no hint why. One layer, ~200KB.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # --chown is required, not cosmetic: COPY --from resets ownership to root

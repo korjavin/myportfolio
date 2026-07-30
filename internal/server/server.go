@@ -202,6 +202,13 @@ func (a *API) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/recovery/enroll/begin", limitByIP(a.limiter, a.trustedProxies, a.recoveryEnrollBegin))
 	mux.HandleFunc("POST /api/recovery/enroll/finish", limitByIP(a.limiter, a.trustedProxies, a.recoveryEnrollFinish))
 
+	// The pre-fetched quote universe (universe.go). Deliberately UNauthenticated,
+	// parameterless and identical for every caller — that is the privacy
+	// property, not an oversight: it cannot leak a holding because it cannot be
+	// asked about one. It takes no session because there is nothing to scope, and
+	// no rate limit because it is one cached blob served from a single row.
+	mux.HandleFunc("GET /api/quotes/universe", a.getQuoteUniverse)
+
 	// Everything else is behind a session, which also re-checks that the
 	// session's credential has not been revoked.
 	mux.Handle("PUT /api/recovery-material", a.requireSession(http.HandlerFunc(a.putRecoveryMaterial)))

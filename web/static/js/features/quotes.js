@@ -14,11 +14,24 @@
 //     A refresh button that retries is how someone loses their daily allowance
 //     in one tap. So `refresh()` is called exactly once per press, the button
 //     is disabled while it runs, and nothing here re-invokes it on failure.
-//  2. NOTHING GOES THROUGH OUR ORIGIN. The `http` port below is the browser's
+//  2. NO SYMBOL GOES THROUGH OUR ORIGIN. The `http` port below is the browser's
 //     own fetch, aimed at the provider with the user's own key — that is the
 //     privacy differentiator, and there is no fallback that would route a
 //     symbol past our server. (The opt-in proxy is a separate, off-by-default
 //     bead with its own consent screen.)
+//
+//     ONE request does go to our origin, and it is the reason the rule is
+//     phrased about symbols rather than about hosts: the domain module asks
+//     GET /api/quotes/universe for a parameterless blob of daily closes over a
+//     fixed symbol list, identical for every caller, and filters it locally
+//     (myportfolio-18h.19). It carries no symbol, so the server still cannot
+//     learn a holding — and it is what makes stocks work with no API key at all.
+//     Nothing here builds that URL either; the domain module owns it.
+//
+//     IN DEMO MODE IT IS SWITCHED OFF (§12, and the bead's landmine 5): the
+//     fixture carries its own deterministic price history, and live prices would
+//     both break the tests that pin it and show real market prices against
+//     invented share counts.
 //  3. VALUATION NEVER DEPENDS ON THE NETWORK. A failed refresh is a *report*,
 //     never an error screen and never a blank total: quotes.js writes what
 //     landed into `price` records and portfolio.js reads only what is stored,
@@ -55,8 +68,16 @@ export const STALE_AFTER_MS = 4 * DAY_MS;
 const quotes = createQuotesDomain({
     records,
     // The injected transport, §3. Browser-direct to the provider host; nothing
-    // here builds a URL, so nothing here can point it at our own origin.
+    // here builds a URL, so nothing here decides what is contacted.
     http: (url, init) => window.fetch(url, init),
+    // The same test boot.js's demo branch makes, made independently rather than
+    // imported from it: this module is loaded by the screens, not by boot, and a
+    // shared mutable flag would be one import-order accident away from letting
+    // live prices into the fixture.
+    // `globalThis.location?.` rather than a bare `location`: this module is
+    // imported by node:test, where a top-level browser global is a load error
+    // rather than a missing feature.
+    universe: !new URLSearchParams(globalThis.location?.search ?? '').has('demo'),
 });
 
 const providerLabels = new Map(QUOTE_PROVIDERS.map((p) => [p.name, p.label]));
@@ -224,7 +245,8 @@ function paint() {
     if (!slot) return;
     if (busy) {
         slot.replaceChildren(ui.card(ui.emptyState(
-            'Fetching quotes, browser-direct with your own key. A provider with a per-minute '
+            'Fetching quotes. Common symbols come from a shared daily list that names nobody; '
+            + 'anything else goes browser-direct with your own key. A provider with a per-minute '
             + 'limit is waited out rather than retried, so this can take a moment.'
         )));
         return;

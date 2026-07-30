@@ -3,9 +3,18 @@
 //
 // The whole point: fetches go **browser-direct with the user's own key**, so
 // our server never sees a ticker. That is the differentiator against
-// Capitally/Ghostfolio, and it is why there is no proxy here and no request to
-// our own origin. (An opt-in proxy is a separate, off-by-default feature behind
-// an explicit consent screen — myportfolio-18h.8. Not this module.)
+// Capitally/Ghostfolio, and it is why there is no proxy here. (An opt-in proxy
+// is a separate, off-by-default feature behind an explicit consent screen —
+// myportfolio-18h.8. Not this module.)
+//
+// THERE IS ONE REQUEST TO OUR OWN ORIGIN, and it keeps that property rather than
+// bending it (myportfolio-18h.19): GET /api/quotes/universe. It takes no
+// parameters and answers with one blob covering a FIXED symbol list, identical
+// for every caller, which this module filters to the securities it holds — so
+// the server cannot learn a holding, because every client sends the same
+// request. It is tried FIRST because it needs no API key at all, and anything it
+// misses falls through to the user's own provider exactly as before. A universe
+// that is down, empty or stale is not an error anywhere: it is a fallthrough.
 //
 // Pure module: no window/document/indexedDB, and the HTTP transport arrives as
 // an injected `http` port rather than a global (ARCHITECTURE.md §1 and the
@@ -63,6 +72,12 @@ const PROVIDERS = {
     load: loadTwelveData,
   },
 };
+
+// The pre-fetched universe (myportfolio-18h.19). A PATH, not a host: it is our
+// own origin, which the CSP already admits as 'self', so this deliberately does
+// NOT belong in QUOTE_HOSTS — adding it there would widen connect-src for
+// nothing.
+export const UNIVERSE_PATH = '/api/quotes/universe';
 
 const ISO_DAY_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
@@ -123,7 +138,12 @@ function priceUnits(raw) {
 //              on a half-open connection — a captive portal, not clean airplane
 //              mode — and that is the difference between "prices are stale" and
 //              "the app is frozen".
-export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 10_000 }) {
+//   universe   try the keyless pre-fetched universe before the user's provider.
+//              On by default; the ONE caller that turns it off is ?demo=1, whose
+//              fixture carries its own deterministic price history and must never
+//              show real market prices against invented share counts
+//              (ARCHITECTURE.md §12).
+export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 10_000, universe = true }) {
   if (typeof http !== 'function') throw new TypeError('quotes: an http port is required');
 
   // Enforced two ways on purpose. The signal is what a real transport honours
@@ -224,7 +244,7 @@ export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 
     }
 
     const wanted = securityIds ? new Set(securityIds) : null;
-    const targets = new Map(); // provider name -> [{ securityId, symbol, currency }]
+    const pending = []; // [{ securityId, symbol, currency, provider }]
 
     for (const sec of securityRecs) {
       if (wanted && !wanted.has(sec.recordId)) continue;
@@ -237,12 +257,30 @@ export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 
         skipped.push({ securityId: sec.recordId, reason: 'unknown_provider', provider });
         continue;
       }
-      if (!targets.has(provider)) targets.set(provider, []);
-      targets.get(provider).push({
+      pending.push({
         securityId: sec.recordId,
         symbol: String(symbol),
         currency: sec.currency || settings.reportingCurrency || 'USD',
+        provider,
       });
+    }
+
+    // The universe pass, before any provider is touched: it needs no key, so
+    // whatever it covers costs the user nothing and spends none of their quota.
+    // Everything it misses drops through to the provider loop below unchanged —
+    // that is the fallback the design leans on, not a degraded mode.
+    //
+    // Only for `days === 1`. The blob carries ONE close per symbol, so a caller
+    // asking for history is asking for something it cannot answer, and quietly
+    // satisfying the latest day would then suppress the backfill.
+    const remaining = universe && days === 1 && pending.length > 0
+      ? await applyUniverse(pending, chunks, updated)
+      : pending;
+
+    const targets = new Map(); // provider name -> [{ securityId, symbol, currency }]
+    for (const t of remaining) {
+      if (!targets.has(t.provider)) targets.set(t.provider, []);
+      targets.get(t.provider).push(t);
     }
 
     for (const [name, list] of targets) {
@@ -312,6 +350,53 @@ export function createQuotesDomain({ records, http, now = Date.now, timeoutMs = 
     // across reloads is the screen's call, not this module's; the durable
     // fallback is portfolio.js's per-position `priceDate`.
     return { updated, skipped, errors, fetchedAt: updated.length ? now() : null };
+  }
+
+  // applyUniverse — write whatever the keyless universe blob covers, and return
+  // the targets it did not so the provider loop can have them.
+  //
+  // A failure here is NEVER reported: the universe is a bonus, the user's own key
+  // is the supported path (§7), and a symbol the blob missed produces exactly the
+  // same outcome as a blob that never arrived. So there is nothing a user could
+  // act on and nothing to put in `errors`.
+  //
+  // MATCHING IS BY TICKER AND CURRENCY, BOTH. The blob is keyed by the upstream's
+  // symbol, which is the same string as the configured `quote.symbol` for a US
+  // listing and for the `.DE`/`.PA`-suffixed European ones — but a bare ticker
+  // can name different instruments in different symbologies, and the same
+  // instrument can be quoted in a different unit (Yahoo prices London lines in
+  // pence). Requiring the currency to agree with the security's own is what turns
+  // "probably the same instrument" into "wrong by 100x is impossible": a
+  // mismatch is not a guess, it is a fallthrough to the provider that was
+  // configured for this security.
+  async function applyUniverse(pending, chunks, updated) {
+    let quotes = null;
+    try {
+      const body = await getJson(UNIVERSE_PATH);
+      if (body && body.quotes && typeof body.quotes === 'object') quotes = body.quotes;
+    } catch {
+      // Down, blocked, 404 on an older server build, or offline. Fall through.
+    }
+    if (!quotes) return pending;
+
+    const remaining = [];
+    for (const t of pending) {
+      // Own-property lookup, like every other lookup keyed by user data here.
+      const entry = own(quotes, t.symbol.toUpperCase());
+      const date = entry && ISO_DAY_RE.test(String(entry.date)) ? entry.date : null;
+      // The one float boundary, and it is the SAME one every provider crosses —
+      // priceUnits/parseFixed at the §5 price scale of 1e8. The server forwards
+      // the upstream's decimal literal as a string and never parses it, so this
+      // is the only place a price becomes a number in the whole path.
+      const units = date && entry.currency === t.currency ? priceUnits(entry.close) : null;
+      if (units === null) {
+        remaining.push(t);
+        continue;
+      }
+      const written = await writeCloses(t.securityId, { [date]: units }, chunks);
+      updated.push({ securityId: t.securityId, provider: 'universe', ...written });
+    }
+    return remaining;
   }
 
   // Merge closes into the §4 per-security-year chunks. Merge, not replace: the
