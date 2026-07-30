@@ -1,7 +1,9 @@
 # myportfolio
 
 A local-first, offline-capable PWA for tracking investments — stocks, ETFs, crypto and cash.
-Mobile-first, and built so the server can never read your data.
+Mobile-first, and built so the server never sees your portfolio: it stores one opaque encrypted blob
+and cannot read, merge or interpret it. There is exactly one opt-in exception, off by default, and it
+is spelled out below rather than buried — the hosted AI connector.
 
 **Status: early. Under active construction, not yet usable.**
 
@@ -36,25 +38,37 @@ that only ever sees ciphertext.
 ## Ask an AI about your portfolio
 
 The point of keeping a rigorous, complete portfolio locally is being able to ask questions of it. So
-there is an MCP connector: **Claude Desktop or Claude Code, talking to your own portfolio, through a
-server that cannot read a word of it.** Eight read-only operations — holdings, valuation, performance
-(TTWROR and IRR), price history, transactions, and the list of everything the engine could not
-compute.
+there is an MCP connector: an AI talking to *your own unlocked browser tab*, which computes the
+answers. Eight read-only operations — holdings, valuation, performance (TTWROR and IRR), price
+history, transactions, and the list of everything the engine could not compute.
 
-It works the only way it can when the server holds nothing but ciphertext: a small shim process on
-your machine talks end-to-end encrypted to *your own unlocked browser tab*, which computes the
-answers. The server is a blind pipe.
+**There are two ways to connect, and they are not equally private. Pick deliberately.**
 
-What that means in practice, up front rather than as a discovery:
+|  | **Local shim** | **Hosted URL** |
+| --- | --- | --- |
+| Setup | build and run a process on your machine | paste one URL into the client |
+| Works with | Claude Desktop, Claude Code | Claude, ChatGPT, anything taking a remote MCP server |
+| Needs a Go toolchain | yes | no |
+| Can our server read your questions and answers? | **no — it is a blind pipe** | **yes, in transit** |
+
+The hosted URL is off by default and takes an explicit consent step, because enabling it hands our
+server your pairing key so it can speak MCP on your tab's behalf. It is stored sealed at rest, which
+defends a leak of that one table — not a stolen database file, which carries the sealing key too. **It
+is not zero knowledge and we will not describe it as such.** The local shim keeps the original
+guarantee and remains the recommendation.
+
+What applies to both, up front rather than as a discovery:
 
 - **A question only works while a tab of the app is open and unlocked** on one of your devices. There
-  is no server-side fallback, by design.
+  is no server-side fallback, by design. If nothing is unlocked you get a sentence telling you so, not
+  a hang.
 - **It is read-only.** It cannot add, change or delete anything.
-- **The shim is not published as a binary** — you build it with `go build ./cmd/mcpshim`, so a Go
-  toolchain on the machine running Claude is a prerequisite today.
-- **The relay in the middle cannot read your data, but it does see message sizes and timing**, and
-  whatever you tell the AI leaves this app for the model provider. Both are real costs, and both are
-  stated in full rather than in a footnote.
+- **The hosted URL is a capability** — anyone holding it can query your portfolio while a tab is
+  unlocked. Treat it like a password; revoking it drops the server's copy of the key.
+- **Even the blind relay sees message sizes and timing**, and whatever you tell the AI leaves this app
+  for the model provider. Both are real costs, and both are stated in full rather than in a footnote.
+- **A redeploy drops pairings**, so a connector configured before a restart needs re-pairing from
+  Settings; rotating the server's session secret has the same effect.
 
 [`docs/AI-CONNECTOR.md`](docs/AI-CONNECTOR.md) is the setup guide and the honest threat-model delta.
 Note that `?demo=1` deliberately does **not** answer connector calls — a demo tab would serve

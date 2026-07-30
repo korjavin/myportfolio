@@ -1,7 +1,39 @@
 # Asking an AI about your portfolio — the MCP connector
 
-Connect Claude Desktop or Claude Code to your own portfolio, over a server that cannot read a word of
-it. Pinned in [ARCHITECTURE.md §11](ARCHITECTURE.md); this file is the user- and operator-facing half.
+Connect an AI to your own portfolio. Pinned in [ARCHITECTURE.md §11](ARCHITECTURE.md); this file is
+the user- and operator-facing half.
+
+**There are two ways to connect and they are not equally private. Read §0 first — everything from §1
+on describes the local shim.**
+
+## 0. Which tier you are choosing
+
+| | **Tier 1 — local shim** | **Tier 2 — hosted URL** |
+| --- | --- | --- |
+| What you do | build and run `mcpshim` on your machine | paste one URL into your client |
+| Works with | Claude Desktop, Claude Code | Claude, ChatGPT, any remote MCP client |
+| Needs a Go toolchain | yes | no |
+| **Our server can read your questions and answers** | **no — the relay is blind** | **yes, in transit** |
+| Pairing key held by | only your machine and your tab | also our server, sealed at rest |
+| Zero knowledge | yes | **no** |
+
+Tier 2 exists because Tier 1 needs a Go toolchain and a long-running local process, which rules out
+ChatGPT and most phones. The trade is real and unavoidable: for our server to speak MCP to a hosted
+client it must hold your pairing key and seal frames on your tab's behalf, so **it sees plaintext
+requests and responses in transit**. The key is stored sealed (AES-256-GCM under a key derived from the
+server's session secret), which defends a leak of that one table — **not** a stolen database file or a
+replica, because those carry the sealing key alongside the ciphertext it protects. Sealing is defence
+in depth here, not a boundary.
+
+So Tier 2 is **opt-in, per-account, revocable, and off by default**, and the consent step in Settings
+says all of the above at the moment you enable it. Enable it in Settings › Connect Claude, copy the
+URL, and **treat that URL as a password** — anyone holding it can query your portfolio while one of
+your tabs is unlocked. Revoking drops the server's copy of the key, and deliberately does **not**
+disconnect a Tier-1 shim, because both tiers share one relay pairing.
+
+Two things that would otherwise surprise you: a **redeploy drops in-memory pairings**, and **rotating
+the server's session secret orphans every stored key**. Either way a configured connector must re-pair
+from Settings — and it says so, rather than timing out.
 
 ```
 Claude Desktop/Code ──stdio── mcpshim ──wss:// ciphertext ──► relay ──► your unlocked PWA tab
@@ -228,6 +260,11 @@ The rest of this product's privacy story ([ARCHITECTURE.md §6](ARCHITECTURE.md)
 sees one opaque blob per account, written on a debounced schedule, and can infer almost nothing from
 it. **Turning on the connector genuinely weakens that**, in three specific ways, and the point of this
 section is that you get to decide with the facts rather than after them.
+
+**On Tier 2 there is a fourth, and it subsumes the first: our server sees the plaintext.** Points 1–3
+below are written for Tier 1, where the relay is blind and metadata is all it gets. If you enabled the
+hosted URL, replace point 1 with "the server reads the questions and the answers in transit" and read
+§0 again. Everything in points 2 and 3 still applies unchanged.
 
 **1. The relay learns metadata.** It cannot open a frame — every message is encrypted to a key it
 never receives, with the pairing id bound into the AEAD so a frame cannot be replayed into another
