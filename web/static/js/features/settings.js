@@ -546,18 +546,17 @@ function connectClaudeCard() {
             fail(err, ui.button('wg-toolbar-btn wg-toolbar-btn--primary', 'Try again', paint));
             return;
         }
-        // Deliberately NOT refreshResponder() here, and the reason is a race
-        // codex found: refreshResponder returns early while an election is still
-        // in flight (`electing`), so a reconcile whose readPairing landed before
-        // the user pressed Finish releases the lock with no responder — and the
-        // Finish call is the one that gets dropped. The result is a saved pairing
-        // that answers nothing until a reload, i.e. "no device online" with an
-        // unlocked tab open, which is the least attributable symptom this whole
-        // feature can produce.
+        // No refreshResponder() here, and do not add an `await` one either: the
+        // promise settles only once the Web Lock is GRANTED, so a tab queued
+        // behind another tab's responder would sit on "Starting a pairing…"
+        // forever.
         //
-        // Awaiting it instead is worse: the promise settles only once the lock is
-        // GRANTED, so a tab queued behind another tab's responder would sit on
-        // "Starting a pairing…" forever.
+        // (The dropped-refresh race this used to route around — refreshResponder
+        // returning early while an election was in flight, losing exactly the
+        // Finish call and leaving a saved pairing that answers nothing until a
+        // reload — is fixed at the root in mcp-responder.js: reconcile now
+        // coalesces instead of dropping, bd myportfolio-ybp.11. An unawaited call
+        // here would be harmless today. It is still unnecessary, below.)
         //
         // Nothing is needed here anyway. The relay closed the old device leg with
         // 4409 the moment mint() replaced the pairing, and mcp-responder's
