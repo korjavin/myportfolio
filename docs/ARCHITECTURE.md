@@ -661,6 +661,31 @@ the same unattributable symptom the pairing-code checksum was added to eliminate
   retried — re-evicting its replacement forever. Closing with `4409` makes the loser step aside.
 - One device leg per pairing is the standing limitation.
 
+### The pairing TTL is an IDLE timeout, and the refresh deliberately excludes connecting
+
+`pairingTTL` used to run from the mint and was never refreshed, so a pairing that worked all day was
+dead the next morning and the shim reported it gone. It is now an **idle** timeout: any relayed frame,
+on either leg, pushes the expiry out.
+
+Two details that are decisions, not incidentals:
+
+- **Connecting does not refresh it — only a frame does.** The PWA tab reconnects its device leg on its
+  own, so refreshing on join would make an abandoned route immortal. A connected but silent leg must
+  still be allowed to expire, and there is a test holding exactly that shape.
+- **`touch` extends a live pairing only.** The sweep runs hourly while every lookup rejects an expired
+  record on sight, so without that guard a leg connected across the expiry instant could renew inside
+  the grace window — once a day, forever — resurrecting a pairing no fresh dial could reach. Expiry is
+  monotone by construction.
+
+Expiry still closes with **`4404`**, never `4409`: the account genuinely has no pairing left, so the
+responder's record really is a tombstone and purging it is right.
+
+**Restarts remain unhandled, deliberately.** The table is still in-memory, so a redeploy — which here
+is every green push to master — drops every pairing, and the `4404`/401 paths handle it. Note the
+fact that makes persistence *thinkable* if this ever becomes intolerable: **the pairing key is not in
+the table**, so persisting a routing id would add no secret to the server. It would still be a
+schema, and the `4404` machinery exists precisely so its loss is survivable, so it has not been built.
+
 ### Where we diverge from the sibling
 
 Its catalog is **generated** from a 106-operation Go registry (`cmd/genmcpcatalog`). We have no such
