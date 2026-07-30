@@ -561,6 +561,40 @@ work"* rather than as a TLS warning — a symptom that points nowhere near its c
 complete portfolio locally is to be able to ask an AI about it. Ported from
 `../medicationtrackerbot`'s Tier 1 design (`docs/cloud-mode.md` §MCP), which solved the hard part.
 
+### Two tiers, and the trade between them is the whole design
+
+**Tier 1 — the local stdio shim** (built, §11 below). The user runs `cmd/mcpshim` on their own
+machine; it holds the pairing key, so frames are sealed end to end and **the relay is blind**. Zero
+knowledge is intact. The cost is friction: a Go toolchain, a local process, and it only works with
+clients that can launch a local stdio server.
+
+**Tier 2 — a hosted URL the user registers as a remote MCP server** (`myportfolio-hosted` epic).
+The user pastes a URL into Claude or ChatGPT; there is no local binary and nothing to build. The
+endpoint lives on our own server and relays to the unlocked tab, answering with a clear
+*"no unlocked device"* error when none is available.
+
+**Tier 2 gives up the blind-relay property, and that is not a detail to bury.** For our server to
+speak MCP to Claude's servers it must hold the pairing key and seal frames on the browser's behalf —
+so **it sees MCP requests and responses in plaintext in transit**. Ported from the sibling's design,
+which is honest about this in the place that matters most: the **tool description itself** says so, so
+the model relays it to the user rather than it living only in a settings screen. The key is stored
+sealed at rest (AES-256 under an HKDF-derived key from the session secret), which defends a
+database-only breach — it is **not** zero knowledge, and must never be described as such.
+
+Tier 2 is therefore **opt-in, per-account, revocable, and off by default**, and Tier 1 remains the
+recommendation for anyone who wants the original guarantee. Both tiers reuse the same relay, the same
+responder, and the same catalog; Tier 2's endpoint drives an internal `mcpshim.Client`, so there is
+one wire contract and not two.
+
+**Where we diverge from the sibling, and it makes ours simpler.** Its token is deliberately short
+enough to *type across devices*, which costs it entropy — hence its "the throttle IS the security"
+reasoning and a per-account failed-attempt limiter. We have no such constraint: the user copies a URL
+into a config file and never retypes it. So **our token is high-entropy**, the brute-force argument
+disappears, and per-IP throttling becomes defence in depth rather than the boundary itself. This also
+sidesteps a problem single origin would otherwise create — the sibling resolves the account from the
+subdomain *before* checking the token, so it can scope the throttle per account; we cannot, because
+the token is the only identifier we have until it is looked up.
+
 ### The shape, and why it has to be this shape
 
 "MCP" and "a server that cannot read your data" genuinely conflict — **our server cannot answer a
